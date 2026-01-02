@@ -1,5 +1,40 @@
 @import "tailwindcss";
 
+/* Map Styles */
+.leaflet-container {
+  background: #0b0f17;
+}
+
+/* The SVG circles Leaflet draws can take CSS filters */
+.stop-white-glow {
+  filter:
+    drop-shadow(0 0 2px rgba(255, 255, 255, 0.4)) drop-shadow(0 0 8px rgba(255, 255, 255, 0.2));
+}
+
+.vehicle-red-glow {
+  filter:
+    drop-shadow(0 0 10px rgba(220, 20, 60, 0.35)) drop-shadow(0 0 22px rgba(220, 20, 60, 0.18));
+}
+
+/* Hover / glow styling for shuttle vehicles */
+.vehicle-marker-inner {
+  background: rgba(5, 5, 5, 0.9);
+  border-radius: 999px;
+  padding: 4px;
+  box-shadow: 0 0 14px var(--vehicle-color, #ffffff);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Ensure SVG itself uses currentColor so we can tint it */
+.vehicle-marker-inner svg {
+  display: block;
+  width: 18px;
+  height: 18px;
+  color: var(--vehicle-color, #ffffff);
+}
+
 @theme {
   --color-crimson: #A51C30;
 }

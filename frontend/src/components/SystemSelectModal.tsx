@@ -21,6 +21,7 @@ export const SystemSelectModal = ({ onSelect, isOpen }: SystemSelectModalProps) 
 
     useEffect(() => {
         if (isOpen && systems.length === 0) {
+            // eslint-disable-next-line react-hooks/set-state-in-effect
             setLoading(true);
             // Fetch from backend
             fetch("http://localhost:8000/systems")

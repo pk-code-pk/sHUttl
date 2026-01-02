@@ -21,6 +21,7 @@ function App() {
       try {
         const parsed = JSON.parse(stored);
         if (parsed?.id && parsed?.name) {
+          // eslint-disable-next-line react-hooks/set-state-in-effect
           setSystem(parsed);
         }
       } catch (e) {

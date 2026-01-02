@@ -60,21 +60,21 @@ def stopdict(stop):
         "lng": stop.longitude,
     }
 
-def vehicledict(vehicle):
-    lat = getattr(vehicle, "latitude", None) 
-    lng = getattr(vehicle, "longitude", None) 
+def vehicledict(vehicle, route_color=None):
+    lat = getattr(vehicle, "latitude", None)
+    lng = getattr(vehicle, "longitude", None)
     if(lat is not None and lng is not None):
         lat = float(lat)
         lng = float(lng)
-
 
     return {
         "id": vehicle.id,
         "route_id": getattr(vehicle, "routeId", None),
         "route_name": getattr(vehicle, "routeName", None),
         "lat": lat,
-        "lng": lng, 
-        
+        "lng": lng,
+        "heading": getattr(vehicle, "heading", None),
+        "color": route_color,
     }
 
 
@@ -142,7 +142,22 @@ def list_systems():
 @app.get("/vehicles")
 def list_vehicles(system_id: int = DEFAULT_SYSTEM_ID):
     vehicles = get_vehicles(system_id)
-    return [vehicledict(v) for v in vehicles] 
+    routes = get_routes(system_id)
+
+    # Map route.myid -> color string
+    route_colors = {}
+    for r in routes:
+        rid = getattr(r, "myid", None)
+        if rid is not None:
+            # Prefer groupColor, fallback to color
+            color = getattr(r, "groupColor", None) or getattr(r, "color", None)
+            if color:
+                # Ensure color starts with #
+                if not color.startswith("#"):
+                    color = f"#{color}"
+                route_colors[str(rid)] = color
+
+    return [vehicledict(v, route_colors.get(str(getattr(v, "routeId", None)))) for v in vehicles]
 
 
 @app.get("/nearest_stop")
