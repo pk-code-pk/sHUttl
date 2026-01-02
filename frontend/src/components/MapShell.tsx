@@ -2,9 +2,15 @@ import clsx from "clsx";
 
 interface MapShellProps {
     className?: string;
+    systemId: number | null;
 }
 
-export const MapShell = ({ className }: MapShellProps) => {
+export const MapShell = ({ className, systemId }: MapShellProps) => {
+    // Placeholder for future map logic using systemId
+    if (systemId) {
+        console.log("MapShell: Active system ID:", systemId);
+    }
+
     return (
         <div className={clsx("relative w-full h-full bg-neutral-900 overflow-hidden", className)}>
             {/* Placeholder map pattern */}

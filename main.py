@@ -1,11 +1,21 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from collections import defaultdict, deque
 import datetime
 from datetime import datetime 
 from datetime import timedelta
 import math 
-from passio_cilent import get_stops, get_vehicles, get_routes, DEFAULT_SYSTEM_ID
+from passio_client import get_stops, get_vehicles, get_routes, DEFAULT_SYSTEM_ID, get_all_systems
 app = FastAPI() 
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 #intialize our app with FastAPI framework 
 @app.get("/health")
 #test health of our api endpoint  
@@ -110,6 +120,24 @@ def match_stops(lat: float, lng:float, lat2: float, lng2: float, system_id: int 
 def list_stops(system_id: int = DEFAULT_SYSTEM_ID):
     stops = get_stops(system_id)
     return [stopdict(s) for s in stops]
+
+@app.get("/systems")
+def list_systems():
+    systems = get_all_systems()
+    # Sort by name, default to empty string if None
+    systems_sorted = sorted(systems, key=lambda s: (getattr(s, "name", "") or "").lower())
+    
+    return [
+        {
+            "id": s.id,
+            "name": s.name,
+            "username": getattr(s, "username", None),
+            "homepage": getattr(s, "homepage", None),
+        }
+        for s in systems_sorted
+    ]
+ 
+
 
 @app.get("/vehicles")
 def list_vehicles(system_id: int = DEFAULT_SYSTEM_ID):

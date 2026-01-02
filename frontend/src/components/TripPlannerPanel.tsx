@@ -1,13 +1,21 @@
 import { motion } from "framer-motion";
 import { MapPin, Navigation, ArrowUpDown, Home } from "lucide-react";
 import clsx from "clsx";
+import logo from "../assets/logo.svg";
+
+interface System {
+    id: number;
+    name: string;
+}
 
 interface TripPlannerPanelProps {
     className?: string;
     onGo?: () => void;
+    system: System | null;
+    onChangeSystem: () => void;
 }
 
-export const TripPlannerPanel = ({ className, onGo }: TripPlannerPanelProps) => {
+export const TripPlannerPanel = ({ className, onGo, system, onChangeSystem }: TripPlannerPanelProps) => {
     return (
         <motion.div
             className={clsx(
@@ -19,14 +27,34 @@ export const TripPlannerPanel = ({ className, onGo }: TripPlannerPanelProps) => 
             transition={{ delay: 0.5, duration: 0.5 }}
         >
             <div className="p-4 space-y-4">
-                {/* Header */}
-                <h2 className="text-lg font-semibold text-white">Where to?</h2>
+                {/* Header with System Selector */}
+                <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                        <img src={logo} alt="Crimson Shuttle" className="h-6 w-auto opacity-90" />
+                        <div className="flex flex-col">
+                            <span className="text-sm font-bold text-white leading-tight">
+                                Crimson Shuttle
+                            </span>
+                            <span className="text-[10px] text-neutral-400 font-medium leading-tight">
+                                {system ? system.name : 'Select system'}
+                            </span>
+                        </div>
+                    </div>
+
+                    <button
+                        type="button"
+                        onClick={onChangeSystem}
+                        className="inline-flex items-center rounded-full border border-neutral-700/50 bg-neutral-800/50 px-2.5 py-1 text-[10px] font-medium text-neutral-300 hover:border-crimson/50 hover:text-white transition-all"
+                    >
+                        Change
+                    </button>
+                </div>
 
                 {/* Inputs */}
-                <div className="space-y-3 relative">
+                <div className="space-y-3 relative pt-1">
 
                     {/* Connector Line */}
-                    <div className="absolute left-[1.15rem] top-8 bottom-8 w-0.5 bg-neutral-700/50 -z-10" />
+                    <div className="absolute left-[1.15rem] top-9 bottom-4 w-0.5 bg-neutral-700/50 -z-10" />
 
                     {/* Origin */}
                     <div className="flex items-center gap-3">
@@ -72,7 +100,13 @@ export const TripPlannerPanel = ({ className, onGo }: TripPlannerPanelProps) => 
 
                     <button
                         onClick={onGo}
-                        className="bg-crimson hover:bg-red-700 text-white font-medium px-6 py-2 rounded-lg transition-colors shadow-lg shadow-crimson/20"
+                        disabled={!system}
+                        className={clsx(
+                            "font-medium px-6 py-2 rounded-lg transition-all shadow-lg",
+                            system
+                                ? "bg-crimson hover:bg-[#8a1523] text-white shadow-crimson/20"
+                                : "bg-neutral-800 text-neutral-500 cursor-not-allowed shadow-none"
+                        )}
                     >
                         Go
                     </button>

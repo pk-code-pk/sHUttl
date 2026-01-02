@@ -1,6 +1,7 @@
+```python
 # vehicle_test.py
 
-from passio_cilent import get_vehicles  # same helper you already wrote
+from passio_client import get_stops, get_vehicles, get_routes
 
 def main():
     vehicles = get_vehicles()

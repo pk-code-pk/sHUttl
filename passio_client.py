@@ -33,3 +33,6 @@ def get_vehicles(system_id: int | None = None):
     system = get_system(system_id)
     return system.getVehicles() 
 
+def get_all_systems():
+    return passiogo.getSystems()
+
