@@ -6,6 +6,7 @@ from datetime import datetime
 from datetime import timedelta
 import math 
 from passio_client import get_stops, get_vehicles, get_routes, DEFAULT_SYSTEM_ID, get_all_systems
+from typing import Any
 app = FastAPI() 
 
 app.add_middleware(
@@ -137,6 +138,103 @@ def list_systems():
         for s in systems_sorted
     ]
  
+
+
+def route_paths_for_system(system_id: int = DEFAULT_SYSTEM_ID) -> list[dict[str, Any]]:
+    """
+    Build ordered polyline paths for each route in the system based on stops.routesAndPositions.
+    Returns a list of dicts with:
+      - route_id
+      - route_name
+      - short_name
+      - color
+      - path: [{ lat, lng, stop_id, stop_name }, ...]
+    """
+    stops = get_stops(system_id)
+    routes = get_routes(system_id)
+
+    # Map route_id (myid) -> route object
+    routes_by_id: dict[str, Any] = {}
+    for r in routes:
+        rid = getattr(r, "myid", None)
+        if rid is not None:
+            routes_by_id[str(rid)] = r
+
+    # Build mapping: route_id -> list of (sequenceIndex, stop)
+    route_to_points: dict[str, list[tuple[int, Any]]] = {}
+
+    for s in stops:
+        routes_and_positions = getattr(s, "routesAndPositions", {}) or {}
+        # routes_and_positions is a dict: { routeId: [direction, sequenceIndex] }
+        for rid, pos in routes_and_positions.items():
+            # pos might be [direction, index] or just index; be defensive
+            seq_index = None
+            if isinstance(pos, (list, tuple)):
+                if len(pos) >= 2:
+                    seq_index = pos[1]
+                elif len(pos) == 1:
+                    seq_index = pos[0]
+            else:
+                seq_index = pos
+
+            if seq_index is None:
+                continue
+
+            try:
+                seq_index_int = int(seq_index)
+            except (TypeError, ValueError):
+                continue
+
+            rid_str = str(rid)
+            route_to_points.setdefault(rid_str, []).append((seq_index_int, s))
+
+    result: list[dict[str, Any]] = []
+
+    for rid, seq_stops in route_to_points.items():
+        route_obj = routes_by_id.get(rid)
+        if not route_obj:
+            continue
+
+        # Sort by sequence index
+        seq_stops_sorted = sorted(seq_stops, key=lambda x: x[0])
+
+        path: list[dict[str, Any]] = []
+        for _, s in seq_stops_sorted:
+            lat = getattr(s, "latitude", None)
+            lng = getattr(s, "longitude", None)
+            if lat is None or lng is None:
+                continue
+            path.append({
+                "lat": float(lat),
+                "lng": float(lng),
+                "stop_id": s.id,
+                "stop_name": s.name,
+            })
+
+        if not path:
+            continue
+
+        color = getattr(route_obj, "groupColor", None) or getattr(route_obj, "color", None)
+        if color and not color.startswith("#"):
+            color = f"#{color}"
+
+        result.append({
+            "route_id": rid,
+            "route_name": route_obj.name,
+            "short_name": getattr(route_obj, "shortName", None),
+            "color": color,
+            "path": path,
+        })
+
+    return result
+
+
+@app.get("/route_paths")
+def list_route_paths(system_id: int = DEFAULT_SYSTEM_ID):
+    """
+    Return ordered polyline paths for all routes in a system, based on stops.routesAndPositions.
+    """
+    return route_paths_for_system(system_id)
 
 
 @app.get("/vehicles")

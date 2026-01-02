@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
-import { MapContainer, TileLayer, CircleMarker, Popup } from 'react-leaflet';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { MapContainer, TileLayer, CircleMarker, Popup, Polyline, useMap } from 'react-leaflet';
 import type { LatLngExpression } from 'leaflet';
 import { ShuttleMarker } from './ShuttleMarker';
-import type { Stop, Vehicle } from './types';
+import type { Stop, Vehicle, RoutePath } from './types';
 
 interface MapShellProps {
     systemId: number | null;
@@ -10,10 +10,38 @@ interface MapShellProps {
 
 const STOP_WHITE = "#FFFFFF";
 
+function MapSystemRecenter({
+    center,
+    systemId,
+}: {
+    center: LatLngExpression;
+    systemId: number | null;
+}) {
+    const map = useMap();
+    const prevSystemId = useRef<number | null>(null);
+
+    useEffect(() => {
+        // Only recenter when systemId changes OR when center updates for that system
+        if (!systemId) return;
+
+        prevSystemId.current = systemId;
+
+        // Fly to the new system center
+        map.flyTo(center, 15, {
+            duration: 0.8,
+        });
+    }, [center, systemId, map]);
+
+    return null;
+}
+
 export const MapShell = ({ systemId }: MapShellProps) => {
     const [stops, setStops] = useState<Stop[]>([]);
     const [vehicles, setVehicles] = useState<Vehicle[]>([]);
+    const [routes, setRoutes] = useState<RoutePath[]>([]);
+    const [showRoutes, setShowRoutes] = useState(false);
     const [loading, setLoading] = useState(false);
+    const [loadingRoutes, setLoadingRoutes] = useState(false);
 
     useEffect(() => {
         if (!systemId) {
@@ -21,6 +49,8 @@ export const MapShell = ({ systemId }: MapShellProps) => {
             setStops([]);
             // eslint-disable-next-line react-hooks/set-state-in-effect
             setVehicles([]);
+            // eslint-disable-next-line react-hooks/set-state-in-effect
+            setRoutes([]);
             return;
         }
         setLoading(true);
@@ -59,6 +89,26 @@ export const MapShell = ({ systemId }: MapShellProps) => {
         };
     }, [systemId]);
 
+    // Fetch routes when showRoutes is toggled
+    useEffect(() => {
+        if (!systemId || !showRoutes) {
+            // eslint-disable-next-line react-hooks/set-state-in-effect
+            setRoutes([]);
+            return;
+        }
+
+        setLoadingRoutes(true);
+        fetch(`http://localhost:8000/route_paths?system_id=${systemId}`)
+            .then((res) => res.json())
+            .then((data: RoutePath[]) => {
+                setRoutes(Array.isArray(data) ? data : []);
+            })
+            .catch(() => {
+                setRoutes([]);
+            })
+            .finally(() => setLoadingRoutes(false));
+    }, [systemId, showRoutes]);
+
     // Compute center from stops, fallback to Harvard if none
     const center: LatLngExpression = useMemo(() => {
         if (stops.length === 0) {
@@ -81,12 +131,47 @@ export const MapShell = ({ systemId }: MapShellProps) => {
                     scrollWheelZoom={true}
                     zoomControl={false}
                 >
+                    {/* This will auto-fly the map whenever systemId/center changes */}
+                    <MapSystemRecenter center={center} systemId={systemId} />
+
                     {/* Stadia Dark Theme */}
                     <TileLayer
                         attribution='&copy; <a href="https://stadiamaps.com/">Stadia Maps</a>, &copy; <a href="https://openmaptiles.org/">OpenMapTiles</a> &copy; <a href="http://openstreetmap.org">OpenStreetMap</a> contributors'
                         url="https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png"
                         maxZoom={20}
                     />
+
+                    {/* Route polylines (glowing) */}
+                    {showRoutes &&
+                        routes.map((r) => {
+                            if (!r.path || r.path.length === 0) return null;
+
+                            const positions: LatLngExpression[] = r.path.map((p) => [p.lat, p.lng]);
+                            const color = r.color || '#a51c30'; // fallback to harvard crimson if missing
+
+                            return (
+                                <React.Fragment key={r.route_id}>
+                                    {/* Glow layer (thicker, translucent) */}
+                                    <Polyline
+                                        positions={positions}
+                                        pathOptions={{
+                                            color,
+                                            weight: 10,
+                                            opacity: 0.28,
+                                        }}
+                                    />
+                                    {/* Core line (thinner, bright) */}
+                                    <Polyline
+                                        positions={positions}
+                                        pathOptions={{
+                                            color,
+                                            weight: 4,
+                                            opacity: 0.95,
+                                        }}
+                                    />
+                                </React.Fragment>
+                            );
+                        })}
 
                     {/* Stops: White Glowing Dots */}
                     {stops.map((stop) => (
@@ -152,6 +237,28 @@ export const MapShell = ({ systemId }: MapShellProps) => {
                         ? 'Loading stops…'
                         : `${stops.length} stops • ${vehicles.length} vehicles`
                     : 'Select a system to begin'}
+            </div>
+
+            {/* Route toggle button */}
+            <div className="pointer-events-auto absolute bottom-8 left-8 z-[1000]">
+                <button
+                    type="button"
+                    onClick={() => setShowRoutes((prev) => !prev)}
+                    className={[
+                        'rounded-full border px-4 py-2 text-xs font-medium transition-all backdrop-blur-md shadow-lg',
+                        showRoutes
+                            ? 'border-crimson bg-crimson/20 text-crimson animate-pulse-subtle'
+                            : 'border-white/10 bg-black/60 text-neutral-300 hover:border-white/20',
+                    ].join(' ')}
+                >
+                    <div className="flex items-center gap-2">
+                        <div className={`h-1.5 w-1.5 rounded-full ${showRoutes ? 'bg-crimson shadow-[0_0_8px_rgba(165,28,48,0.6)]' : 'bg-neutral-500'}`} />
+                        {showRoutes ? 'Hide Routes' : 'Show Routes'}
+                        {loadingRoutes && showRoutes && (
+                            <div className="h-3 w-3 animate-spin rounded-full border-2 border-crimson/30 border-t-crimson" />
+                        )}
+                    </div>
+                </button>
             </div>
         </div>
     );

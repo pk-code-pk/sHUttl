@@ -14,3 +14,18 @@ export interface Vehicle {
     heading?: number | null;
     color?: string | null;
 }
+
+export interface RoutePoint {
+    lat: number;
+    lng: number;
+    stop_id: string | number;
+    stop_name: string;
+}
+
+export interface RoutePath {
+    route_id: string;
+    route_name: string | null;
+    short_name: string | null;
+    color: string | null;
+    path: RoutePoint[];
+}
