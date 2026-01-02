@@ -2,9 +2,13 @@ import { useState, useEffect, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { MapPin, Navigation, ArrowUpDown, Clock, Info, ChevronDown } from "lucide-react";
 import clsx from "clsx";
-import type { TripResponse, TripSegment } from "./types";
-import { computeOverallEtaLabel } from "../utils/eta";
-import { formatWalkLeg } from "../utils/walk";
+import type { TripResponse } from "./types";
+import {
+    metersToMinutes,
+    formatMinutesLabel,
+    isWalkReasonable,
+    etaSecondsToMinutes,
+} from "../utils/timeAndDistance";
 import logo from "../assets/logo.svg";
 
 interface System {
@@ -61,8 +65,6 @@ export const TripPlannerPanel = ({
     const [originCoords, setOriginCoords] = useState<{ lat: number; lng: number } | null>(null);
     const [locating, setLocating] = useState(false);
     const [locationError, setLocationError] = useState<string | null>(null);
-
-    const overallEtaLabel = computeOverallEtaLabel(trip);
 
     // Autocomplete filtering logic
     function filterStops(query: string, stops: StopOption[]): StopOption[] {
@@ -224,44 +226,43 @@ export const TripPlannerPanel = ({
         }
     };
 
-    const formatEta = (seg: TripSegment) => {
-        const nb = seg.next_bus;
-        if (!nb) return 'No real-time data';
-        if (nb.eta_to_origin_stop_minutes != null && nb.eta_to_origin_stop_minutes >= 1) {
-            return `${nb.eta_to_origin_stop_minutes.toFixed(1)} min`;
-        }
-        if (nb.eta_to_origin_stop != null) {
-            const seconds = nb.eta_to_origin_stop;
-            if (seconds < 60) return '< 1 min';
-            return `${Math.round(seconds / 60)} min`;
-        }
-        return 'No ETA';
-    };
+    const normalizedSegments = useMemo(() => {
+        if (!trip || !trip.segments) return [];
+        return trip.segments.map((seg) => {
+            const etaSeconds = seg.next_bus?.eta_to_origin_stop ?? null;
+            const etaMin = etaSecondsToMinutes(etaSeconds);
+            return {
+                ...seg,
+                _etaMinutes: etaMin,
+            };
+        });
+    }, [trip]);
 
-    const hasTrip = !!trip && trip.segments && trip.segments.length > 0;
+    const hasTrip = !!trip && normalizedSegments.length > 0;
 
-    const ORIGIN_WALK_THRESHOLD_M = 30;
-    const DEST_WALK_THRESHOLD_M = 30;
+    const originWalkM = trip?.origin.distance_m ?? 0;
+    const originWalkMin = metersToMinutes(originWalkM);
+    const shouldShowOriginWalk = isWalkReasonable(originWalkM);
 
-    const originNeedsWalk =
-        !!trip &&
-        trip.origin &&
-        typeof trip.origin.distance_m === 'number' &&
-        trip.origin.distance_m > ORIGIN_WALK_THRESHOLD_M;
+    const destWalkM = trip?.destination.distance_m ?? 0;
+    const destWalkMin = metersToMinutes(destWalkM);
+    const shouldShowDestWalk = isWalkReasonable(destWalkM);
 
-    const destNeedsWalk =
-        !!trip &&
-        trip.destination &&
-        typeof trip.destination.distance_m === 'number' &&
-        trip.destination.distance_m > DEST_WALK_THRESHOLD_M;
+    const numSegments = normalizedSegments.length;
+    const numTransfers = Math.max(0, numSegments - 1);
 
-    const originWalkInfo = originNeedsWalk
-        ? formatWalkLeg(trip.origin.distance_m)
-        : null;
+    const firstEtaMinutes = useMemo(() => {
+        const mins = normalizedSegments
+            .map((s) => s._etaMinutes)
+            .filter((m): m is number => m != null && Number.isFinite(m))
+            .sort((a, b) => a - b);
+        return mins[0] ?? null;
+    }, [normalizedSegments]);
 
-    const destWalkInfo = destNeedsWalk
-        ? formatWalkLeg(trip.destination.distance_m)
-        : null;
+    const totalWalkM =
+        (shouldShowOriginWalk ? originWalkM : 0) +
+        (shouldShowDestWalk ? destWalkM : 0);
+    const totalWalkMin = metersToMinutes(totalWalkM);
 
     return (
         <motion.div
@@ -573,24 +574,53 @@ export const TripPlannerPanel = ({
                                                 className="space-y-4"
                                             >
                                                 {/* Overview */}
-                                                <div className="rounded-xl bg-neutral-900/70 p-3 text-xs border border-white/5">
-                                                    <div className="flex items-center justify-between mb-2">
-                                                        <div className="flex items-center gap-2">
-                                                            <div className="w-1.5 h-1.5 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]" />
-                                                            <span className="text-[11px] font-bold text-white">Route Overview</span>
+                                                <div className="rounded-xl bg-neutral-900/80 p-3 text-xs border border-white/5 shadow-sm">
+                                                    <div className="flex items-center justify-between">
+                                                        <div className="flex flex-col">
+                                                            <div className="flex items-center gap-2 mb-1">
+                                                                <div className="w-1.5 h-1.5 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]" />
+                                                                <span className="text-[11px] font-bold text-white uppercase tracking-tight">Route Overview</span>
+                                                            </div>
+                                                            <div className="text-[10px] text-neutral-300">
+                                                                From <span className="font-medium text-white">{trip.origin.nearest_stop.name}</span> to{' '}
+                                                                <span className="font-medium text-white">{trip.destination.nearest_stop.name}</span>
+                                                            </div>
+                                                            <div className="mt-1 text-[10px] text-neutral-500 font-medium">
+                                                                {numSegments} bus segment{numSegments !== 1 ? 's' : ''} •{' '}
+                                                                {numTransfers > 0
+                                                                    ? `${numTransfers} transfer${numTransfers > 1 ? 's' : ''}`
+                                                                    : 'no transfers'}
+                                                            </div>
                                                         </div>
-                                                        <div className="rounded-full bg-neutral-950/80 px-2 py-1 text-[10px] text-neutral-300 font-medium">
-                                                            {overallEtaLabel}
+
+                                                        <div className="text-right flex flex-col items-end gap-1">
+                                                            {firstEtaMinutes != null ? (
+                                                                <div className="rounded-full bg-crimson/10 border border-crimson/20 px-2 py-1 text-[10px] text-crimson font-bold">
+                                                                    First bus in {Math.round(firstEtaMinutes)} min
+                                                                </div>
+                                                            ) : (
+                                                                <div className="rounded-full bg-neutral-950/80 px-2 py-1 text-[10px] text-neutral-500 font-medium">
+                                                                    No ETA
+                                                                </div>
+                                                            )}
+                                                            {totalWalkMin != null && totalWalkMin > 0 && (
+                                                                <div className="text-[10px] text-neutral-400 font-medium">
+                                                                    Walking ~{Math.round(totalWalkMin)} min
+                                                                </div>
+                                                            )}
                                                         </div>
                                                     </div>
-                                                    <div className="text-[10px] text-neutral-300 leading-relaxed">
-                                                        From <span className="font-medium text-white">{trip.origin.nearest_stop.name}</span> to{' '}
-                                                        <span className="font-medium text-white">{trip.destination.nearest_stop.name}</span>
-                                                    </div>
+
+                                                    {!isWalkReasonable(trip.origin.distance_m) && !isWalkReasonable(trip.destination.distance_m) && (
+                                                        <div className="mt-2 pt-2 border-t border-white/5 flex items-start gap-1.5 text-[9px] text-amber-500/90 leading-relaxed italic">
+                                                            <Info size={10} className="shrink-0 mt-0.5" />
+                                                            <span>You seem far from this shuttle system. For realistic directions, set your origin near campus.</span>
+                                                        </div>
+                                                    )}
                                                 </div>
 
                                                 {/* Walking leg: origin → nearest stop */}
-                                                {originNeedsWalk && originWalkInfo && (
+                                                {shouldShowOriginWalk && (
                                                     <div className="rounded-xl bg-neutral-900/80 p-3 text-xs border border-white/5">
                                                         <div className="flex items-center justify-between">
                                                             <div className="flex items-center gap-2">
@@ -600,21 +630,21 @@ export const TripPlannerPanel = ({
                                                                 <div className="font-bold text-white text-[11px]">Walk to stop</div>
                                                             </div>
                                                             <span className="rounded-full bg-neutral-950/80 px-2 py-1 text-[10px] text-neutral-300 font-medium">
-                                                                {originWalkInfo.minutesLabel}
+                                                                {originWalkMin != null ? formatMinutesLabel(originWalkMin) : ''}
                                                             </span>
                                                         </div>
                                                         <div className="mt-1.5 text-neutral-300 text-[10px] leading-relaxed">
                                                             Walk from your location to{' '}
                                                             <span className="font-medium text-white">{trip.origin.nearest_stop.name}</span>.
                                                         </div>
-                                                        <div className="mt-1 text-[9px] text-neutral-500 font-medium">
-                                                            ~{Math.round(trip.origin.distance_m)} m
+                                                        <div className="mt-1 text-[9px] text-neutral-500 font-medium tracking-tight">
+                                                            ~{Math.round(originWalkM)} m
                                                         </div>
                                                     </div>
                                                 )}
 
                                                 {/* Segments */}
-                                                {trip.segments.map((seg, idx) => (
+                                                {normalizedSegments.map((seg, idx) => (
                                                     <div
                                                         key={`${seg.route_id}-${idx}`}
                                                         className="relative pl-4 border-l-2 border-dashed border-neutral-700 pb-2 last:pb-0"
@@ -629,9 +659,17 @@ export const TripPlannerPanel = ({
                                                                 <span className="text-[11px] font-bold text-white tracking-tight">
                                                                     {seg.short_name || seg.route_name || 'Shuttle'}
                                                                 </span>
-                                                                <div className="flex items-center gap-1.5 text-[10px] text-neutral-400 bg-neutral-900/50 px-2 py-0.5 rounded-full">
-                                                                    <Clock size={10} />
-                                                                    {formatEta(seg)}
+                                                                <div className="flex items-center gap-1.5">
+                                                                    {seg._etaMinutes == null ? (
+                                                                        <span className="rounded-full bg-neutral-950/80 px-2 py-0.5 text-[9px] text-neutral-500 font-medium">
+                                                                            No real-time data
+                                                                        </span>
+                                                                    ) : (
+                                                                        <span className="rounded-full bg-neutral-950/80 px-2 py-0.5 text-[9px] text-neutral-100 font-bold flex items-center gap-1">
+                                                                            <Clock size={10} className="text-neutral-400" />
+                                                                            {formatMinutesLabel(seg._etaMinutes)}
+                                                                        </span>
+                                                                    )}
                                                                 </div>
                                                             </div>
 
@@ -660,7 +698,7 @@ export const TripPlannerPanel = ({
                                                 ))}
 
                                                 {/* Walking leg: destination stop → final destination */}
-                                                {destNeedsWalk && destWalkInfo && (
+                                                {shouldShowDestWalk && (
                                                     <div className="rounded-xl bg-neutral-900/80 p-3 text-xs border border-white/5">
                                                         <div className="flex items-center justify-between">
                                                             <div className="flex items-center gap-2">
@@ -670,7 +708,7 @@ export const TripPlannerPanel = ({
                                                                 <div className="font-bold text-white text-[11px]">Walk to destination</div>
                                                             </div>
                                                             <span className="rounded-full bg-neutral-950/80 px-2 py-1 text-[10px] text-neutral-300 font-medium">
-                                                                {destWalkInfo.minutesLabel}
+                                                                {destWalkMin != null ? formatMinutesLabel(destWalkMin) : ''}
                                                             </span>
                                                         </div>
                                                         <div className="mt-1.5 text-neutral-300 text-[10px] leading-relaxed">
@@ -678,8 +716,8 @@ export const TripPlannerPanel = ({
                                                             <span className="font-medium text-white">{trip.destination.nearest_stop.name}</span>{' '}
                                                             walk to your destination.
                                                         </div>
-                                                        <div className="mt-1 text-[9px] text-neutral-500 font-medium">
-                                                            ~{Math.round(trip.destination.distance_m)} m
+                                                        <div className="mt-1 text-[9px] text-neutral-500 font-medium tracking-tight">
+                                                            ~{Math.round(destWalkM)} m
                                                         </div>
                                                     </div>
                                                 )}
