@@ -1,4 +1,4 @@
-import passiogo 
+import passiogo
 
 HARVARD_SYSTEM_ID = 831 
 # hardcode harvard sys id 
