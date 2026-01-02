@@ -3,6 +3,7 @@ import { AnimatePresence } from "framer-motion";
 import { SplashScreen } from "./components/SplashScreen";
 import { Layout } from "./components/Layout";
 import { SystemSelectModal } from "./components/SystemSelectModal";
+import type { TripResponse } from "./components/types";
 
 interface System {
   id: number;
@@ -13,6 +14,7 @@ function App() {
   const [showSplash, setShowSplash] = useState(true);
   const [system, setSystem] = useState<System | null>(null);
   const [showSystemModal, setShowSystemModal] = useState(false);
+  const [trip, setTrip] = useState<TripResponse | null>(null);
 
   // Load system from localStorage on mount
   useEffect(() => {
@@ -42,6 +44,7 @@ function App() {
     setSystem(newSystem);
     localStorage.setItem('system', JSON.stringify(newSystem));
     setShowSystemModal(false);
+    setTrip(null); // Reset trip when system changes
   };
 
   return (
@@ -53,6 +56,8 @@ function App() {
       <Layout
         system={system}
         onChangeSystem={() => setShowSystemModal(true)}
+        trip={trip}
+        onTripChange={setTrip}
       />
 
       <SystemSelectModal

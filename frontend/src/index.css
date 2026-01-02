@@ -5,15 +5,124 @@
   background: #0b0f17;
 }
 
-/* The SVG circles Leaflet draws can take CSS filters */
-.stop-white-glow {
-  filter:
-    drop-shadow(0 0 2px rgba(255, 255, 255, 0.4)) drop-shadow(0 0 8px rgba(255, 255, 255, 0.2));
+/* Stop Marker Hitbox - large clickable area */
+.stop-marker-container {
+  position: relative;
+  width: 28px;
+  height: 28px;
+  cursor: pointer;
 }
 
-.vehicle-red-glow {
-  filter:
-    drop-shadow(0 0 10px rgba(220, 20, 60, 0.35)) drop-shadow(0 0 22px rgba(220, 20, 60, 0.18));
+/* Visible glowing dot - centered in hitbox (default white) */
+.stop-marker-dot {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  transform: translate(-50%, -50%);
+  border-radius: 9999px;
+  background: #f9fafb;
+  box-shadow: 0 0 12px rgba(248, 250, 252, 0.85);
+  transition: transform 0.15s ease-out, box-shadow 0.15s ease-out;
+}
+
+.stop-marker-container:hover .stop-marker-dot {
+  transform: translate(-50%, -50%) scale(1.3);
+  box-shadow: 0 0 16px rgba(248, 250, 252, 1);
+}
+
+/* Crimson variant for origin/destination stops - with radar pulse effect */
+.stop-marker-dot--crimson {
+  width: 10px;
+  height: 10px;
+  background: #ef4444;
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.9), 0 0 16px rgba(239, 68, 68, 0.5);
+}
+
+/* Expanding ring pulse effect - first ring */
+.stop-marker-dot--crimson::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 10px;
+  height: 10px;
+  transform: translate(-50%, -50%);
+  border-radius: 9999px;
+  border: 2px solid rgba(239, 68, 68, 0.8);
+  animation: radar-pulse 1.8s ease-out infinite;
+}
+
+/* Second ring - offset timing for continuous effect */
+.stop-marker-dot--crimson::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 10px;
+  height: 10px;
+  transform: translate(-50%, -50%);
+  border-radius: 9999px;
+  border: 2px solid rgba(239, 68, 68, 0.8);
+  animation: radar-pulse 1.8s ease-out infinite 0.9s;
+}
+
+@keyframes radar-pulse {
+  0% {
+    width: 10px;
+    height: 10px;
+    opacity: 1;
+    border-width: 2px;
+  }
+
+  100% {
+    width: 50px;
+    height: 50px;
+    opacity: 0;
+    border-width: 1px;
+  }
+}
+
+.stop-marker-container:hover .stop-marker-dot--crimson {
+  transform: translate(-50%, -50%) scale(1.3);
+  box-shadow: 0 0 12px rgba(239, 68, 68, 1), 0 0 24px rgba(239, 68, 68, 0.7);
+}
+
+/* User location marker (blue pulsing dot) */
+.user-location-container {
+  position: relative;
+  width: 24px;
+  height: 24px;
+  cursor: pointer;
+}
+
+.user-location-dot {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 12px;
+  height: 12px;
+  transform: translate(-50%, -50%);
+  border-radius: 9999px;
+  background: #3b82f6;
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 10px rgba(59, 130, 246, 0.8), 0 0 24px rgba(59, 130, 246, 0.4);
+  animation: pulse-blue 2s ease-in-out infinite;
+}
+
+@keyframes pulse-blue {
+
+  0%,
+  100% {
+    box-shadow: 0 0 10px rgba(59, 130, 246, 0.8), 0 0 24px rgba(59, 130, 246, 0.4);
+    transform: translate(-50%, -50%) scale(1);
+  }
+
+  50% {
+    box-shadow: 0 0 16px rgba(59, 130, 246, 1), 0 0 36px rgba(59, 130, 246, 0.6);
+    transform: translate(-50%, -50%) scale(1.1);
+  }
 }
 
 /* Hover / glow styling for shuttle vehicles */
@@ -35,8 +144,10 @@
   color: var(--vehicle-color, #ffffff);
 }
 
-@theme {
-  --color-crimson: #A51C30;
+:root {
+  --color-crimson: #A20202;
+  --color-crimson-dark: #8a0101;
+  --color-crimson-light: #c41e1e;
 }
 
 @layer base {
@@ -52,9 +163,19 @@
     @apply min-h-screen flex flex-col;
   }
 }
+
 @keyframes pulse-subtle {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.85; transform: scale(0.98); }
+
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  50% {
+    opacity: 0.85;
+    transform: scale(0.98);
+  }
 }
 
 .animate-pulse-subtle {

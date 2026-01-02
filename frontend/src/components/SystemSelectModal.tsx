@@ -63,14 +63,14 @@ export const SystemSelectModal = ({ onSelect, isOpen }: SystemSelectModalProps) 
                         <p className="text-sm text-neutral-400">Select the transit system you want to track.</p>
                     </div>
 
-                    {/* Content */}
-                    <div className="p-6 overflow-y-auto space-y-6">
+                    {/* Content - with mobile-friendly scroll */}
+                    <div className="p-6 overflow-y-auto overscroll-contain touch-pan-y [-webkit-overflow-scrolling:touch] space-y-6">
 
                         {/* Primary Option: Harvard */}
                         <div>
                             <button
                                 onClick={() => onSelect({ id: 831, name: "Harvard Shuttles" })}
-                                className="w-full bg-crimson hover:bg-[#8a1523] text-white p-4 rounded-xl flex items-center justify-between group transition-all transform active:scale-[0.98]"
+                                className="w-full bg-[#A20202] hover:bg-[#8a0101] text-white p-4 rounded-xl flex items-center justify-between group transition-all transform active:scale-[0.98]"
                             >
                                 <div className="flex flex-col items-start">
                                     <span className="font-bold text-lg">Harvard Shuttles</span>
@@ -102,11 +102,11 @@ export const SystemSelectModal = ({ onSelect, isOpen }: SystemSelectModalProps) 
                                     <div className="flex items-center justify-center py-8 text-neutral-500 text-sm">Loading systems...</div>
                                 ) : (
                                     filteredSystems.map(sys => (
-                                        <button
+                                        <div
                                             key={sys.id}
                                             onClick={() => setSelectedId(sys.id)}
                                             className={clsx(
-                                                "w-full text-left px-4 py-3 rounded-lg text-sm transition-colors flex items-center justify-between",
+                                                "w-full text-left px-4 py-3 rounded-lg text-sm transition-colors flex items-center justify-between cursor-pointer",
                                                 selectedId === sys.id
                                                     ? "bg-neutral-800 text-white font-medium ring-1 ring-neutral-700"
                                                     : "text-neutral-300 hover:bg-neutral-800/50 hover:text-white"
@@ -115,6 +115,7 @@ export const SystemSelectModal = ({ onSelect, isOpen }: SystemSelectModalProps) 
                                             <span>{sys.name}</span>
                                             {selectedId === sys.id && (
                                                 <button
+                                                    type="button"
                                                     onClick={(e) => {
                                                         e.stopPropagation();
                                                         onSelect(sys);
@@ -124,7 +125,7 @@ export const SystemSelectModal = ({ onSelect, isOpen }: SystemSelectModalProps) 
                                                     Select
                                                 </button>
                                             )}
-                                        </button>
+                                        </div>
                                     ))
                                 )}
                                 {!loading && filteredSystems.length === 0 && (

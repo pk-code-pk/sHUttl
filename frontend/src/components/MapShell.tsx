@@ -1,47 +1,122 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { MapContainer, TileLayer, CircleMarker, Popup, Polyline, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Popup, Polyline, useMap, Marker } from 'react-leaflet';
+import L from 'leaflet';
 import type { LatLngExpression } from 'leaflet';
 import { ShuttleMarker } from './ShuttleMarker';
-import type { Stop, Vehicle, RoutePath } from './types';
+import type { Stop, Vehicle, RoutePath, TripResponse, TripSegment } from './types';
 
 interface MapShellProps {
     systemId: number | null;
+    trip: TripResponse | null;
+    userLocation?: { lat: number; lng: number } | null;
 }
 
-const STOP_WHITE = "#FFFFFF";
 
-function MapSystemRecenter({
-    center,
-    systemId,
+function computeTripBounds(trip: TripResponse | null): L.LatLngBounds | null {
+    if (!trip) return null;
+
+    const pts: [number, number][] = [];
+
+    const o = trip.origin.nearest_stop;
+    const d = trip.destination.nearest_stop;
+    if (o) pts.push([o.lat, o.lng]);
+    if (d) pts.push([d.lat, d.lng]);
+
+    for (const segment of trip.segments ?? []) {
+        for (const s of segment.stops ?? []) {
+            pts.push([s.lat, s.lng]);
+        }
+    }
+
+    if (pts.length === 0) return null;
+
+    return L.latLngBounds(pts);
+}
+
+// Separate component to safely use useMap()
+function MapController({
+    systemBounds,
+    activeTripBounds,
+    setMap,
 }: {
-    center: LatLngExpression;
-    systemId: number | null;
+    systemBounds: L.LatLngBounds | null;
+    activeTripBounds: L.LatLngBounds | null;
+    setMap: (map: L.Map) => void;
 }) {
     const map = useMap();
-    const prevSystemId = useRef<number | null>(null);
 
     useEffect(() => {
-        // Only recenter when systemId changes OR when center updates for that system
-        if (!systemId) return;
+        if (map) setMap(map);
+    }, [map, setMap]);
 
-        prevSystemId.current = systemId;
+    // Fit to system bounds when it first becomes available
+    const hasInitialSystemFit = useRef(false);
+    useEffect(() => {
+        if (map && systemBounds && !hasInitialSystemFit.current) {
+            map.fitBounds(systemBounds, { padding: [80, 80] });
+            hasInitialSystemFit.current = true;
+        }
+    }, [map, systemBounds]);
 
-        // Fly to the new system center
-        map.flyTo(center, 15, {
-            duration: 0.8,
-        });
-    }, [center, systemId, map]);
+    // Reset initial fit if system changes
+    useEffect(() => {
+        hasInitialSystemFit.current = false;
+    }, [systemBounds]);
+
+    // Fit to trip bounds whenever a new one is set
+    useEffect(() => {
+        if (map && activeTripBounds) {
+            map.fitBounds(activeTripBounds, { padding: [80, 80] });
+        }
+    }, [map, activeTripBounds]);
 
     return null;
 }
 
-export const MapShell = ({ systemId }: MapShellProps) => {
+export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
     const [stops, setStops] = useState<Stop[]>([]);
     const [vehicles, setVehicles] = useState<Vehicle[]>([]);
     const [routes, setRoutes] = useState<RoutePath[]>([]);
     const [showRoutes, setShowRoutes] = useState(false);
     const [loading, setLoading] = useState(false);
     const [loadingRoutes, setLoadingRoutes] = useState(false);
+
+    const [systemBounds, setSystemBounds] = useState<L.LatLngBounds | null>(null);
+    const [activeTripBounds, setActiveTripBounds] = useState<L.LatLngBounds | null>(null);
+    const [mapInstance, setMapInstance] = useState<L.Map | null>(null);
+
+    // Stop Icon with larger hitbox (white default)
+    const stopIcon = useMemo(() => L.divIcon({
+        className: 'stop-marker-container',
+        html: `<div class="stop-marker-dot"></div>`,
+        iconSize: [28, 28],
+        iconAnchor: [14, 14],
+    }), []);
+
+    // Crimson pulsing icon for origin/destination stops
+    const tripStopIcon = useMemo(() => L.divIcon({
+        className: 'stop-marker-container',
+        html: `<div class="stop-marker-dot stop-marker-dot--crimson"></div>`,
+        iconSize: [32, 32],
+        iconAnchor: [16, 16],
+    }), []);
+
+    // Blue pulsing icon for user's current location
+    const userLocationIcon = useMemo(() => L.divIcon({
+        className: 'user-location-container',
+        html: `<div class="user-location-dot"></div>`,
+        iconSize: [24, 24],
+        iconAnchor: [12, 12],
+    }), []);
+
+    // Get origin/destination stop IDs from trip for special styling
+    const tripStopIds = useMemo(() => {
+        if (!trip) return new Set<string | number>();
+        const ids = new Set<string | number>();
+        if (trip.origin?.nearest_stop?.id) ids.add(trip.origin.nearest_stop.id);
+        if (trip.destination?.nearest_stop?.id) ids.add(trip.destination.nearest_stop.id);
+        return ids;
+    }, [trip]);
 
     useEffect(() => {
         if (!systemId) {
@@ -56,7 +131,13 @@ export const MapShell = ({ systemId }: MapShellProps) => {
         setLoading(true);
         fetch(`http://localhost:8000/stops?system_id=${systemId}`)
             .then((res) => res.json())
-            .then((data) => setStops(data))
+            .then((data: Stop[]) => {
+                setStops(data);
+                if (data.length > 0) {
+                    const points = data.map((s) => [s.lat, s.lng] as [number, number]);
+                    setSystemBounds(L.latLngBounds(points));
+                }
+            })
             .catch((err) => console.error("Failed to fetch stops", err))
             .finally(() => setLoading(false));
     }, [systemId]);
@@ -120,6 +201,34 @@ export const MapShell = ({ systemId }: MapShellProps) => {
         return [avgLat, avgLng];
     }, [stops]);
 
+    // Compute active trip bounds when trip changes
+    useEffect(() => {
+        setActiveTripBounds(computeTripBounds(trip));
+    }, [trip]);
+
+    // Fallback color palette for routes without a defined color
+    const FALLBACK_ROUTE_COLORS = [
+        '#ef4444', // red
+        '#22c55e', // green
+        '#3b82f6', // blue
+        '#f59e0b', // amber
+        '#a855f7', // purple
+        '#14b8a6', // teal
+        '#f97316', // orange
+        '#ec4899', // pink
+    ];
+
+    const tripPolylines = useMemo(() => {
+        if (!trip || !trip.segments || trip.segments.length === 0) return [];
+
+        return trip.segments.map((seg: TripSegment, idx: number) => {
+            const positions: LatLngExpression[] = seg.stops.map((s: Stop) => [s.lat, s.lng] as [number, number]);
+            // Use segment color, or fallback to palette based on index
+            const color = seg.color || FALLBACK_ROUTE_COLORS[idx % FALLBACK_ROUTE_COLORS.length];
+            return { positions, color };
+        });
+    }, [trip]);
+
     return (
         <div className="relative h-full w-full bg-neutral-900">
             {systemId ? (
@@ -131,8 +240,11 @@ export const MapShell = ({ systemId }: MapShellProps) => {
                     scrollWheelZoom={true}
                     zoomControl={false}
                 >
-                    {/* This will auto-fly the map whenever systemId/center changes */}
-                    <MapSystemRecenter center={center} systemId={systemId} />
+                    <MapController
+                        systemBounds={systemBounds}
+                        activeTripBounds={activeTripBounds}
+                        setMap={setMapInstance}
+                    />
 
                     {/* Stadia Dark Theme */}
                     <TileLayer
@@ -173,37 +285,39 @@ export const MapShell = ({ systemId }: MapShellProps) => {
                             );
                         })}
 
-                    {/* Stops: White Glowing Dots */}
-                    {stops.map((stop) => (
-                        <div key={stop.id}>
-                            {/* Halo */}
-                            <CircleMarker
-                                center={[stop.lat, stop.lng]}
-                                radius={8}
+                    {/* Planned trip path (if any) */}
+                    {tripPolylines.map((line: { positions: LatLngExpression[], color: string }, idx: number) => (
+                        <React.Fragment key={`trip-${idx}`}>
+                            {/* Soft glow */}
+                            <Polyline
+                                positions={line.positions}
                                 pathOptions={{
-                                    stroke: false,
-                                    fill: true,
-                                    fillColor: STOP_WHITE,
-                                    fillOpacity: 0.08,
-                                    interactive: false,
-                                    className: "stop-white-glow",
+                                    color: line.color,
+                                    weight: 11,
+                                    opacity: 0.30,
                                 }}
                             />
-
-                            {/* Core */}
-                            <CircleMarker
-                                center={[stop.lat, stop.lng]}
-                                radius={2.5}
+                            {/* Core line */}
+                            <Polyline
+                                positions={line.positions}
                                 pathOptions={{
-                                    stroke: true,
-                                    color: "rgba(255,255,255,0.4)",
-                                    weight: 1,
-                                    opacity: 0.8,
-                                    fill: true,
-                                    fillColor: STOP_WHITE,
-                                    fillOpacity: 1.0,
-                                    className: "stop-white-glow",
+                                    color: line.color,
+                                    weight: 5,
+                                    opacity: 0.98,
                                 }}
+                            />
+                        </React.Fragment>
+                    ))}
+
+                    {/* Stops: Glowing Dots with larger hitboxes */}
+                    {stops.map((stop) => {
+                        const isTripStop = tripStopIds.has(stop.id);
+                        return (
+                            <Marker
+                                key={stop.id}
+                                position={[stop.lat, stop.lng]}
+                                icon={isTripStop ? tripStopIcon : stopIcon}
+                                zIndexOffset={isTripStop ? 100 : 0}
                             >
                                 <Popup>
                                     <div className="text-sm text-neutral-800">
@@ -213,9 +327,24 @@ export const MapShell = ({ systemId }: MapShellProps) => {
                                         </div>
                                     </div>
                                 </Popup>
-                            </CircleMarker>
-                        </div>
-                    ))}
+                            </Marker>
+                        );
+                    })}
+
+                    {/* User's current location marker */}
+                    {userLocation && (
+                        <Marker
+                            position={[userLocation.lat, userLocation.lng]}
+                            icon={userLocationIcon}
+                            zIndexOffset={200}
+                        >
+                            <Popup>
+                                <div className="text-sm text-neutral-800 font-medium">
+                                    Your Location
+                                </div>
+                            </Popup>
+                        </Marker>
+                    )}
 
                     {/* Vehicles with Smooth Animation */}
                     {vehicles
@@ -230,36 +359,58 @@ export const MapShell = ({ systemId }: MapShellProps) => {
                 </div>
             )}
 
-            {/* Status pill */}
-            <div className="pointer-events-none absolute bottom-8 left-1/2 -translate-x-1/2 rounded-full bg-black/60 backdrop-blur-md px-4 py-1.5 text-xs text-neutral-300 z-[1000] border border-white/10 shadow-lg">
-                {systemId
-                    ? loading
-                        ? 'Loading stops…'
-                        : `${stops.length} stops • ${vehicles.length} vehicles`
-                    : 'Select a system to begin'}
+            {/* Map controls container */}
+            <div className="pointer-events-none absolute bottom-8 inset-x-0 flex flex-col md:flex-row items-center justify-center gap-3 px-6 z-[1000]">
+                {/* Route toggle button */}
+                <div className="pointer-events-auto order-2 md:order-1">
+                    <button
+                        type="button"
+                        onClick={() => setShowRoutes((prev) => !prev)}
+                        className={[
+                            'rounded-full border px-4 py-2 text-xs font-medium transition-all backdrop-blur-md shadow-lg',
+                            showRoutes
+                                ? 'border-crimson bg-crimson/20 text-crimson animate-pulse-subtle'
+                                : 'border-white/10 bg-black/60 text-neutral-300 hover:border-white/20',
+                        ].join(' ')}
+                    >
+                        <div className="flex items-center gap-2">
+                            <div className={`h-1.5 w-1.5 rounded-full ${showRoutes ? 'bg-crimson shadow-[0_0_8px_rgba(165,28,48,0.6)]' : 'bg-neutral-500'}`} />
+                            {showRoutes ? 'Hide Routes' : 'Show Routes'}
+                            {loadingRoutes && showRoutes && (
+                                <div className="h-3 w-3 animate-spin rounded-full border-2 border-crimson/30 border-t-crimson" />
+                            )}
+                        </div>
+                    </button>
+                </div>
+
+                {/* Status pill */}
+                <div className="pointer-events-none order-1 md:order-2 rounded-full bg-black/60 backdrop-blur-md px-4 py-1.5 text-xs text-neutral-300 border border-white/10 shadow-lg">
+                    {systemId
+                        ? loading
+                            ? 'Loading stops…'
+                            : `${stops.length} stops • ${vehicles.length} vehicles`
+                        : 'Select a system to begin'}
+                </div>
             </div>
 
-            {/* Route toggle button */}
-            <div className="pointer-events-auto absolute bottom-8 left-8 z-[1000]">
+            {/* Recenter button */}
+            {systemId && (
                 <button
                     type="button"
-                    onClick={() => setShowRoutes((prev) => !prev)}
-                    className={[
-                        'rounded-full border px-4 py-2 text-xs font-medium transition-all backdrop-blur-md shadow-lg',
-                        showRoutes
-                            ? 'border-crimson bg-crimson/20 text-crimson animate-pulse-subtle'
-                            : 'border-white/10 bg-black/60 text-neutral-300 hover:border-white/20',
-                    ].join(' ')}
+                    title="Recenter visible area"
+                    onClick={() => {
+                        if (!mapInstance) return;
+                        if (activeTripBounds) {
+                            mapInstance.fitBounds(activeTripBounds, { padding: [80, 80] });
+                        } else if (systemBounds) {
+                            mapInstance.fitBounds(systemBounds, { padding: [80, 80] });
+                        }
+                    }}
+                    className="pointer-events-auto absolute right-6 bottom-32 z-[1000] rounded-full bg-neutral-900/90 px-4 py-2 text-xs font-bold text-white shadow-xl backdrop-blur-md border border-white/10 hover:bg-neutral-800 transition-all active:scale-95"
                 >
-                    <div className="flex items-center gap-2">
-                        <div className={`h-1.5 w-1.5 rounded-full ${showRoutes ? 'bg-crimson shadow-[0_0_8px_rgba(165,28,48,0.6)]' : 'bg-neutral-500'}`} />
-                        {showRoutes ? 'Hide Routes' : 'Show Routes'}
-                        {loadingRoutes && showRoutes && (
-                            <div className="h-3 w-3 animate-spin rounded-full border-2 border-crimson/30 border-t-crimson" />
-                        )}
-                    </div>
+                    Recenter
                 </button>
-            </div>
+            )}
         </div>
     );
 };

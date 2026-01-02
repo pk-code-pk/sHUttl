@@ -289,11 +289,15 @@ def find_common_routes(origin_stop, dest_stop, system_id: int = DEFAULT_SYSTEM_I
     for rid in common_route_ids:
         route = routes_by_id.get(rid)
         if route:
+            # Use groupColor first, fallback to color, normalize with # prefix
+            color = getattr(route, "groupColor", None) or getattr(route, "color", None)
+            if color and not color.startswith("#"):
+                color = f"#{color}"
             result.append({
                 "route_id": rid,
                 "route_name": route.name,
                 "short_name": getattr(route, "shortName", None),
-                "color": getattr(route, "groupColor", None),
+                "color": color,
             })
         else: 
             result.append({
