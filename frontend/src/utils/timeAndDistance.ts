@@ -33,6 +33,5 @@ export function etaSecondsToMinutes(etaSeconds?: number | null): number | null {
     if (etaSeconds == null || !Number.isFinite(etaSeconds) || etaSeconds <= 0) {
         return null
     }
-    if (etaSeconds > 3600) return null
     return etaSeconds / 60
 }

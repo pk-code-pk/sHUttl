@@ -9,6 +9,7 @@ import {
     isWalkReasonable,
     etaSecondsToMinutes,
 } from "../utils/timeAndDistance";
+import { formatEtaSeconds } from "../utils/time";
 import logo from "../assets/logo.svg";
 
 interface System {
@@ -31,6 +32,29 @@ interface StopOption {
     name: string;
     lat: number;
     lng: number;
+}
+
+// Helper for total trip ETA
+function computeTripEtaLabel(segments: any[]): { label: string | null, partial: boolean } {
+    let totalSeconds = 0;
+    let any = false;
+    let allValid = true;
+
+    for (const seg of segments) {
+        // Only count shuttle segments for 'allValid' check
+        // (if we had walk segments here we would skip them)
+        const v = seg.next_bus?.segment_eta_s;
+        if (v != null && Number.isFinite(v) && v > 0) {
+            totalSeconds += v;
+            any = true;
+        } else {
+            allValid = false;
+        }
+    }
+
+    if (!any) return { label: null, partial: false };
+    const label = formatEtaSeconds(totalSeconds);
+    return { label, partial: !allValid };
 }
 
 export const TripPlannerPanel = ({
@@ -65,6 +89,20 @@ export const TripPlannerPanel = ({
     const [originCoords, setOriginCoords] = useState<{ lat: number; lng: number } | null>(null);
     const [locating, setLocating] = useState(false);
     const [locationError, setLocationError] = useState<string | null>(null);
+
+    // Live update state
+    interface TripRequestParams {
+        systemId: number;
+        originLat: number;
+        originLng: number;
+        destLat: number;
+        destLng: number;
+    }
+    const [activeTripParams, setActiveTripParams] = useState<TripRequestParams | null>(null);
+    const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
+    const [isLiveUpdating, setIsLiveUpdating] = useState(false);
+    const POLL_INTERVAL_MS = 8000; // ~8 seconds
+
 
     // Autocomplete filtering logic
     function filterStops(query: string, stops: StopOption[]): StopOption[] {
@@ -102,25 +140,42 @@ export const TripPlannerPanel = ({
         [destQuery, stops]
     );
 
+    const [stopsError, setStopsError] = useState<string | null>(null);
+
     // Fetch stops for the current system
     useEffect(() => {
         if (!system?.id) {
             setStops([]);
+            setStopsError(null);
             setOriginStopId('');
             setDestStopId('');
+            resetLiveState();
             return;
         }
 
         setLoadingStops(true);
+        setStopsError(null);
         fetch(`http://localhost:8000/stops?system_id=${system.id}`)
-            .then((res) => res.json())
+            .then(async (res) => {
+                if (!res.ok) {
+                    let message = `Failed to load stops (Status ${res.status})`;
+                    try {
+                        const data = await res.json();
+                        if (data?.detail) message = data.detail;
+                    } catch { }
+                    throw new Error(message);
+                }
+                return res.json();
+            })
             .then((data: StopOption[]) => {
                 setStops(data || []);
                 setOriginStopId('');
                 setDestStopId('');
+                resetLiveState();
             })
-            .catch(() => {
+            .catch((err) => {
                 setStops([]);
+                setStopsError(err.message || 'Could not load stops.');
             })
             .finally(() => setLoadingStops(false));
     }, [system?.id]);
@@ -147,6 +202,7 @@ export const TripPlannerPanel = ({
                 setOriginStopId('');
                 setLocating(false);
                 onUserLocationChange?.(coords);
+                resetLiveState();
             },
             (err) => {
                 console.error(err);
@@ -213,18 +269,111 @@ export const TripPlannerPanel = ({
 
             const res = await fetch(`http://localhost:8000/trip?${params.toString()}`);
             if (!res.ok) {
-                throw new Error(`Trip request failed with status ${res.status}`);
+                let message = `Trip request failed with status ${res.status}`;
+                try {
+                    const data = await res.json();
+                    if (data?.detail) message = data.detail;
+                    else if (data?.error) message = data.error;
+                } catch {
+                    // ignore JSON parse error, keep default message
+                }
+                throw new Error(message);
             }
             const data: TripResponse = await res.json();
             onTripChange(data);
-        } catch (e) {
+
+            // Start live updates on success
+            setActiveTripParams({
+                systemId: system.id,
+                originLat,
+                originLng,
+                destLat,
+                destLng,
+            });
+            setLastUpdatedAt(new Date());
+            setIsLiveUpdating(true);
+        } catch (e: any) {
             console.error(e);
-            setError('Could not plan trip. Please try again.');
+            setError(e.message || 'Could not plan trip. Please try again.');
             onTripChange(null);
         } finally {
             setPlanning(false);
         }
     };
+
+    // Helper: Reset live updates when inputs change significantly
+    const resetLiveState = () => {
+        setActiveTripParams(null);
+        setIsLiveUpdating(false);
+        setLastUpdatedAt(null);
+    };
+
+    // Helper: Check if trip has real-time data
+    const hasRealtimeData = (t: typeof trip): boolean => {
+        if (!t) return false;
+        return t.segments.some((seg) => seg.next_bus != null);
+    };
+
+    // Polling logic for live updates
+    useEffect(() => {
+        if (!isLiveUpdating || !activeTripParams || !trip) return;
+        if (!hasRealtimeData(trip)) {
+            setIsLiveUpdating(false);
+            return;
+        }
+
+        let isCancelled = false;
+
+        const fetchTripUpdate = async () => {
+            try {
+                const { systemId, originLat, originLng, destLat, destLng } = activeTripParams;
+                const params = new URLSearchParams({
+                    lat: originLat.toString(),
+                    lng: originLng.toString(),
+                    lat2: destLat.toString(),
+                    lng2: destLng.toString(),
+                    system_id: systemId.toString(),
+                });
+
+                const res = await fetch(`http://localhost:8000/trip?${params.toString()}`);
+                if (!res.ok) throw new Error(`Trip refresh failed: ${res.status}`);
+                const data: TripResponse = await res.json();
+
+                if (!isCancelled) {
+                    onTripChange(data);
+                    setLastUpdatedAt(new Date());
+                }
+            } catch (err) {
+                console.error("Error refreshing trip:", err);
+                setIsLiveUpdating(false);
+            }
+        };
+
+        const intervalId = window.setInterval(fetchTripUpdate, POLL_INTERVAL_MS);
+        return () => {
+            isCancelled = true;
+            window.clearInterval(intervalId);
+        };
+    }, [isLiveUpdating, activeTripParams, trip, onTripChange]);
+
+    // Custom hook for relative updated label
+    const useRelativeUpdatedLabel = (updatedAt: Date | null) => {
+        const [now, setNow] = useState(new Date());
+        useEffect(() => {
+            if (!updatedAt) return;
+            const id = window.setInterval(() => setNow(new Date()), 1000);
+            return () => window.clearInterval(id);
+        }, [updatedAt]);
+
+        if (!updatedAt) return "Not updated yet";
+        const diffSec = Math.round((now.getTime() - updatedAt.getTime()) / 1000);
+        if (diffSec <= 2) return "Updated just now";
+        if (diffSec < 60) return `Updated ${diffSec}s ago`;
+        const diffMin = Math.round(diffSec / 60);
+        return `Updated ${diffMin} min ago`;
+    };
+
+    const updatedLabel = useRelativeUpdatedLabel(lastUpdatedAt);
 
     const normalizedSegments = useMemo(() => {
         if (!trip || !trip.segments) return [];
@@ -251,18 +400,13 @@ export const TripPlannerPanel = ({
     const numSegments = normalizedSegments.length;
     const numTransfers = Math.max(0, numSegments - 1);
 
-    const firstEtaMinutes = useMemo(() => {
-        const mins = normalizedSegments
-            .map((s) => s._etaMinutes)
-            .filter((m): m is number => m != null && Number.isFinite(m))
-            .sort((a, b) => a - b);
-        return mins[0] ?? null;
-    }, [normalizedSegments]);
 
     const totalWalkM =
         (shouldShowOriginWalk ? originWalkM : 0) +
         (shouldShowDestWalk ? destWalkM : 0);
     const totalWalkMin = metersToMinutes(totalWalkM);
+
+    const { label: tripEtaLabel, partial: isTripEtaPartial } = useMemo(() => computeTripEtaLabel(normalizedSegments), [normalizedSegments]);
 
     return (
         <motion.div
@@ -327,6 +471,7 @@ export const TripPlannerPanel = ({
                                         setOriginQuery(e.target.value);
                                         setOriginStopId('');
                                         setOriginOpen(true);
+                                        resetLiveState();
                                     }}
                                     onFocus={() => setOriginOpen(true)}
                                     onBlur={() => {
@@ -380,6 +525,7 @@ export const TripPlannerPanel = ({
                                     setOriginStopId(e.target.value);
                                     const stop = findStopById(e.target.value);
                                     setOriginQuery(stop ? stop.name : '');
+                                    resetLiveState();
                                 }}
                                 className="w-full bg-neutral-800/70 border border-white/5 focus:border-crimson/50 rounded-lg px-3 py-2 text-xs text-white outline-none transition-all appearance-none"
                                 disabled={loadingStops || !system}
@@ -418,6 +564,7 @@ export const TripPlannerPanel = ({
                                         setDestQuery(e.target.value);
                                         setDestStopId('');
                                         setDestOpen(true);
+                                        resetLiveState();
                                     }}
                                     onFocus={() => setDestOpen(true)}
                                     onBlur={() => {
@@ -456,6 +603,7 @@ export const TripPlannerPanel = ({
                                     setDestStopId(e.target.value);
                                     const stop = findStopById(e.target.value);
                                     setDestQuery(stop ? stop.name : '');
+                                    resetLiveState();
                                 }}
                                 className="w-full bg-neutral-800 border border-white/5 focus:border-crimson/50 rounded-lg px-3 py-2 text-xs text-white outline-none transition-all appearance-none"
                                 disabled={loadingStops || !system}
@@ -468,6 +616,26 @@ export const TripPlannerPanel = ({
                         )}
                     </div>
                 </div>
+
+                {stopsError && (
+                    <div className="mt-3 rounded-xl border border-yellow-500/40 bg-yellow-500/10 px-3 py-2 text-[11px] text-yellow-100/90 leading-relaxed shadow-sm">
+                        <div className="flex items-center gap-2 mb-0.5">
+                            <Info size={12} className="text-yellow-500" />
+                            <span className="font-bold uppercase tracking-tight">System Info</span>
+                        </div>
+                        {stopsError}
+                    </div>
+                )}
+
+                {error && (
+                    <div className="mt-3 rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] text-red-100/90 leading-relaxed shadow-sm animate-in fade-in slide-in-from-top-1 duration-200">
+                        <div className="flex items-center gap-2 mb-0.5">
+                            <div className="w-1 h-1 rounded-full bg-red-500 animate-pulse" />
+                            <span className="font-bold uppercase tracking-tight">Trip Error</span>
+                        </div>
+                        {error}
+                    </div>
+                )}
 
                 {/* Actions Row - improved spacing and layout */}
                 <div className="flex items-center gap-3 pt-3 mt-2 shrink-0 mb-4">
@@ -487,6 +655,7 @@ export const TripPlannerPanel = ({
 
                             setOriginUseCurrentLocation(false);
                             setOriginCoords(null);
+                            resetLiveState();
                         }}
                         className="h-10 px-3 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-400 hover:text-white transition-colors flex items-center justify-center"
                         title="Swap locations"
@@ -576,16 +745,16 @@ export const TripPlannerPanel = ({
                                                 {/* Overview */}
                                                 <div className="rounded-xl bg-neutral-900/80 p-3 text-xs border border-white/5 shadow-sm">
                                                     <div className="flex items-center justify-between">
-                                                        <div className="flex flex-col">
+                                                        <div className="flex flex-col flex-1 min-w-0">
                                                             <div className="flex items-center gap-2 mb-1">
                                                                 <div className="w-1.5 h-1.5 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]" />
                                                                 <span className="text-[11px] font-bold text-white uppercase tracking-tight">Route Overview</span>
                                                             </div>
-                                                            <div className="text-[10px] text-neutral-300">
+                                                            <div className="text-[10px] text-neutral-300 truncate">
                                                                 From <span className="font-medium text-white">{trip.origin.nearest_stop.name}</span> to{' '}
                                                                 <span className="font-medium text-white">{trip.destination.nearest_stop.name}</span>
                                                             </div>
-                                                            <div className="mt-1 text-[10px] text-neutral-500 font-medium">
+                                                            <div className="mt-1 text-[10px] text-neutral-500 font-medium whitespace-nowrap overflow-hidden text-ellipsis">
                                                                 {numSegments} bus segment{numSegments !== 1 ? 's' : ''} •{' '}
                                                                 {numTransfers > 0
                                                                     ? `${numTransfers} transfer${numTransfers > 1 ? 's' : ''}`
@@ -593,19 +762,23 @@ export const TripPlannerPanel = ({
                                                             </div>
                                                         </div>
 
-                                                        <div className="text-right flex flex-col items-end gap-1">
-                                                            {firstEtaMinutes != null ? (
-                                                                <div className="rounded-full bg-crimson/10 border border-crimson/20 px-2 py-1 text-[10px] text-crimson font-bold">
-                                                                    First bus in {Math.round(firstEtaMinutes)} min
+                                                        <div className="flex flex-col items-end gap-1.5 self-start mt-0.5 sm:mt-0">
+                                                            {tripEtaLabel ? (
+                                                                <div className="rounded-full bg-neutral-900/80 border border-white/10 px-2.5 py-1 text-[10px] text-white font-bold whitespace-nowrap shadow-sm flex items-center gap-1.5">
+                                                                    <Clock size={10} className="text-neutral-400" />
+                                                                    <span>
+                                                                        Trip ≈ {tripEtaLabel}
+                                                                        {isTripEtaPartial && <span className="text-[9px] opacity-60 font-medium ml-1">(partial)</span>}
+                                                                    </span>
                                                                 </div>
                                                             ) : (
-                                                                <div className="rounded-full bg-neutral-950/80 px-2 py-1 text-[10px] text-neutral-500 font-medium">
+                                                                <div className="rounded-full bg-neutral-950/80 px-2 py-1 text-[10px] text-neutral-500 font-medium whitespace-nowrap border border-white/5">
                                                                     No ETA
                                                                 </div>
                                                             )}
                                                             {totalWalkMin != null && totalWalkMin > 0 && (
-                                                                <div className="text-[10px] text-neutral-400 font-medium">
-                                                                    Walking ~{Math.round(totalWalkMin)} min
+                                                                <div className="text-[9px] text-neutral-400 font-bold uppercase tracking-tight bg-neutral-800/50 px-1.5 py-0.5 rounded border border-white/5">
+                                                                    {Math.round(totalWalkMin)} min walk
                                                                 </div>
                                                             )}
                                                         </div>
@@ -660,22 +833,55 @@ export const TripPlannerPanel = ({
                                                                     {seg.short_name || seg.route_name || 'Shuttle'}
                                                                 </span>
                                                                 <div className="flex items-center gap-1.5">
-                                                                    {seg._etaMinutes == null ? (
-                                                                        <span className="rounded-full bg-neutral-950/80 px-2 py-0.5 text-[9px] text-neutral-500 font-medium">
-                                                                            No real-time data
-                                                                        </span>
-                                                                    ) : (
-                                                                        <span className="rounded-full bg-neutral-950/80 px-2 py-0.5 text-[9px] text-neutral-100 font-bold flex items-center gap-1">
-                                                                            <Clock size={10} className="text-neutral-400" />
-                                                                            {formatMinutesLabel(seg._etaMinutes)}
-                                                                        </span>
-                                                                    )}
+                                                                    {(() => {
+                                                                        const nb = seg.next_bus;
+                                                                        const waitSeconds = nb?.eta_to_boarding_stop_s ?? nb?.eta_to_origin_stop ?? null;
+                                                                        const waitLabel = formatEtaSeconds(waitSeconds);
+                                                                        const hasRealtimeWait = !!waitLabel;
+
+                                                                        return hasRealtimeWait ? (
+                                                                            <span className="rounded-full bg-neutral-950/80 px-2 py-0.5 text-[9px] text-neutral-100 font-bold flex items-center gap-1 border border-white/5">
+                                                                                <Clock size={10} className="text-neutral-400" />
+                                                                                <span>Bus in {waitLabel}</span>
+                                                                            </span>
+                                                                        ) : (
+                                                                            <span className="rounded-full bg-neutral-950/80 px-2 py-0.5 text-[9px] text-neutral-500 font-bold border border-white/5 tracking-tight">
+                                                                                No real-time ETA
+                                                                            </span>
+                                                                        );
+                                                                    })()}
                                                                 </div>
                                                             </div>
 
-                                                            <div className="text-[10px] text-neutral-400 mb-3">
+                                                            <div className="text-[10px] text-neutral-400 mb-1">
                                                                 Board at <span className="text-neutral-200 font-medium">{seg.start_stop.name}</span>
                                                             </div>
+
+                                                            {(() => {
+                                                                const nb = seg.next_bus;
+                                                                const waitSeconds = nb?.eta_to_boarding_stop_s ?? nb?.eta_to_origin_stop ?? null;
+                                                                const waitLabel = formatEtaSeconds(waitSeconds);
+                                                                const segEtaLabel = formatEtaSeconds(nb?.segment_eta_s ?? null);
+                                                                const rideEtaLabel = formatEtaSeconds(nb?.ride_eta_s ?? null);
+
+                                                                return (
+                                                                    <div className="mb-3 space-y-0.5">
+                                                                        {waitLabel && (
+                                                                            <p className="text-[10px] text-neutral-500">
+                                                                                Bus arrives at this stop in {waitLabel}.
+                                                                            </p>
+                                                                        )}
+                                                                        {segEtaLabel && (
+                                                                            <p className="text-[10px] text-neutral-500 leading-tight">
+                                                                                Approx. segment time ≈ {segEtaLabel}
+                                                                                {waitLabel && rideEtaLabel && (
+                                                                                    <span className="opacity-70"> — bus in {waitLabel}, then ~{rideEtaLabel} ride</span>
+                                                                                )}
+                                                                            </p>
+                                                                        )}
+                                                                    </div>
+                                                                );
+                                                            })()}
 
                                                             <div className="space-y-1.5 pt-2 border-t border-white/5">
                                                                 <span className="text-[9px] font-bold text-neutral-500 uppercase tracking-tighter block mb-1">Stops on track</span>
@@ -722,8 +928,24 @@ export const TripPlannerPanel = ({
                                                     </div>
                                                 )}
 
-                                                <div className="text-[9px] text-neutral-500 italic text-center pt-2">
-                                                    Live tracking data updated every 3 seconds
+                                                <div className="text-[10px] text-neutral-500 text-center pt-2 pb-1 border-t border-white/5 mx-2">
+                                                    {hasRealtimeData(trip) ? (
+                                                        <div className="flex flex-col gap-0.5">
+                                                            <div className="flex items-center justify-center gap-1.5">
+                                                                {isLiveUpdating && (
+                                                                    <div className="w-1 h-1 rounded-full bg-green-500 animate-pulse" />
+                                                                )}
+                                                                <span>{updatedLabel}</span>
+                                                            </div>
+                                                            {isLiveUpdating && (
+                                                                <span className="text-[9px] opacity-70">
+                                                                    Live tracking every {POLL_INTERVAL_MS / 1000}s
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    ) : (
+                                                        <span className="italic opacity-70">No real-time data for this route</span>
+                                                    )}
                                                 </div>
                                             </motion.div>
                                         )}

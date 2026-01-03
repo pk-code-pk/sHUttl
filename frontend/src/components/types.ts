@@ -30,6 +30,17 @@ export interface RoutePath {
     path: RoutePoint[];
 }
 
+export interface NextBusInfo {
+    vehicle_id: string | number;
+    lat: number;
+    lng: number;
+    distance_to_boarding_stop_m: number;
+    eta_to_origin_stop?: number | null;        // legacy
+    eta_to_boarding_stop_s?: number | null;    // explicit wait time
+    ride_eta_s?: number | null;                // approx ride time for this segment
+    segment_eta_s?: number | null;             // approx wait + ride for this segment
+}
+
 export interface TripSegment {
     route_id: string;
     route_name: string | null;
@@ -38,14 +49,7 @@ export interface TripSegment {
     start_stop: Stop;
     end_stop: Stop;
     stops: Stop[];
-    next_bus: {
-        vehicle_id: string | number;
-        lat: number;
-        lng: number;
-        distance_to_origin_stop: number;
-        eta_to_origin_stop: number | null;
-        eta_to_origin_stop_minutes: number | null;
-    } | null;
+    next_bus: NextBusInfo | null;
 }
 
 export interface TripEndpoint {

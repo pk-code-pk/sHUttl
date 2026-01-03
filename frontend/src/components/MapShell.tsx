@@ -80,6 +80,8 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
     const [showRoutes, setShowRoutes] = useState(false);
     const [loading, setLoading] = useState(false);
     const [loadingRoutes, setLoadingRoutes] = useState(false);
+    const [vehiclesError, setVehiclesError] = useState(false);
+    const [routesError, setRoutesError] = useState(false);
 
     const [systemBounds, setSystemBounds] = useState<L.LatLngBounds | null>(null);
     const [activeTripBounds, setActiveTripBounds] = useState<L.LatLngBounds | null>(null);
@@ -154,11 +156,19 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
 
         const fetchVehicles = () => {
             fetch(`http://localhost:8000/vehicles?system_id=${systemId}`)
-                .then((res) => res.json())
-                .then((data) => {
-                    if (!cancelled) setVehicles(data);
+                .then((res) => {
+                    if (!res.ok) throw new Error();
+                    return res.json();
                 })
-                .catch(() => { });
+                .then((data) => {
+                    if (!cancelled) {
+                        setVehicles(data);
+                        setVehiclesError(false);
+                    }
+                })
+                .catch(() => {
+                    if (!cancelled) setVehiclesError(true);
+                });
         };
 
         fetchVehicles();
@@ -183,9 +193,11 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
             .then((res) => res.json())
             .then((data: RoutePath[]) => {
                 setRoutes(Array.isArray(data) ? data : []);
+                setRoutesError(false);
             })
             .catch(() => {
                 setRoutes([]);
+                setRoutesError(true);
             })
             .finally(() => setLoadingRoutes(false));
     }, [systemId, showRoutes]);
@@ -384,12 +396,23 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                 </div>
 
                 {/* Status pill */}
-                <div className="pointer-events-none order-1 md:order-2 rounded-full bg-black/60 backdrop-blur-md px-4 py-1.5 text-xs text-neutral-300 border border-white/10 shadow-lg">
-                    {systemId
-                        ? loading
-                            ? 'Loading stops…'
-                            : `${stops.length} stops • ${vehicles.length} vehicles`
-                        : 'Select a system to begin'}
+                <div className="pointer-events-none order-1 md:order-2 flex flex-col items-center gap-1.5">
+                    <div className="rounded-full bg-black/60 backdrop-blur-md px-4 py-1.5 text-xs text-neutral-300 border border-white/10 shadow-lg">
+                        {systemId
+                            ? loading
+                                ? 'Loading stops…'
+                                : `${stops.length} stops • ${vehicles.length} vehicles`
+                            : 'Select a system to begin'}
+                    </div>
+                    {(vehiclesError || routesError) && (
+                        <p className="text-[10px] text-yellow-500/90 font-medium bg-black/40 backdrop-blur-sm px-3 py-1 rounded-full border border-yellow-500/20 animate-pulse-subtle">
+                            {vehiclesError && routesError
+                                ? 'Real-time data unavailable'
+                                : vehiclesError
+                                    ? 'Vehicle tracking unavailable'
+                                    : 'Route information unavailable'}
+                        </p>
+                    )}
                 </div>
             </div>
 
