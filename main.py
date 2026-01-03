@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from collections import defaultdict, deque
 import datetime
@@ -6,8 +6,32 @@ from datetime import datetime
 from datetime import timedelta
 import math 
 import re
+import os
+import json
+import logging
+from typing import Any, Optional
+from redis import Redis
+import redis.asyncio as redis_async
+from fastapi_limiter import FastAPILimiter
+from fastapi_limiter.depends import RateLimiter
 from passio_client import get_stops, get_vehicles, get_routes, DEFAULT_SYSTEM_ID, get_all_systems
-from typing import Any
+
+logger = logging.getLogger(__name__)
+
+REDIS_URL = os.getenv("REDIS_URL")
+redis_client: Optional[Redis] = None
+
+if REDIS_URL:
+    try:
+        redis_client = Redis.from_url(REDIS_URL)
+        redis_client.ping()
+        logger.info("Connected to Redis for caching", extra={"redis_url": REDIS_URL})
+    except Exception as e:
+        logger.warning("Failed to connect to Redis for caching, disabling cache", exc_info=e)
+        redis_client = None
+else:
+    logger.info("REDIS_URL not set, running without Redis caching")
+
 app = FastAPI() 
 
 app.add_middleware(
@@ -23,6 +47,28 @@ app.add_middleware(
 #test health of our api endpoint  
 def health_check():
     return {"status": "ok", "message": "Backend is running!"}
+
+
+@app.on_event("startup")
+async def startup_event():
+    redis_url = os.getenv("REDIS_URL")
+    if not redis_url:
+        logger.info("REDIS_URL not set, running without rate limiting")
+        return
+
+    try:
+        redis = redis_async.from_url(redis_url, encoding="utf-8", decode_responses=True)
+        await FastAPILimiter.init(redis)
+        logger.info("fastapi-limiter initialized with Redis", extra={"redis_url": redis_url})
+    except Exception as e:
+        logger.warning("Failed to initialize fastapi-limiter, rate limiting disabled", exc_info=e)
+
+
+class OptionalRateLimiter(RateLimiter):
+    async def __call__(self, request: Request, response: Response):
+        if FastAPILimiter.redis is None:
+            return
+        return await super().__call__(request, response)
 
 
 VEHICLE_STATE = {} ##cache to store history of bus positions to deduce accurate etas 
@@ -280,11 +326,30 @@ def match_stops(lat: float, lng:float, lat2: float, lng2: float, system_id: int 
     return base, originstop, deststop
 
 
-@app.get("/stops")
+STOPS_TTL = 60 * 10  # 10 minutes
 
+@app.get("/stops", dependencies=[Depends(OptionalRateLimiter(times=30, seconds=60))])
 def list_stops(system_id: int = DEFAULT_SYSTEM_ID):
+    cache_key = f"api:stops:{system_id}"
+
+    if redis_client is not None:
+        try:
+            cached = redis_client.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception as e:
+            logger.warning("Redis error reading stops cache", exc_info=e)
+
     stops = get_stops(system_id)
-    return [stopdict(s) for s in stops]
+    data = [stopdict(s) for s in stops]
+
+    if redis_client is not None:
+        try:
+            redis_client.setex(cache_key, STOPS_TTL, json.dumps(data))
+        except Exception as e:
+            logger.warning("Redis error writing stops cache", exc_info=e)
+
+    return data
 
 @app.get("/systems")
 def list_systems():
@@ -401,8 +466,20 @@ def list_route_paths(system_id: int = DEFAULT_SYSTEM_ID):
     return route_paths_for_system(system_id)
 
 
-@app.get("/vehicles")
+VEHICLES_TTL = 2  # seconds
+
+@app.get("/vehicles", dependencies=[Depends(OptionalRateLimiter(times=60, seconds=60))])
 def list_vehicles(system_id: int = DEFAULT_SYSTEM_ID):
+    cache_key = f"api:vehicles:{system_id}"
+
+    if redis_client is not None:
+        try:
+            cached = redis_client.get(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception as e:
+            logger.warning("Redis error reading vehicles cache", exc_info=e)
+
     vehicles = get_vehicles(system_id)
     routes = get_routes(system_id)
 
@@ -419,7 +496,15 @@ def list_vehicles(system_id: int = DEFAULT_SYSTEM_ID):
                     color = f"#{color}"
                 route_colors[str(rid)] = color
 
-    return [vehicledict(v, route_colors.get(str(getattr(v, "routeId", None)))) for v in vehicles]
+    data = [vehicledict(v, route_colors.get(str(getattr(v, "routeId", None)))) for v in vehicles]
+
+    if redis_client is not None:
+        try:
+            redis_client.setex(cache_key, VEHICLES_TTL, json.dumps(data))
+        except Exception as e:
+            logger.warning("Redis error writing vehicles cache", exc_info=e)
+
+    return data
 
 
 @app.get("/nearest_stop")
@@ -991,7 +1076,7 @@ def build_trip_segments(path_stop_ids, segments, stop_by_id, system_id: int = DE
 
 
 
-@app.get("/trip")
+@app.get("/trip", dependencies=[Depends(OptionalRateLimiter(times=20, seconds=60))])
 def api_trip(
     lat: float = Query(..., ge=-90, le=90),
     lng: float = Query(..., ge=-180, le=180),

@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+requests
+pydantic
+passiogo
+redis
+fastapi-limiter
