@@ -11,6 +11,7 @@ import json
 import logging
 from typing import Any, Optional
 from redis import Redis
+from redis.exceptions import RedisError
 import redis.asyncio as redis_async
 from fastapi_limiter import FastAPILimiter
 from fastapi_limiter.depends import RateLimiter
@@ -66,9 +67,16 @@ async def startup_event():
 
 class OptionalRateLimiter(RateLimiter):
     async def __call__(self, request: Request, response: Response):
-        if FastAPILimiter.redis is None:
+        # If limiter was never initialized, skip rate limiting
+        if getattr(FastAPILimiter, "redis", None) is None:
             return
-        return await super().__call__(request, response)
+
+        try:
+            return await super().__call__(request, response)
+        except (RedisError, OSError, ConnectionError) as e:
+            # Redis down / transient error -> fail open
+            logger.warning("Rate limiter Redis error; skipping rate limit", exc_info=e)
+            return
 
 
 VEHICLE_STATE = {} ##cache to store history of bus positions to deduce accurate etas 
