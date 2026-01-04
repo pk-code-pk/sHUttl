@@ -1,6 +1,6 @@
-# Crimson Shuttle
+# sHUttl 
 
-A real-time, Google Maps–style shuttle routing app built on top of the PassioGO API.
+A real-time, Google Maps–style shuttle routing app built on top of the PassioGO API. Custom logo/branding by me. 
 
 Plan trips from “where I am” to “where I need to go” using campus shuttles, with live vehicle locations, ETAs, and clean visual routes.
 
