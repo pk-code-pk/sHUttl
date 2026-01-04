@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Search, ChevronRight } from "lucide-react";
 import clsx from "clsx";
+import { API_BASE_URL } from "@/config";
 
 interface System {
     id: number;
@@ -24,7 +25,7 @@ export const SystemSelectModal = ({ onSelect, isOpen }: SystemSelectModalProps) 
             // eslint-disable-next-line react-hooks/set-state-in-effect
             setLoading(true);
             // Fetch from backend
-            fetch("http://localhost:8000/systems")
+            fetch(`${API_BASE_URL}/systems`)
                 .then(res => res.json())
                 .then(data => setSystems(data))
                 .catch(err => console.error("Failed to fetch systems", err))

@@ -11,6 +11,7 @@ import {
 } from "../utils/timeAndDistance";
 import { formatEtaSeconds } from "../utils/time";
 import logo from "../assets/logo.svg";
+import { API_BASE_URL } from "@/config";
 
 interface System {
     id: number;
@@ -155,7 +156,7 @@ export const TripPlannerPanel = ({
 
         setLoadingStops(true);
         setStopsError(null);
-        fetch(`http://localhost:8000/stops?system_id=${system.id}`)
+        fetch(`${API_BASE_URL}/stops?system_id=${system.id}`)
             .then(async (res) => {
                 if (!res.ok) {
                     let message = `Failed to load stops (Status ${res.status})`;
@@ -267,7 +268,7 @@ export const TripPlannerPanel = ({
                 system_id: system.id.toString(),
             });
 
-            const res = await fetch(`http://localhost:8000/trip?${params.toString()}`);
+            const res = await fetch(`${API_BASE_URL}/trip?${params.toString()}`);
             if (!res.ok) {
                 let message = `Trip request failed with status ${res.status}`;
                 try {
@@ -335,7 +336,7 @@ export const TripPlannerPanel = ({
                     system_id: systemId.toString(),
                 });
 
-                const res = await fetch(`http://localhost:8000/trip?${params.toString()}`);
+                const res = await fetch(`${API_BASE_URL}/trip?${params.toString()}`);
                 if (!res.ok) throw new Error(`Trip refresh failed: ${res.status}`);
                 const data: TripResponse = await res.json();
 

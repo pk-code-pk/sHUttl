@@ -2,7 +2,8 @@ fastapi
 uvicorn[standard]
 requests
 pydantic
-passiogo
+passiogo-updated
+websocket-client
 redis
 fastapi-limiter
 python-dotenv

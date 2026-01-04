@@ -4,6 +4,7 @@ import L from 'leaflet';
 import type { LatLngExpression } from 'leaflet';
 import { ShuttleMarker } from './ShuttleMarker';
 import type { Stop, Vehicle, RoutePath, TripResponse, TripSegment } from './types';
+import { API_BASE_URL } from '@/config';
 
 interface MapShellProps {
     systemId: number | null;
@@ -131,7 +132,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
             return;
         }
         setLoading(true);
-        fetch(`http://localhost:8000/stops?system_id=${systemId}`)
+        fetch(`${API_BASE_URL}/stops?system_id=${systemId}`)
             .then((res) => res.json())
             .then((data: Stop[]) => {
                 setStops(data);
@@ -155,7 +156,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
         let cancelled = false;
 
         const fetchVehicles = () => {
-            fetch(`http://localhost:8000/vehicles?system_id=${systemId}`)
+            fetch(`${API_BASE_URL}/vehicles?system_id=${systemId}`)
                 .then((res) => {
                     if (!res.ok) throw new Error();
                     return res.json();
@@ -189,7 +190,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
         }
 
         setLoadingRoutes(true);
-        fetch(`http://localhost:8000/route_paths?system_id=${systemId}`)
+        fetch(`${API_BASE_URL}/route_paths?system_id=${systemId}`)
             .then((res) => res.json())
             .then((data: RoutePath[]) => {
                 setRoutes(Array.isArray(data) ? data : []);
