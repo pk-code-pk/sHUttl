@@ -33,11 +33,24 @@ if REDIS_URL:
 else:
     logger.info("REDIS_URL not set, running without Redis caching")
 
-app = FastAPI() 
+ENV = os.getenv("ENV", "development").lower()
+ENABLE_DOCS = os.getenv("ENABLE_DOCS", "true").lower() == "true"
+
+if ENV == "production" and not ENABLE_DOCS:
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+else:
+    app = FastAPI()
+
+CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "*")
+
+if CORS_ALLOWED_ORIGINS.strip() == "*":
+    origins = ["*"]
+else:
+    origins = [o.strip() for o in CORS_ALLOWED_ORIGINS.split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

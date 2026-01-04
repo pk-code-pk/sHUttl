@@ -16,6 +16,10 @@ services:
       PORT: 8000
       # Use compose service name "redis" as hostname
       REDIS_URL: redis://redis:6379/0
+      # Production Configuration
+      ENV: development
+      ENABLE_DOCS: "true"
+      CORS_ALLOWED_ORIGINS: "*"
       # If your app uses this default system id env var, set it here.
       # Only include if the backend actually reads it.
       # PASSIO_SYSTEM_ID: 831
