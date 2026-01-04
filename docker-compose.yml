@@ -1,0 +1,28 @@
+services:
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    # SECURITY: do NOT publish redis to host by default.
+    # If you need local inspection, temporarily add:
+    # ports:
+    #   - "6379:6379"
+
+  backend:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - redis
+    environment:
+      PORT: 8000
+      # Use compose service name "redis" as hostname
+      REDIS_URL: redis://redis:6379/0
+      # If your app uses this default system id env var, set it here.
+      # Only include if the backend actually reads it.
+      # PASSIO_SYSTEM_ID: 831
+      #
+      # CORS: only configure if your backend already has CORS middleware
+      # and it already reads from env. Avoid "*" + allow_credentials=True.
+      # Example safe dev value:
+      # CORS_ALLOWED_ORIGINS: "http://localhost:5173,http://127.0.0.1:5173"
+    ports:
+      - "8000:8000"

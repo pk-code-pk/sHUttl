@@ -1,7 +1,8 @@
 fastapi
-uvicorn
+uvicorn[standard]
 requests
 pydantic
 passiogo
 redis
 fastapi-limiter
+python-dotenv
