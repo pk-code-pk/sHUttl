@@ -259,11 +259,12 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                         setMap={setMapInstance}
                     />
 
-                    {/* Stadia Dark Theme */}
+                    {/* Carto Dark Matter - no auth required */}
                     <TileLayer
-                        attribution='&copy; <a href="https://stadiamaps.com/">Stadia Maps</a>, &copy; <a href="https://openmaptiles.org/">OpenMapTiles</a> &copy; <a href="http://openstreetmap.org">OpenStreetMap</a> contributors'
-                        url="https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png"
+                        attribution='&copy; <a href="https://carto.com/">CARTO</a>, &copy; <a href="http://openstreetmap.org">OpenStreetMap</a> contributors'
+                        url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
                         maxZoom={20}
+                        subdomains="abcd"
                     />
 
                     {/* Route polylines (glowing) */}
