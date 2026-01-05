@@ -1,10 +1,23 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { MapContainer, TileLayer, Popup, Polyline, useMap, Marker } from 'react-leaflet';
+import { Navigation as NavigationIcon } from 'lucide-react';
 import L from 'leaflet';
 import type { LatLngExpression } from 'leaflet';
 import { ShuttleMarker } from './ShuttleMarker';
 import type { Stop, Vehicle, RoutePath, TripResponse, TripSegment } from './types';
 import { API_BASE_URL } from '@/config';
+
+// Fallback color palette for routes without a defined color
+const FALLBACK_ROUTE_COLORS = [
+    '#ef4444', // red
+    '#22c55e', // green
+    '#3b82f6', // blue
+    '#f59e0b', // amber
+    '#a855f7', // purple
+    '#14b8a6', // teal
+    '#f97316', // orange
+    '#ec4899', // pink
+];
 
 interface MapShellProps {
     systemId: number | null;
@@ -219,17 +232,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
         setActiveTripBounds(computeTripBounds(trip));
     }, [trip]);
 
-    // Fallback color palette for routes without a defined color
-    const FALLBACK_ROUTE_COLORS = [
-        '#ef4444', // red
-        '#22c55e', // green
-        '#3b82f6', // blue
-        '#f59e0b', // amber
-        '#a855f7', // purple
-        '#14b8a6', // teal
-        '#f97316', // orange
-        '#ec4899', // pink
-    ];
+
 
     const tripPolylines = useMemo(() => {
         if (!trip || !trip.segments || trip.segments.length === 0) return [];
@@ -373,8 +376,79 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                 </div>
             )}
 
-            {/* Map controls container */}
-            <div className="pointer-events-none absolute bottom-8 inset-x-0 flex flex-col md:flex-row items-center justify-center gap-3 px-6 z-[1000]">
+            {/* 
+              Map Controls Container 
+              
+              MOBILE LAYOUT:
+              - Fixed at top (top-4)
+              - Flex row, space-between
+              - Symmetrical elements
+              
+              DESKTOP LAYOUT (md:):
+              - Absolute at bottom (bottom-8)
+              - Recenter button separate at bottom-32
+            */}
+
+            {/* 1. Mobile Top Bar Container (Hidden on Desktop) */}
+            <div className="
+                md:hidden
+                fixed top-4 inset-x-4 z-[1000]
+                flex items-start justify-between gap-2
+                pointer-events-none
+            ">
+                {/* Left: Status Pill */}
+                <div className="pointer-events-auto flex items-center h-9">
+                    <div className="rounded-full bg-black/60 backdrop-blur-md px-3 py-1.5 text-[10px] font-medium text-neutral-300 border border-white/10 shadow-lg flex items-center justify-center h-full min-w-[32px]">
+                        {systemId
+                            ? loading
+                                ? '...'
+                                : <span className="whitespace-nowrap">{stops.length} stops • {vehicles.length} bus</span>
+                            : 'Select system'}
+                    </div>
+                </div>
+
+                {/* Center: Recenter Button */}
+                {systemId && (
+                    <button
+                        type="button"
+                        onClick={() => {
+                            if (!mapInstance) return;
+                            if (activeTripBounds) {
+                                mapInstance.fitBounds(activeTripBounds, { padding: [80, 80] });
+                            } else if (systemBounds) {
+                                mapInstance.fitBounds(systemBounds, { padding: [80, 80] });
+                            }
+                        }}
+                        // Absolute positioning to center it relative to screen
+                        // Removed manual offset (-ml-2) to restore true center
+                        className="pointer-events-auto absolute left-1/2 -translate-x-1/2 top-0 rounded-full bg-neutral-900/90 w-9 h-9 flex items-center justify-center text-white shadow-xl backdrop-blur-md border border-white/10 hover:bg-neutral-800 active:scale-95 transition-all"
+                        aria-label="Recenter map"
+                    >
+                        {/* Optically centered icon (slightly shifted) */}
+                        <NavigationIcon size={14} className="fill-current -translate-x-[1px] translate-y-[1px]" />
+                    </button>
+                )}
+
+                {/* Right: Show Routes Toggle */}
+                <div className="pointer-events-auto h-9 flex items-center">
+                    <button
+                        type="button"
+                        onClick={() => setShowRoutes((prev) => !prev)}
+                        className={[
+                            'rounded-full border px-3 h-full text-[10px] font-medium transition-all backdrop-blur-md shadow-lg flex items-center justify-center whitespace-nowrap',
+                            showRoutes
+                                ? 'border-crimson bg-crimson/20 text-crimson animate-pulse-subtle'
+                                : 'border-white/10 bg-black/60 text-neutral-300 hover:border-white/20',
+                        ].join(' ')}
+                    >
+                        {showRoutes ? 'Hide Routes' : 'Show Routes'}
+                    </button>
+                </div>
+            </div>
+
+
+            {/* 2. Desktop Bottom Controls (Hidden on Mobile) */}
+            <div className="hidden md:flex pointer-events-none absolute bottom-8 inset-x-0 flex-col md:flex-row items-center justify-center gap-3 px-6 z-[1000]">
                 {/* Route toggle button */}
                 <div className="pointer-events-auto order-2 md:order-1">
                     <button
@@ -418,7 +492,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                 </div>
             </div>
 
-            {/* Recenter button */}
+            {/* Desktop Recenter Button (Hidden on Mobile) */}
             {systemId && (
                 <button
                     type="button"
@@ -431,7 +505,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                             mapInstance.fitBounds(systemBounds, { padding: [80, 80] });
                         }
                     }}
-                    className="pointer-events-auto absolute right-6 bottom-32 z-[1000] rounded-full bg-neutral-900/90 px-4 py-2 text-xs font-bold text-white shadow-xl backdrop-blur-md border border-white/10 hover:bg-neutral-800 transition-all active:scale-95"
+                    className="hidden md:block pointer-events-auto absolute right-6 bottom-32 z-[1000] rounded-full bg-neutral-900/90 px-4 py-2 text-xs font-bold text-white shadow-xl backdrop-blur-md border border-white/10 hover:bg-neutral-800 transition-all active:scale-95"
                 >
                     Recenter
                 </button>

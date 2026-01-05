@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import { MapPin, Navigation, ArrowUpDown, Clock, Info, ChevronDown } from "lucide-react";
+import { motion, AnimatePresence, type PanInfo } from "framer-motion";
+import { MapPin, Navigation as NavigationIcon, ArrowUpDown, Clock, Info, ChevronDown } from "lucide-react";
 import clsx from "clsx";
 import type { TripResponse } from "./types";
 import {
@@ -20,7 +20,7 @@ interface System {
 
 interface TripPlannerPanelProps {
     className?: string;
-    onGo?: () => void;
+
     system: System | null;
     onChangeSystem: () => void;
     trip: TripResponse | null;
@@ -36,7 +36,7 @@ interface StopOption {
 }
 
 // Helper for total trip ETA
-function computeTripEtaLabel(segments: any[]): { label: string | null, partial: boolean } {
+function computeTripEtaLabel(segments: TripResponse['segments']): { label: string | null, partial: boolean } {
     let totalSeconds = 0;
     let any = false;
     let allValid = true;
@@ -58,6 +58,17 @@ function computeTripEtaLabel(segments: any[]): { label: string | null, partial: 
     return { label, partial: !allValid };
 }
 
+function useIsMobile() {
+    const [isMobile, setIsMobile] = useState(false);
+    useEffect(() => {
+        const check = () => setIsMobile(window.innerWidth < 768);
+        check();
+        window.addEventListener('resize', check);
+        return () => window.removeEventListener('resize', check);
+    }, []);
+    return isMobile;
+}
+
 export const TripPlannerPanel = ({
     className,
     system,
@@ -73,10 +84,68 @@ export const TripPlannerPanel = ({
     const [planning, setPlanning] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [itineraryOpen, setItineraryOpen] = useState(true);
+    const isMobile = useIsMobile();
 
     // Focus states for autocomplete
     const [originOpen, setOriginOpen] = useState(false);
     const [destOpen, setDestOpen] = useState(false);
+
+    // Mobile Bottom Sheet State
+    // 'minimized': ~15% height (header only)
+    // 'default': ~70% height (inputs + map)
+    // 'expanded': ~92% height (full screen list)
+    type SheetState = 'minimized' | 'default' | 'expanded';
+    const [sheetState, setSheetState] = useState<SheetState>('default');
+
+    // ... (rest of component internal logic)
+
+    // Compute vertical offset for smooth sliding animation
+    // Height is fixed at 92vh on mobile.
+    // offsets shift it down to reveal less.
+    const yOffset = useMemo(() => {
+        // Minimized always takes precedence
+        if (sheetState === 'minimized') return '77vh';
+
+        // If itinerary is closed, slide down to compact view (INPUTS ONLY)
+        // This applies to both Default and Expanded states to prevent empty space
+        if (!itineraryOpen) return '50vh';
+
+        // Otherwise follow state
+        return sheetState === 'expanded' ? '0vh' : '22vh';
+    }, [sheetState, itineraryOpen]);
+
+    // Handle drag/swipe on the grab handle
+    const handleDragEnd = (_: unknown, info: PanInfo) => {
+        const { y } = info.offset;
+        const SWIPE_THRESHOLD = 30;
+
+        if (y < -SWIPE_THRESHOLD) {
+            // Swipe Up
+            if (sheetState === 'minimized') {
+                setSheetState('default');
+            } else {
+                setSheetState('expanded');
+                setItineraryOpen(true); // Auto-open itinerary when fully expanding
+            }
+        } else if (y > SWIPE_THRESHOLD) {
+            // Swipe Down
+            if (sheetState === 'expanded') {
+                setSheetState('default');
+            } else {
+                setSheetState('minimized');
+            }
+        } else {
+            // Tap / Small movement -> Toggle
+            if (sheetState === 'minimized' || sheetState === 'expanded') {
+                setSheetState('default');
+            } else {
+                setSheetState('expanded');
+                setItineraryOpen(true); // Auto-open when toggling to expanded
+            }
+        }
+    };
+
+
 
     // New state for autocomplete and location
     type InputMode = 'search' | 'dropdown';
@@ -163,7 +232,7 @@ export const TripPlannerPanel = ({
                     try {
                         const data = await res.json();
                         if (data?.detail) message = data.detail;
-                    } catch { }
+                    } catch { /* ignore */ }
                     throw new Error(message);
                 }
                 return res.json();
@@ -293,9 +362,10 @@ export const TripPlannerPanel = ({
             });
             setLastUpdatedAt(new Date());
             setIsLiveUpdating(true);
-        } catch (e: any) {
+        } catch (e) {
             console.error(e);
-            setError(e.message || 'Could not plan trip. Please try again.');
+            const message = e instanceof Error ? e.message : "Unknown error";
+            setError(message);
             onTripChange(null);
         } finally {
             setPlanning(false);
@@ -310,7 +380,7 @@ export const TripPlannerPanel = ({
     };
 
     // Helper: Check if trip has real-time data
-    const hasRealtimeData = (t: typeof trip): boolean => {
+    const hasRealtimeData = (t: TripResponse | null): boolean => {
         if (!t) return false;
         return t.segments.some((seg) => seg.next_bus != null);
     };
@@ -412,16 +482,44 @@ export const TripPlannerPanel = ({
     return (
         <motion.div
             className={clsx(
-                "bg-neutral-900/90 backdrop-blur-md border border-white/5 shadow-xl rounded-xl overflow-hidden flex flex-col max-h-[85vh]",
+                // Interactive element
+                "pointer-events-auto",
+                // Mobile: rounded-t-3xl only, border top only, full width
+                "rounded-t-3xl md:rounded-xl",
+                "bg-neutral-900/95 backdrop-blur-xl md:backdrop-blur-md",
+                "border-t md:border border-white/10 md:border-white/5",
+                "shadow-[0_-8px_30px_rgba(0,0,0,0.5)] md:shadow-xl",
+                "flex flex-col",
+
+                // Mobile: fixed tall height, slide using transform
+                "h-[92vh]",
+
+                "md:max-h-[85vh] md:h-auto md:translate-y-0", // Reset on desktop
                 className
             )}
-            initial={{ y: -20, opacity: 0 }}
-            animate={{ y: 0, opacity: 1 }}
-            transition={{ delay: 0.5, duration: 0.5 }}
+            initial={{ y: "100%", opacity: 0 }}
+            animate={{
+                y: isMobile ? yOffset : 0,
+                opacity: 1
+            }}
+            transition={{ type: "spring", damping: 20, stiffness: 200, mass: 0.8 }}
         >
-            <div className="p-4 flex flex-col h-full max-h-[85vh]">
+            {/* Mobile Grab Handle - Swipeable */}
+            <motion.div
+                className="md:hidden w-full flex justify-center py-3 shrink-0 cursor-grab active:cursor-grabbing touch-none z-50"
+                onPanEnd={handleDragEnd}
+                title="Swipe up/down to resize"
+            >
+                <div className={clsx(
+                    "w-12 h-1.5 rounded-full bg-neutral-600/50 transition-colors",
+                    sheetState === 'expanded' && "bg-crimson/50",
+                    sheetState === 'minimized' && "bg-blue-500/30" // Subtle hint for minimized
+                )} />
+            </motion.div>
+
+            <div className="px-4 pb-4 pt-1 md:pt-4 flex flex-col h-full min-h-0">
                 {/* Header with System Selector */}
-                <div className="flex items-center justify-between shrink-0">
+                <div className="flex items-center justify-between shrink-0 mb-3">
                     <div className="flex items-center gap-2">
                         <img src={logo} alt="Crimson Shuttle" className="h-6 w-auto opacity-90" />
                         <div className="flex flex-col">
@@ -449,7 +547,7 @@ export const TripPlannerPanel = ({
                     <div className="space-y-1.5 relative">
                         <div className="flex items-center justify-between">
                             <div className="flex items-center gap-1.5 px-0.5">
-                                <Navigation size={12} className="text-neutral-400" />
+                                <NavigationIcon size={12} className="text-neutral-400" />
                                 <span className="text-[10px] font-bold text-neutral-500 uppercase tracking-wider">From</span>
                             </div>
                             <button
@@ -474,12 +572,15 @@ export const TripPlannerPanel = ({
                                         setOriginOpen(true);
                                         resetLiveState();
                                     }}
-                                    onFocus={() => setOriginOpen(true)}
+                                    onFocus={() => {
+                                        setOriginOpen(true);
+                                        setItineraryOpen(false); // Auto-collapse on focus for mobile space
+                                    }}
                                     onBlur={() => {
                                         setTimeout(() => setOriginOpen(false), 120);
                                     }}
                                     placeholder="Search for a stop..."
-                                    className="w-full bg-neutral-800/70 border border-white/5 focus:border-crimson/50 rounded-lg px-3 py-2 text-xs text-white outline-none transition-all placeholder:text-neutral-600"
+                                    className="w-full bg-neutral-800/70 border border-white/5 focus:border-crimson/50 rounded-lg px-3 py-2 text-[16px] md:text-xs text-white outline-none transition-all placeholder:text-neutral-600"
                                 />
 
                                 <button
@@ -496,24 +597,36 @@ export const TripPlannerPanel = ({
                                 </button>
 
                                 {/* Suggestions */}
-                                {originOpen && !originUseCurrentLocation && originQuery && originSuggestions.length > 0 && (
+                                {originOpen && originQuery && !originUseCurrentLocation && (
                                     <div className="absolute z-50 left-0 right-0 mt-1 max-h-48 overflow-y-auto rounded-lg bg-neutral-900 border border-white/10 shadow-2xl custom-scrollbar py-1">
-                                        {originSuggestions.map((s) => (
-                                            <button
-                                                key={s.id}
-                                                type="button"
-                                                onMouseDown={(e) => e.preventDefault()}
-                                                onClick={() => {
-                                                    setOriginStopId(s.id.toString());
-                                                    setOriginQuery(s.name);
-                                                    setOriginOpen(false);
-                                                }}
-                                                className="w-full text-left px-3 py-2 text-xs text-neutral-300 hover:bg-white/5 hover:text-white transition-colors flex items-center gap-2"
-                                            >
-                                                <div className="w-1 h-1 rounded-full bg-neutral-600" />
-                                                {s.name}
-                                            </button>
-                                        ))}
+                                        {originSuggestions.length > 0 ? (
+                                            originSuggestions.map((s) => (
+                                                <button
+                                                    key={s.id}
+                                                    type="button"
+                                                    onMouseDown={(e) => e.preventDefault()}
+                                                    onClick={() => {
+                                                        setOriginStopId(s.id.toString());
+                                                        setOriginQuery(s.name);
+                                                        setOriginOpen(false); // Immediate close
+                                                        setItineraryOpen(true);
+
+                                                        // Force blur to hide mobile keyboard
+                                                        if (document.activeElement instanceof HTMLElement) {
+                                                            document.activeElement.blur();
+                                                        }
+                                                    }}
+                                                    className="w-full text-left px-3 py-2 text-xs text-neutral-300 hover:bg-white/5 hover:text-white transition-colors flex items-center gap-2"
+                                                >
+                                                    <div className="w-1 h-1 rounded-full bg-neutral-600" />
+                                                    {s.name}
+                                                </button>
+                                            ))
+                                        ) : (
+                                            <div className="px-3 py-2 text-[10px] text-neutral-500 italic">
+                                                No matches found
+                                            </div>
+                                        )}
                                     </div>
                                 )}
                             </div>
@@ -528,7 +641,7 @@ export const TripPlannerPanel = ({
                                     setOriginQuery(stop ? stop.name : '');
                                     resetLiveState();
                                 }}
-                                className="w-full bg-neutral-800/70 border border-white/5 focus:border-crimson/50 rounded-lg px-3 py-2 text-xs text-white outline-none transition-all appearance-none"
+                                className="w-full bg-neutral-800/70 border border-white/5 focus:border-crimson/50 rounded-lg px-3 py-2 text-[16px] md:text-xs text-white outline-none transition-all appearance-none"
                                 disabled={loadingStops || !system}
                             >
                                 <option value="">{loadingStops ? 'Loading stops...' : 'Select origin...'}</option>
@@ -567,33 +680,48 @@ export const TripPlannerPanel = ({
                                         setDestOpen(true);
                                         resetLiveState();
                                     }}
-                                    onFocus={() => setDestOpen(true)}
+                                    onFocus={() => {
+                                        setDestOpen(true);
+                                        setItineraryOpen(false);
+                                    }}
                                     onBlur={() => {
                                         setTimeout(() => setDestOpen(false), 120);
                                     }}
                                     placeholder="Search for a stop..."
-                                    className="w-full bg-neutral-800/70 border border-white/5 focus:border-crimson/50 rounded-lg px-3 py-2 text-xs text-white outline-none transition-all placeholder:text-neutral-600"
+                                    className="w-full bg-neutral-800/70 border border-white/5 focus:border-crimson/50 rounded-lg px-3 py-2 text-[16px] md:text-xs text-white outline-none transition-all placeholder:text-neutral-600"
                                 />
 
                                 {/* Suggestions */}
-                                {destOpen && destQuery && destSuggestions.length > 0 && (
+                                {destOpen && destQuery && (
                                     <div className="absolute z-50 left-0 right-0 mt-1 max-h-48 overflow-y-auto rounded-lg bg-neutral-900 border border-white/10 shadow-2xl custom-scrollbar py-1">
-                                        {destSuggestions.map((s) => (
-                                            <button
-                                                key={s.id}
-                                                type="button"
-                                                onMouseDown={(e) => e.preventDefault()}
-                                                onClick={() => {
-                                                    setDestStopId(s.id.toString());
-                                                    setDestQuery(s.name);
-                                                    setDestOpen(false);
-                                                }}
-                                                className="w-full text-left px-3 py-2 text-xs text-neutral-300 hover:bg-white/5 hover:text-white transition-colors flex items-center gap-2"
-                                            >
-                                                <div className="w-1 h-1 rounded-full bg-neutral-600" />
-                                                {s.name}
-                                            </button>
-                                        ))}
+                                        {destSuggestions.length > 0 ? (
+                                            destSuggestions.map((s) => (
+                                                <button
+                                                    key={s.id}
+                                                    type="button"
+                                                    onMouseDown={(e) => e.preventDefault()}
+                                                    onClick={() => {
+                                                        setDestStopId(s.id.toString());
+                                                        setDestQuery(s.name);
+                                                        setDestOpen(false); // Immediate close
+                                                        setItineraryOpen(true);
+
+                                                        // Force blur to hide mobile keyboard
+                                                        if (document.activeElement instanceof HTMLElement) {
+                                                            document.activeElement.blur();
+                                                        }
+                                                    }}
+                                                    className="w-full text-left px-3 py-2 text-xs text-neutral-300 hover:bg-white/5 hover:text-white transition-colors flex items-center gap-2"
+                                                >
+                                                    <div className="w-1 h-1 rounded-full bg-neutral-600" />
+                                                    {s.name}
+                                                </button>
+                                            ))
+                                        ) : (
+                                            <div className="px-3 py-2 text-[10px] text-neutral-500 italic">
+                                                No matches found
+                                            </div>
+                                        )}
                                     </div>
                                 )}
                             </div>
@@ -606,7 +734,7 @@ export const TripPlannerPanel = ({
                                     setDestQuery(stop ? stop.name : '');
                                     resetLiveState();
                                 }}
-                                className="w-full bg-neutral-800 border border-white/5 focus:border-crimson/50 rounded-lg px-3 py-2 text-xs text-white outline-none transition-all appearance-none"
+                                className="w-full bg-neutral-800 border border-white/5 focus:border-crimson/50 rounded-lg px-3 py-2 text-[16px] md:text-xs text-white outline-none transition-all appearance-none"
                                 disabled={loadingStops || !system}
                             >
                                 <option value="">{loadingStops ? 'Loading stops...' : 'Select destination...'}</option>
@@ -681,26 +809,17 @@ export const TripPlannerPanel = ({
                 {error && <p className="text-xs text-red-400 font-medium -mt-2 mb-2 px-1">{error}</p>}
 
                 {/* Itinerary Section */}
-                <div className="flex-1 overflow-hidden flex flex-col pt-2 min-h-0">
+                <div className="flex-1 overflow-hidden flex flex-col pt-2 min-h-0 border-t border-white/5 mt-auto">
                     {/* ITINERARY header with collapse toggle */}
-                    <div className="mb-2 flex items-center justify-between text-xs text-neutral-500">
-                        <button
-                            type="button"
-                            onClick={() => setItineraryOpen((o) => !o)}
-                            className="flex items-center gap-2 group"
-                        >
+                    <div
+                        className="py-2 flex items-center justify-between text-xs text-neutral-500 cursor-pointer"
+                        onClick={() => setItineraryOpen((o) => !o)}
+                    >
+                        <div className="flex items-center gap-2 group">
                             <span className="tracking-[0.2em] uppercase font-bold text-[10px] text-neutral-500">Itinerary</span>
-                            <span className="text-[10px] text-neutral-600 font-medium opacity-0 group-hover:opacity-100 transition-opacity">
-                                {itineraryOpen ? 'Hide' : 'Show'}
-                            </span>
-                        </button>
+                        </div>
 
-                        <button
-                            type="button"
-                            onClick={() => setItineraryOpen((o) => !o)}
-                            className="rounded-full bg-neutral-800/50 p-1 hover:bg-neutral-800 transition-colors"
-                            aria-label={itineraryOpen ? 'Collapse itinerary' : 'Expand itinerary'}
-                        >
+                        <div className="rounded-full bg-neutral-800/50 p-1 hover:bg-neutral-800 transition-colors">
                             <ChevronDown
                                 size={12}
                                 className={clsx(
@@ -708,7 +827,7 @@ export const TripPlannerPanel = ({
                                     itineraryOpen ? "rotate-180" : ""
                                 )}
                             />
-                        </button>
+                        </div>
                     </div>
 
                     <AnimatePresence initial={false}>
@@ -718,10 +837,15 @@ export const TripPlannerPanel = ({
                                 initial={{ opacity: 0, height: 0 }}
                                 animate={{ opacity: 1, height: 'auto' }}
                                 exit={{ opacity: 0, height: 0 }}
-                                transition={{ duration: 0.2, ease: 'easeOut' }}
-                                className="mt-2 overflow-hidden flex-1 flex flex-col min-h-0"
+                                transition={{ duration: 0.3, ease: 'circOut' }}
+                                className="overflow-hidden flex flex-col"
                             >
-                                <div className="flex-1 overflow-y-auto overscroll-contain touch-pan-y [-webkit-overflow-scrolling:touch] space-y-3 pr-1 custom-scrollbar">
+                                {/* 
+                                  Scrollable Container
+                                  - constrained max height on mobile to prevent full screen takeover
+                                  - full height on desktop within panel limits 
+                                */}
+                                <div className="max-h-[60vh] md:max-h-[45vh] overflow-y-auto overscroll-contain touch-pan-y custom-scrollbar pr-1 pb-2 space-y-3">
                                     <AnimatePresence mode="wait">
                                         {!hasTrip ? (
                                             <motion.div
@@ -729,16 +853,16 @@ export const TripPlannerPanel = ({
                                                 initial={{ opacity: 0 }}
                                                 animate={{ opacity: 1 }}
                                                 exit={{ opacity: 0 }}
-                                                className="flex flex-col items-center justify-center py-8 text-center text-neutral-500"
+                                                className="flex flex-col items-center justify-center py-6 text-center text-neutral-500"
                                             >
                                                 <Info size={24} className="mb-2 opacity-20" />
                                                 <p className="text-[11px] leading-relaxed max-w-[180px]">
-                                                    Select your stops and tap <span className="text-neutral-400 font-semibold">Plan Trip</span> to see the best route and live ETAs.
+                                                    Select your stops and tap <span className="text-neutral-400 font-semibold">Plan Trip</span>.
                                                 </p>
                                             </motion.div>
                                         ) : (
                                             <motion.div
-                                                key="itinerary-content"
+                                                key="itinerary-list"
                                                 initial={{ opacity: 0, y: 10 }}
                                                 animate={{ opacity: 1, y: 0 }}
                                                 className="space-y-4"

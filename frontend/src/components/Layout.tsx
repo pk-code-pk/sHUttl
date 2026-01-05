@@ -19,35 +19,53 @@ export const Layout = ({ system, onChangeSystem, trip, onTripChange }: LayoutPro
     const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
 
     return (
-        <div className="relative w-full h-screen overflow-hidden flex flex-col">
-            {/* Background Map */}
+        <div className="relative w-full h-screen overflow-hidden">
+            {/* Background Map - fills entire screen */}
             <div className="absolute inset-0 z-0">
                 <MapShell systemId={system?.id ?? null} trip={trip} userLocation={userLocation} />
             </div>
 
-            {/* Foreground UI Layer - pointer-events-none so map is interactive */}
-            <div className="relative z-10 pointer-events-none w-full h-full flex flex-col">
-                {/* Top Section - still pointer-events-none */}
-                <div className="p-4 md:p-6 flex flex-col md:flex-row md:items-start gap-4">
-                    {/* Trip Planner Card - only this element intercepts events */}
-                    <div className="pointer-events-auto w-full md:w-[400px]">
-                        <TripPlannerPanel
-                            onGo={() => console.log("Go clicked")}
-                            system={system}
-                            onChangeSystem={onChangeSystem}
-                            trip={trip}
-                            onTripChange={onTripChange}
-                            onUserLocationChange={setUserLocation}
-                        />
-                    </div>
+            {/* 
+              UI Overlay Container 
+              - pointer-events-none allows clicks to pass through to map
+              - On mobile: fixed bottom-0 for bottom sheet
+              - On desktop: relative flex layout for side panel
+            */}
+            <div className="
+                pointer-events-none
+                fixed inset-x-0 bottom-0 z-20 
+                /* Mobile: Full edge-to-edge width */
+                w-full
+                
+                /* Desktop: reset positioning */
+                md:static md:inset-auto md:h-full md:w-full
+                flex flex-col md:flex-row md:items-start md:p-6
+            ">
+                {/* 
+                  Trip Planner Panel Container 
+                  - pointer-events-auto re-enables clicks for the panel itself
+                  - Mobile: w-full
+                  - Desktop: w-[400px]
+                */}
+                <div className="
+                    w-full md:w-[400px]
+                    flex justify-center md:block
+                ">
+                    <TripPlannerPanel
+                        className="w-full"
+                        system={system}
+                        onChangeSystem={onChangeSystem}
+                        trip={trip}
+                        onTripChange={onTripChange}
+                        onUserLocationChange={setUserLocation}
+                    />
                 </div>
 
-                {/* Bottom spacer - no pointer events */}
-                <div className="flex-1" />
-
-                {/* Developer Footer - only this element intercepts events */}
-                <div className="p-2 text-center pb-4 md:pb-2">
-                    <p className="pointer-events-auto inline-block text-[10px] text-neutral-500/80 font-medium">Developed by Praneel Khiantani</p>
+                {/* Developer Footer - hidden on mobile bottom sheet mode to save space, visible on desktop */}
+                <div className="hidden md:block fixed bottom-2 left-1/2 -translate-x-1/2 pointer-events-none">
+                    <p className="pointer-events-auto bg-black/40 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-white/50 font-medium">
+                        Developed by Keyan K
+                    </p>
                 </div>
             </div>
         </div>
