@@ -1097,6 +1097,323 @@ def build_trip_segments(path_stop_ids, segments, stop_by_id, system_id: int = DE
 
 
 
+
+def build_direct_candidate(origin_stop, dest_stop, system_id: int):
+    # 1. Find common routes
+    routes = find_common_routes(origin_stop, dest_stop, system_id)
+    if not routes:
+        return {"segments": None, "has_live_bus": False, "all_live": False}
+        
+    # 2. Enrich all of them to find the best functioning one
+    #    We need to attach full stop lists for accurate ETA
+    real_routes = {r.myid: r for r in get_routes(system_id)}
+    
+    enrichable_routes = []
+    for r in routes:
+        rr = real_routes.get(r["route_id"])
+        r_copy = dict(r)
+        if rr and hasattr(rr, 'getStops'):
+             r_copy["stops"] = [stopdict(s) for s in rr.getStops()]
+        enrichable_routes.append(r_copy)
+        
+    enriched_routes = enrich_routes_with_next_bus(enrichable_routes, origin_stop, system_id)
+    
+    # 3. Classify live vs dead
+    live = [r for r in enriched_routes if r.get("next_bus") and is_valid_eta(r["next_bus"].get("eta_to_origin_stop"))]
+    
+    has_live = len(live) > 0
+    
+    # 4. Choose best route
+    if has_live:
+        # Min ETA
+        best = min(live, key=lambda x: x["next_bus"]["eta_to_origin_stop"])
+    else:
+        # Fallback: Just take the first one
+        best = enriched_routes[0]
+        
+    # 5. Build segment
+    #    For display, we'll just use [origin, dest] to avoid graph complexity for now.
+    segment = {
+        "route_id": best.get("route_id"),
+        "route_name": best.get("route_name"),
+        "short_name": best.get("short_name"),
+        "color": best.get("color"),
+        "start_stop": stopdict(origin_stop),
+        "end_stop": stopdict(dest_stop),
+        "stops": [stopdict(origin_stop), stopdict(dest_stop)], 
+        "next_bus": best.get("next_bus"),
+        "leg_index": 0
+    }
+    
+    return {
+        "segments": [segment],
+        "has_live_bus": has_live,
+        "all_live": has_live
+    }
+
+
+MAX_WALK_M = 500
+MAX_NEARBY_STOPS = 5
+
+def find_nearby_stops(lat: float, lng: float, system_id: int) -> list[tuple[object, float]]:
+    stops = get_stops(system_id)
+    candidates = []
+    
+    for s in stops:
+        d = distance_m(lat, lng, s.latitude, s.longitude)
+        if d <= MAX_WALK_M:
+            candidates.append((s, d))
+            
+    candidates.sort(key=lambda pair: pair[1])
+    return candidates[:MAX_NEARBY_STOPS]
+
+
+def plan_base_no_transfer_trip(
+    origin_stop,
+    dest_stop,
+    user_origin_lat: float,
+    user_origin_lng: float,
+    user_dest_lat: float,
+    user_dest_lng: float,
+    system_id: int,
+):
+    routes = find_common_routes(origin_stop, dest_stop, system_id)
+    if not routes:
+        return None
+
+    # Enrich to check liveness
+    real_routes = {r.myid: r for r in get_routes(system_id)}
+    enrichable_routes = []
+    for r in routes:
+        rr = real_routes.get(r["route_id"])
+        r_copy = dict(r)
+        if rr and hasattr(rr, 'getStops'):
+             r_copy["stops"] = [stopdict(s) for s in rr.getStops()]
+        enrichable_routes.append(r_copy)
+        
+    enriched_routes = enrich_routes_with_next_bus(enrichable_routes, origin_stop, system_id)
+    
+    # Prefer live
+    live_routes = [
+        r for r in enriched_routes
+        if r.get("next_bus") and is_valid_eta(r["next_bus"].get("eta_to_origin_stop"))
+    ]
+    
+    if live_routes:
+        chosen_route = min(live_routes, key=lambda r: r["next_bus"]["eta_to_origin_stop"])
+    else:
+        chosen_route = enriched_routes[0]
+
+    # Build segment
+    segment = {
+        "route_id": chosen_route.get("route_id"),
+        "route_name": chosen_route.get("route_name"),
+        "short_name": chosen_route.get("short_name"),
+        "color": chosen_route.get("color"),
+        "start_stop": stopdict(origin_stop),
+        "end_stop": stopdict(dest_stop),
+        "stops": [stopdict(origin_stop), stopdict(dest_stop)], 
+        "next_bus": chosen_route.get("next_bus"),
+        "leg_index": 0
+    }
+    segments = [segment]
+    
+    origin_walk = distance_m(user_origin_lat, user_origin_lng, origin_stop.latitude, origin_stop.longitude)
+    dest_walk = distance_m(user_dest_lat, user_dest_lng, dest_stop.latitude, dest_stop.longitude)
+    
+    trip = {
+        "origin": {
+            "location": {"lat": user_origin_lat, "lng": user_origin_lng},
+            "nearest_stop": stopdict(origin_stop),
+            "distance_m": origin_walk,
+        },
+        "destination": {
+            "location": {"lat": user_dest_lat, "lng": user_dest_lng},
+            "nearest_stop": stopdict(dest_stop),
+            "distance_m": dest_walk,
+        },
+        "system_id": system_id,
+        "segments": segments,
+    }
+    
+    has_live_bus = any(
+        seg.get("next_bus") and is_valid_eta(seg["next_bus"].get("eta_to_origin_stop"))
+        for seg in segments
+    )
+
+    return {
+        "kind": "base_no_transfer",
+        "trip": trip,
+        "segments": segments,
+        "has_live_bus": has_live_bus,
+        "num_transfers": 0,
+        "total_walk_m": origin_walk + dest_walk,
+    }
+
+def plan_base_transfer_trip(
+    origin_stop,
+    dest_stop,
+    user_origin_lat: float,
+    user_origin_lng: float,
+    user_dest_lat: float,
+    user_dest_lng: float,
+    system_id: int,
+    debug: bool = False
+):
+    graph, stop_by_id = get_route_graph(system_id)
+    origin_id = str(origin_stop.id)
+    dest_id = str(dest_stop.id)
+
+    path_candidates = find_k_paths(graph, origin_id, dest_id, k=1, max_depth=5)
+    if not path_candidates:
+        return None
+
+    nodes, edges = path_candidates[0]
+    routes_list = get_routes(system_id)
+    rid_to_name = {norm_id(r.myid): r.name for r in routes_list if r.myid}
+
+    raw_segments = compress_path_by_route(nodes, edges, rid_to_canonical=rid_to_name)
+    segments = build_trip_segments(nodes, raw_segments, stop_by_id, system_id, debug=debug)
+    segments = merge_segments_for_display(segments)
+
+    if not segments:
+         return None
+
+    origin_walk = distance_m(user_origin_lat, user_origin_lng, origin_stop.latitude, origin_stop.longitude)
+    dest_walk = distance_m(user_dest_lat, user_dest_lng, dest_stop.latitude, dest_stop.longitude)
+
+    trip = {
+        "origin": {
+            "location": {"lat": user_origin_lat, "lng": user_origin_lng},
+            "nearest_stop": stopdict(origin_stop),
+            "distance_m": origin_walk,
+        },
+        "destination": {
+            "location": {"lat": user_dest_lat, "lng": user_dest_lng},
+            "nearest_stop": stopdict(dest_stop),
+            "distance_m": dest_walk,
+        },
+        "system_id": system_id,
+        "segments": segments,
+    }
+
+    has_live_bus = any(
+        seg.get("next_bus") and is_valid_eta(seg["next_bus"].get("eta_to_origin_stop"))
+        for seg in segments
+    )
+    
+    return {
+        "kind": "base_transfer",
+        "trip": trip,
+        "segments": segments,
+        "has_live_bus": has_live_bus,
+        "num_transfers": max(len(segments) - 1, 0),
+        "total_walk_m": origin_walk + dest_walk,
+    }
+
+
+def plan_walk_modified_trip(
+    user_origin_lat: float,
+    user_origin_lng: float,
+    user_dest_lat: float,
+    user_dest_lng: float,
+    system_id: int,
+    debug: bool = False
+):
+    # Get candidates
+    origin_candidates = find_nearby_stops(user_origin_lat, user_origin_lng, system_id)
+    dest_candidates = find_nearby_stops(user_dest_lat, user_dest_lng, system_id)
+    
+    best_candidate = None
+    # We want to minimize score:
+    # score = num_transfers*300 + total_walk*0.5 + (live penalty?)
+    # But wait, we just want to find ONE best "walk-modified" trip to propose as a candidate.
+    # The global selector compares types.
+    # So here we want to return the "best reachable trip via walking".
+    
+    best_score = float("inf")
+
+    # To optimize: try nearest first (candidates are sorted by distance)
+    # We'll try up to N combinations, let's say top 3x3 = 9 check
+    # But for each pair we try Direct then Transfer.
+    
+    for o_stop, o_walk_dist in origin_candidates:
+        for d_stop, d_walk_dist in dest_candidates:
+            # 1. Try No-Transfer first (cheaper, preferred)
+            cand = plan_base_no_transfer_trip(o_stop, d_stop, user_origin_lat, user_origin_lng, user_dest_lat, user_dest_lng, system_id)
+            if not cand:
+                # 2. Try Transfer
+                cand = plan_base_transfer_trip(o_stop, d_stop, user_origin_lat, user_origin_lng, user_dest_lat, user_dest_lng, system_id, debug)
+            
+            if not cand:
+                continue
+                
+            # Score this candidate to pick the best "Walk-Modified" option
+            # Prefer Live, Fewer Transfers, Less Walking
+            
+            # Category roughly:
+            # 0. Live & Direct
+            # 1. Live & Transfer
+            # 2. Dead & Direct
+            # 3. Dead & Transfer
+            
+            cat_score = 0
+            if cand["has_live_bus"] and cand["num_transfers"] == 0: cat_score = 0
+            elif cand["has_live_bus"]: cat_score = 1
+            elif not cand["has_live_bus"] and cand["num_transfers"] == 0: cat_score = 2
+            else: cat_score = 3
+            
+            # Weighted score
+            sub_score = (
+                cat_score * 10000 
+                + cand["num_transfers"] * 500 
+                + cand["total_walk_m"] * 0.5
+            )
+            
+            if sub_score < best_score:
+                best_score = sub_score
+                best_candidate = cand
+                # Mark kind as walk_modified
+                best_candidate["kind"] = "walk_modified"
+
+    return best_candidate
+
+
+def select_best_candidate(candidates):
+    def category(c) -> int:
+        live = c["has_live_bus"]
+        transfers = c["num_transfers"]
+        kind = c["kind"]
+
+        if live and transfers == 0 and kind == "base_no_transfer":
+            return 1  # live, no transfers
+        if live and kind == "walk_modified":
+            return 2  # live, walk-modified
+        if live and transfers >= 1 and kind == "base_transfer":
+            return 3  # live, transfers
+        if not live and transfers == 0 and kind == "base_no_transfer":
+            return 4  # dead, no transfers
+        if not live and kind == "walk_modified":
+            return 5  # dead, walk-modified
+        if not live and transfers >= 1 and kind == "base_transfer":
+            return 6  # dead, transfers
+        return 999  # fallback
+
+    def tie_breaker(c) -> float:
+        transfers = c["num_transfers"]
+        walk = c["total_walk_m"]
+        # Try to get a representative ETA
+        eta = 0.0
+        for seg in c["segments"]:
+            nb = seg.get("next_bus")
+            if nb and nb.get("eta_to_origin_stop") is not None:
+                eta = nb["eta_to_origin_stop"]
+                break
+        return transfers * 1000.0 + walk * 0.2 + (eta * 0.1)
+
+    return min(candidates, key=lambda c: (category(c), tie_breaker(c)))
+
+
 @app.get("/trip", dependencies=[Depends(OptionalRateLimiter(times=20, seconds=60))])
 def api_trip(
     lat: float = Query(..., ge=-90, le=90),
@@ -1110,8 +1427,8 @@ def api_trip(
     if system_id <= 0:
         raise HTTPException(status_code=400, detail="Invalid system_id")
 
-    # snaps user loc to nearest stops 
-    base, origin_stop, dest_stop = match_stops(lat, lng, lat2, lng2, system_id)
+    # 1. Match Nearest Stops (Base Case)
+    _, origin_stop, dest_stop = match_stops(lat, lng, lat2, lng2, system_id)
 
     if origin_stop is None or dest_stop is None:
         raise HTTPException(
@@ -1119,57 +1436,49 @@ def api_trip(
             detail="No nearby shuttle stops found for origin or destination",
         )
 
-    graph, stop_by_id = get_route_graph(system_id)
-    origin_id = str(origin_stop.id)
-    dest_id = str(dest_stop.id)
+    candidates = []
 
-    # 1) Find multiple candidate paths
-    path_candidates = find_k_paths(graph, origin_id, dest_id, k=5, max_depth=5)
+    # 2. Generate Base Candidates
+    #    - Base No-Transfer
+    nt_cand = plan_base_no_transfer_trip(origin_stop, dest_stop, lat, lng, lat2, lng2, system_id)
+    if nt_cand:
+        candidates.append(nt_cand)
+        
+    #    - Base Transfer
+    tr_cand = plan_base_transfer_trip(origin_stop, dest_stop, lat, lng, lat2, lng2, system_id, debug=debug)
+    if tr_cand:
+        candidates.append(tr_cand)
 
-    if not path_candidates:
+    # 3. Generate Walk-Modified Candidate
+    walk_cand = plan_walk_modified_trip(lat, lng, lat2, lng2, system_id, debug=debug)
+    if walk_cand:
+        candidates.append(walk_cand)
+        
+    if not candidates:
         raise HTTPException(
             status_code=404,
-            detail="No shuttle route found between these locations",
+            detail="No shuttle route with live tracking found.",
         )
 
-    # 1.5) Build canonical mapping for compression
-    routes_list = get_routes(system_id)
-    rid_to_name = {norm_id(r.myid): r.name for r in routes_list if r.myid}
-
-    # 2) Enrich and rank all candidates
-    candidate_data = []
-    for nodes, edges in path_candidates:
-        raw_segments = compress_path_by_route(nodes, edges, rid_to_canonical=rid_to_name)
-        segments = build_trip_segments(nodes, raw_segments, stop_by_id, system_id, debug=debug)
-        
-        metrics = get_path_metrics(segments)
-        candidate_data.append({
-            "segments": segments,
-            "metrics": metrics,
-            "sort_key": path_sort_key(metrics)
-        })
-
-    # 3) Pick best candidate
-    candidate_data.sort(key=lambda x: x["sort_key"])
-    best_candidate = candidate_data[0]
+    # 4. Select Best
+    chosen = select_best_candidate(candidates)
     
-    # 4) Merge segments for display if they are the same route line
-    final_segments = merge_segments_for_display(best_candidate["segments"])
-
-    base["system_id"] = system_id
-    base["segments"] = final_segments
-    
+    # If debug enabled, inject selection info
     if debug_paths:
-        base["candidate_paths"] = [
-            {
-                "routes": [s["route_id"] for s in c["segments"]],
-                "metrics": c["metrics"]
-            }
-            for c in candidate_data
-        ]
-        base["best_index"] = 0
-
-    return base
+        chosen["trip"]["debug_selection"] = {
+            "chosen_kind": chosen["kind"],
+            "candidates": [
+                {
+                    "kind": c["kind"],
+                    "live": c["has_live_bus"],
+                    "transfers": c["num_transfers"],
+                    "walk": c["total_walk_m"]
+                }
+                for c in candidates
+            ]
+        }
+        
+    return chosen["trip"]
 
 
 @app.get("/vehicles_raw")
