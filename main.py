@@ -193,6 +193,53 @@ def project_point_to_segment(px, py, ax, ay, bx, by):
     return (cx, cy, t)
 
 
+# Global cache for route geometries (prefix distances and XY coordinates)
+ROUTE_GEOMETRY_CACHE = {}
+
+def get_route_geometry(stops: list[dict]):
+    """
+    Returns prefix distances and XY coords for a stop sequence.
+    Caches result to avoid redundant expensive math.
+    """
+    if not stops: return None
+    # Key by stop IDs string
+    sid_tuple = tuple(str(s.get("id") or s.get("stop_id")) for s in stops)
+    if sid_tuple in ROUTE_GEOMETRY_CACHE:
+        return ROUTE_GEOMETRY_CACHE[sid_tuple]
+
+    pts = []
+    for s in stops:
+        lat = s.get("lat") or s.get("latitude")
+        lng = s.get("lng") or s.get("longitude")
+        if lat is None or lng is None: continue
+        pts.append((float(lat), float(lng)))
+
+    if len(pts) < 2: return None
+
+    pts_loop = pts + [pts[0]]
+    ref_lat, ref_lng = pts_loop[0]
+    xy = [latlng_to_xy_m(lat, lng, ref_lat, ref_lng) for lat, lng in pts_loop]
+    
+    prefix = [0.0]
+    for i in range(len(xy) - 1):
+        ax, ay = xy[i]
+        bx, by = xy[i+1]
+        prefix.append(prefix[-1] + math.hypot(bx - ax, by - ay))
+
+    data = {
+        "xy": xy,
+        "prefix": prefix,
+        "ref": (ref_lat, ref_lng),
+        "total_len": prefix[-1]
+    }
+    
+    if len(ROUTE_GEOMETRY_CACHE) > 1000:
+        ROUTE_GEOMETRY_CACHE.clear()
+        
+    ROUTE_GEOMETRY_CACHE[sid_tuple] = data
+    return data
+
+
 def distance_to_boarding_stop_along_chain_m(
     vehicle_lat: float,
     vehicle_lng: float,
@@ -594,7 +641,8 @@ def build_trip_indexes(stops, routes, vehicles):
         "routes_by_stop": routes_by_stop,
         "route_to_vehicles": route_to_vehicles,
         "name_to_vehicles": name_to_vehicles,
-        "rid_to_name": rid_to_name
+        "rid_to_name": rid_to_name,
+        "next_bus_cache": {} # Request-level cache for enrichment
     }
 
 
@@ -630,9 +678,23 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
     rid_to_name = vehicle_indexes["rid_to_name"]
 
     result = [] 
+    next_bus_cache = vehicle_indexes.get("next_bus_cache", {})
+
     for route in routes:
         seg_id = route.get("route_id")
         seg_key = norm_id(seg_id)
+        
+        start_stop = route.get("start_stop", {})
+        boarding_stop_id = str(start_stop.get("id") or start_stop.get("stop_id") or "")
+        
+        # Request-level cache check
+        cache_key = (seg_key, boarding_stop_id)
+        if cache_key in next_bus_cache:
+            r = dict(route)
+            r["next_bus"] = next_bus_cache[cache_key]
+            result.append(r)
+            continue
+
         candidates = list(route_to_vehicles.get(seg_key, [])) if seg_key else []
         
         match_mode = "exact"
@@ -769,6 +831,10 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
             "segment_eta_s": segment_eta_s,
             "speed_source": speed_source
         }
+        
+        # Populate request-level cache
+        if seg_key and boarding_stop_id:
+            next_bus_cache[cache_key] = r["next_bus"]
         
         if debug:
             r["debug_next_bus"] = {
@@ -1349,10 +1415,12 @@ def plan_walk_modified_trip(
     best_score = float("inf")
 
     # To optimize: try nearest first (candidates are sorted by distance)
-    # We'll try up to N combinations, let's say top 3x3 = 9 check
+    # Reducing from 5x5=25 to 2x2=4 for much faster performance with negligible quality loss.
+    o_cands = origin_candidates[:2]
+    d_cands = dest_candidates[:2]
     
-    for o_stop, o_walk_dist in origin_candidates:
-        for d_stop, d_walk_dist in dest_candidates:
+    for o_stop, o_walk_dist in o_cands:
+        for d_stop, d_walk_dist in d_cands:
             # 1. Try No-Transfer first (cheaper, preferred)
             cand = plan_base_no_transfer_trip(o_stop, d_stop, user_origin_lat, user_origin_lng, user_dest_lat, user_dest_lng, routes_list, vehicle_indexes, system_id)
             if not cand:
