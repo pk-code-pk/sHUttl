@@ -1,0 +1,2 @@
+feed_publisher_name,feed_publisher_url,feed_lang,feed_contact_email,feed_contact_url,feed_start_date,feed_end_date,feed_version
+Passio Technologies,https://passiotech.com,en,support@passiotech.com,https://passio3.com,20260105,20260205,20250228

@@ -1,0 +1,21 @@
+route_id,agency_id,route_short_name,route_long_name,route_type,route_color,route_text_color
+777,831,1636,1636'er,3,0099FF,FFFFFF
+778,831,AL,Allston Loop,3,A50606,FFFFFF
+779,831,,Barry's Corner,3,98DF8A,
+783,831,CC,Crimson Cruiser,3,DB0DD7,FFFFFF
+3681,831,,Harvard Square SEC Summer,3,9467BD,FFFFFF
+781,831,,Inauguration Day,3,2C4096,FFFFFF
+786,831,,Kennedy School Charter AM,3,,
+787,831,,Kennedy School Charter PM,3,,
+788,831,,Mather Crimson Overnight,3,,
+789,831,ME,Mather Express,3,0000FF,FFFFFF
+785,831,ON,Overnight,3,FF8707,FFFFFF
+790,831,QE,Quad Express,3,136D1C,FFFFFF
+2235,831,QSEC,Quad SEC Direct,3,9467BD,FFFFFF
+791,831,QSD,Quad Stadium Direct,3,14EB27,000000
+792,831,QSE,Quad Stadium Express,3,50BC48,FFFFFF
+793,831,QYE,Quad Yard Express,3,006600,FFFFFF
+5707,831,XSEC,SEC Express,3,FDAE6B,000000
+3679,831,,Summer Schedule,3,136D1C,FFFFFF
+3680,831,,Summer School Overnight,3,DB0DD7,FFFFFF
+7332,831,,Thanksgiving Shuttle,3,E6550D,FFFFFF

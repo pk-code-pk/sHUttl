@@ -18,6 +18,21 @@ from fastapi_limiter import FastAPILimiter
 from fastapi_limiter.depends import RateLimiter
 from passio_client import get_stops, get_vehicles, get_routes, DEFAULT_SYSTEM_ID, get_all_systems
 
+# Harvard GTFS integration (for system_id = 831)
+from harvard_gtfs import (
+    get_harvard_gtfs,
+    get_harvard_graph,
+    harvard_neighbors,
+    HarvardEdge,
+    get_harvard_shape_for_route_direction,
+    debug_print_harvard_gtfs_summary,
+)
+from harvard_mapping import (
+    get_harvard_passio_to_gtfs_map,
+    get_gtfs_to_passio_map,
+    get_passio_stop_by_id,
+)
+
 logger = logging.getLogger("trip")
 
 REDIS_URL = os.getenv("REDIS_URL")
@@ -523,6 +538,26 @@ def route_paths_for_system(system_id: int = DEFAULT_SYSTEM_ID) -> list[dict[str,
             "path": path,
         })
 
+    # Harvard-specific: Use high-res GTFS shapes if available
+    if system_id == 831:
+        # Import here to avoid circular dependencies if any
+        from harvard_mapping import get_gtfs_route_id_by_name
+        from harvard_gtfs import get_harvard_shape_for_route_direction
+        
+        for r_entry in result:
+            p_name = r_entry.get("route_name")
+            if p_name:
+                gtfs_id = get_gtfs_route_id_by_name(p_name)
+                if gtfs_id:
+                    shape = get_harvard_shape_for_route_direction(gtfs_id, None)
+                    if shape:
+                        # Override path with GTFS shape
+                        # Use empty strings for stop_id/name as they are shape points, not stops
+                        r_entry["path"] = [
+                            {"lat": lat, "lng": lon, "stop_id": "", "stop_name": ""} 
+                            for lat, lon in shape
+                        ]
+
     return result
 
 
@@ -982,6 +1017,105 @@ def find_k_paths(graph, origin, dest, k=1, max_depth=20, max_transfers=1):
     return results
 
 
+# ---------------------------------------------------------------------------
+# Harvard GTFS-specific pathfinding (for system_id = 831)
+# ---------------------------------------------------------------------------
+
+def find_k_paths_harvard(origin_gtfs_id: str, dest_gtfs_id: str, k=1, max_depth=20, max_transfers=1):
+    """
+    Find up to K distinct paths from origin to dest using BFS on the Harvard GTFS graph.
+    Each path is (nodes, edges) where nodes are GTFS stop_ids.
+    """
+    graph = get_harvard_graph()
+    
+    if origin_gtfs_id == dest_gtfs_id:
+        return [([origin_gtfs_id], [])]
+    
+    # queue of (current_node, nodes_list, edges_list, last_route_id, transfers_count)
+    queue = deque([(origin_gtfs_id, [origin_gtfs_id], [], None, 0)])
+    results = []
+    seen_signatures = set()
+    
+    while queue and len(results) < k:
+        curr, path_nodes, path_edges, last_rid, transfers = queue.popleft()
+        
+        if len(path_nodes) > max_depth + 1:
+            continue
+        
+        edges = graph.get(curr, [])
+        for edge in edges:
+            nxt = edge.next_stop_id
+            rid = edge.route_id
+            
+            # Simple cycle prevention
+            if nxt in path_nodes:
+                continue
+            
+            new_transfers = transfers
+            if last_rid is not None and rid != last_rid:
+                new_transfers += 1
+            
+            if new_transfers > max_transfers:
+                continue
+            
+            new_nodes = path_nodes + [nxt]
+            new_edges = path_edges + [(curr, nxt, rid)]
+            
+            if nxt == dest_gtfs_id:
+                # Deduplicate by route/stop sequence
+                sig = "-".join(str(e[2]) for e in new_edges) + ":" + "-".join(new_nodes)
+                if sig not in seen_signatures:
+                    results.append((new_nodes, new_edges))
+                    seen_signatures.add(sig)
+            else:
+                queue.append((nxt, new_nodes, new_edges, rid, new_transfers))
+    
+    return results
+
+
+def find_direct_route_harvard(origin_gtfs_id: str, dest_gtfs_id: str) -> list[str]:
+    """
+    Check if there's a direct (no-transfer) route from origin to dest in Harvard GTFS.
+    Returns list of route_ids that connect them directly, or empty list.
+    """
+    graph = get_harvard_graph()
+    
+    if origin_gtfs_id == dest_gtfs_id:
+        return []
+    
+    # BFS to find paths with 0 transfers (same route throughout)
+    queue = deque([(origin_gtfs_id, [origin_gtfs_id], None)])
+    visited = {(origin_gtfs_id, None)}  # (stop, route) pairs
+    direct_routes = set()
+    
+    while queue:
+        curr, path, route_id = queue.popleft()
+        
+        if len(path) > 25:  # Limit depth
+            continue
+        
+        for edge in graph.get(curr, []):
+            nxt = edge.next_stop_id
+            rid = edge.route_id
+            
+            # If we've established a route, stick with it
+            if route_id is not None and rid != route_id:
+                continue
+            
+            effective_route = rid if route_id is None else route_id
+            
+            if (nxt, effective_route) in visited:
+                continue
+            visited.add((nxt, effective_route))
+            
+            if nxt == dest_gtfs_id:
+                direct_routes.add(effective_route)
+            else:
+                queue.append((nxt, path + [nxt], effective_route))
+    
+    return list(direct_routes)
+
+
 def is_valid_eta(x):
     return x is not None and isinstance(x, (int, float)) and math.isfinite(x) and x > 0
 
@@ -1257,7 +1391,21 @@ def plan_base_no_transfer_trip(
     routes_list: list,
     vehicle_indexes: dict,
     system_id: int,
+    stops: list = None,  # Added for Harvard GTFS mapping
 ):
+    # For Harvard, verify direct route exists in GTFS
+    if system_id == 831 and stops is not None:
+        passio_to_gtfs = get_harvard_passio_to_gtfs_map(stops)
+        origin_gtfs_id = passio_to_gtfs.get(str(origin_stop.id))
+        dest_gtfs_id = passio_to_gtfs.get(str(dest_stop.id))
+        
+        if origin_gtfs_id and dest_gtfs_id:
+            # Check if GTFS has a direct route
+            direct_gtfs_routes = find_direct_route_harvard(origin_gtfs_id, dest_gtfs_id)
+            if not direct_gtfs_routes:
+                logger.debug(f"No direct GTFS route from {origin_gtfs_id} to {dest_gtfs_id}")
+                return None
+    
     routes = find_common_routes(origin_stop, dest_stop, vehicle_indexes["routes_by_id"])
     if not routes:
         return None
@@ -1297,6 +1445,30 @@ def plan_base_no_transfer_trip(
         "next_bus": chosen_route.get("next_bus"),
         "leg_index": 0
     }
+    
+    # For Harvard, add polyline from GTFS shapes
+    # For Harvard, add polyline from GTFS shapes
+    if system_id == 831:
+        from harvard_mapping import get_gtfs_route_id_by_name
+        from harvard_gtfs import get_harvard_shape_for_route_direction
+        
+        shape = None
+        route_id = str(chosen_route.get("route_id", ""))
+        
+        if route_id:
+            shape = get_harvard_shape_for_route_direction(route_id, None)
+            
+        if not shape:
+            # Fallback to name search
+            p_name = chosen_route.get("name") or chosen_route.get("route_name")
+            if p_name:
+                gtfs_id = get_gtfs_route_id_by_name(p_name)
+                if gtfs_id:
+                     shape = get_harvard_shape_for_route_direction(gtfs_id, None)
+
+        if shape:
+            segment["polyline"] = [{"lat": lat, "lng": lon} for lat, lon in shape]
+    
     segments = [segment]
     
     origin_walk = distance_m(user_origin_lat, user_origin_lng, origin_stop.latitude, origin_stop.longitude)
@@ -1344,6 +1516,15 @@ def plan_base_transfer_trip(
     system_id: int,
     debug: bool = False
 ):
+    # Harvard-specific: use GTFS graph
+    if system_id == 831:
+        return _plan_base_transfer_trip_harvard(
+            origin_stop, dest_stop, user_origin_lat, user_origin_lng,
+            user_dest_lat, user_dest_lng, stops, routes_list, vehicle_indexes,
+            system_id, debug
+        )
+    
+    # Non-Harvard: use existing PassioGO-based logic
     graph, stop_by_id = get_route_graph(system_id, stops)
     origin_id = str(origin_stop.id)
     dest_id = str(dest_stop.id)
@@ -1362,6 +1543,196 @@ def plan_base_transfer_trip(
 
     if not segments:
          return None
+
+    origin_walk = distance_m(user_origin_lat, user_origin_lng, origin_stop.latitude, origin_stop.longitude)
+    dest_walk = distance_m(user_dest_lat, user_dest_lng, dest_stop.latitude, dest_stop.longitude)
+
+    trip = {
+        "origin": {
+            "location": {"lat": user_origin_lat, "lng": user_origin_lng},
+            "nearest_stop": stopdict(origin_stop),
+            "distance_m": origin_walk,
+        },
+        "destination": {
+            "location": {"lat": user_dest_lat, "lng": user_dest_lng},
+            "nearest_stop": stopdict(dest_stop),
+            "distance_m": dest_walk,
+        },
+        "system_id": system_id,
+        "segments": segments,
+    }
+
+    has_live_bus = any(
+        seg.get("next_bus") and is_valid_eta(seg["next_bus"].get("eta_to_origin_stop"))
+        for seg in segments
+    )
+    
+    return {
+        "kind": "base_transfer",
+        "trip": trip,
+        "segments": segments,
+        "has_live_bus": has_live_bus,
+        "num_transfers": max(len(segments) - 1, 0),
+        "total_walk_m": origin_walk + dest_walk,
+    }
+
+
+def _plan_base_transfer_trip_harvard(
+    origin_stop,
+    dest_stop,
+    user_origin_lat: float,
+    user_origin_lng: float,
+    user_dest_lat: float,
+    user_dest_lng: float,
+    stops: list,
+    routes_list: list,
+    vehicle_indexes: dict,
+    system_id: int,
+    debug: bool = False
+):
+    """
+    Harvard-specific transfer trip planning using GTFS graph.
+    """
+    # Initialize mapping (first call will build it)
+    passio_to_gtfs = get_harvard_passio_to_gtfs_map(stops)
+    gtfs_to_passio = get_gtfs_to_passio_map(stops)
+    
+    # Map PassioGO stops to GTFS IDs
+    origin_passio_id = str(origin_stop.id)
+    dest_passio_id = str(dest_stop.id)
+    
+    origin_gtfs_id = passio_to_gtfs.get(origin_passio_id)
+    dest_gtfs_id = passio_to_gtfs.get(dest_passio_id)
+    
+    if not origin_gtfs_id or not dest_gtfs_id:
+        logger.warning(
+            f"Harvard GTFS mapping failed: origin={origin_passio_id}->{origin_gtfs_id}, "
+            f"dest={dest_passio_id}->{dest_gtfs_id}. Falling back to PassioGO graph."
+        )
+        # Fallback to PassioGO graph
+        graph, stop_by_id = get_route_graph(system_id, stops)
+        path_candidates = find_k_paths(graph, origin_passio_id, dest_passio_id, k=1, max_depth=20, max_transfers=1)
+        if not path_candidates:
+            return None
+        nodes, edges = path_candidates[0]
+        rid_to_name = vehicle_indexes["rid_to_name"]
+        raw_segments = compress_path_by_route(nodes, edges, rid_to_canonical=rid_to_name)
+        segments = build_trip_segments(nodes, raw_segments, stop_by_id, stops, routes_list, vehicle_indexes, system_id, debug=debug)
+        segments = merge_segments_for_display(segments)
+        if not segments:
+            return None
+        origin_walk = distance_m(user_origin_lat, user_origin_lng, origin_stop.latitude, origin_stop.longitude)
+        dest_walk = distance_m(user_dest_lat, user_dest_lng, dest_stop.latitude, dest_stop.longitude)
+        trip = {
+            "origin": {"location": {"lat": user_origin_lat, "lng": user_origin_lng}, "nearest_stop": stopdict(origin_stop), "distance_m": origin_walk},
+            "destination": {"location": {"lat": user_dest_lat, "lng": user_dest_lng}, "nearest_stop": stopdict(dest_stop), "distance_m": dest_walk},
+            "system_id": system_id, "segments": segments,
+        }
+        has_live_bus = any(seg.get("next_bus") and is_valid_eta(seg["next_bus"].get("eta_to_origin_stop")) for seg in segments)
+        return {"kind": "base_transfer", "trip": trip, "segments": segments, "has_live_bus": has_live_bus, "num_transfers": max(len(segments) - 1, 0), "total_walk_m": origin_walk + dest_walk}
+    
+    # Use Harvard GTFS graph for pathfinding
+    path_candidates = find_k_paths_harvard(origin_gtfs_id, dest_gtfs_id, k=1, max_depth=20, max_transfers=1)
+    if not path_candidates:
+        logger.debug(f"No GTFS path from {origin_gtfs_id} to {dest_gtfs_id}")
+        return None
+    
+    gtfs_nodes, gtfs_edges = path_candidates[0]
+    
+    # Build stop_by_id mapping for GTFS stops -> PassioGO stops
+    stop_by_passio_id = {str(s.id): s for s in stops}
+    
+    # Convert GTFS nodes to PassioGO node IDs
+    passio_nodes = []
+    for gtfs_id in gtfs_nodes:
+        passio_id = gtfs_to_passio.get(gtfs_id)
+        if passio_id:
+            passio_nodes.append(passio_id)
+        else:
+            # Use GTFS ID as fallback (will need special handling)
+            passio_nodes.append(gtfs_id)
+    
+    # Convert GTFS edges to PassioGO edges format
+    passio_edges = []
+
+    # Dynamic Map: GTFS Route ID -> Pasio Route ID
+    # Goal: Use the Passio ID that corresponds to the GTFS route AND has active vehicles (Live status).
+    from harvard_mapping import get_gtfs_route_id_by_name
+    
+    gtfs_id_to_passio_id = {}
+    passio_routes_map = vehicle_indexes.get("routes_by_id", {})
+    vehicles_by_route = vehicle_indexes.get("vehicles_by_route", {})
+    
+    for pid, r_obj in passio_routes_map.items():
+        gid = get_gtfs_route_id_by_name(r_obj.name)
+        if gid:
+            # If multiple Passio routes map to the same GTFS ID, prefer the one with live vehicles
+            if gid in gtfs_id_to_passio_id:
+                curr_pid = gtfs_id_to_passio_id[gid]
+                curr_live = bool(vehicles_by_route.get(str(curr_pid)))
+                new_live = bool(vehicles_by_route.get(str(pid)))
+                if not curr_live and new_live:
+                    gtfs_id_to_passio_id[gid] = str(pid)
+            else:
+                gtfs_id_to_passio_id[gid] = str(pid)
+
+    for (from_gtfs, to_gtfs, route_id) in gtfs_edges:
+        # Resolve GTFS ID to Passio ID if possible (for Live status & Polyline/Name lookup)
+        passio_route_id = gtfs_id_to_passio_id.get(route_id, route_id)
+        
+        from_passio = gtfs_to_passio.get(from_gtfs, from_gtfs)
+        to_passio = gtfs_to_passio.get(to_gtfs, to_gtfs)
+        passio_edges.append((from_passio, to_passio, passio_route_id))
+    
+    # Build stop_by_id that includes both PassioGO and GTFS stop info
+    gtfs_data = get_harvard_gtfs()
+    combined_stop_by_id = dict(stop_by_passio_id)
+    
+    # For any GTFS stops not in PassioGO mapping, create a pseudo-stop object
+    for gtfs_id in gtfs_nodes:
+        passio_id = gtfs_to_passio.get(gtfs_id)
+        if not passio_id or passio_id not in combined_stop_by_id:
+            gtfs_stop = gtfs_data.stops_by_id.get(gtfs_id)
+            if gtfs_stop:
+                # Create a simple object with the required attributes
+                class PseudoStop:
+                    def __init__(self, id, name, lat, lon):
+                        self.id = id
+                        self.name = name
+                        self.latitude = lat
+                        self.longitude = lon
+                combined_stop_by_id[gtfs_id] = PseudoStop(gtfs_id, gtfs_stop.stop_name, gtfs_stop.lat, gtfs_stop.lon)
+    
+    rid_to_name = vehicle_indexes["rid_to_name"]
+    raw_segments = compress_path_by_route(passio_nodes, passio_edges, rid_to_canonical=rid_to_name)
+    segments = build_trip_segments(passio_nodes, raw_segments, combined_stop_by_id, stops, routes_list, vehicle_indexes, system_id, debug=debug)
+    segments = merge_segments_for_display(segments)
+    
+    # Add polylines from GTFS shapes for each segment
+    # Add polylines from GTFS shapes for each segment
+    from harvard_mapping import get_gtfs_route_id_by_name
+    from harvard_gtfs import get_harvard_shape_for_route_direction
+
+    for seg in segments:
+        shape = None
+        # 1. Try by Route ID (works for GTFS-planned trips)
+        route_id = str(seg.get("route_id", ""))
+        if route_id:
+            shape = get_harvard_shape_for_route_direction(route_id, None)
+            
+        # 2. If no shape (e.g. fallback Passio trip), try by Name
+        if not shape:
+            route_name = seg.get("route_name")
+            if route_name:
+                gtfs_id = get_gtfs_route_id_by_name(route_name)
+                if gtfs_id:
+                    shape = get_harvard_shape_for_route_direction(gtfs_id, None)
+        
+        if shape:
+            seg["polyline"] = [{"lat": lat, "lng": lon} for lat, lon in shape]
+
+    if not segments:
+        return None
 
     origin_walk = distance_m(user_origin_lat, user_origin_lng, origin_stop.latitude, origin_stop.longitude)
     dest_walk = distance_m(user_dest_lat, user_dest_lng, dest_stop.latitude, dest_stop.longitude)
@@ -1422,7 +1793,7 @@ def plan_walk_modified_trip(
     for o_stop, o_walk_dist in o_cands:
         for d_stop, d_walk_dist in d_cands:
             # 1. Try No-Transfer first (cheaper, preferred)
-            cand = plan_base_no_transfer_trip(o_stop, d_stop, user_origin_lat, user_origin_lng, user_dest_lat, user_dest_lng, routes_list, vehicle_indexes, system_id)
+            cand = plan_base_no_transfer_trip(o_stop, d_stop, user_origin_lat, user_origin_lng, user_dest_lat, user_dest_lng, routes_list, vehicle_indexes, system_id, stops=stops)
             if not cand:
                 # 2. Try Transfer
                 cand = plan_base_transfer_trip(o_stop, d_stop, user_origin_lat, user_origin_lng, user_dest_lat, user_dest_lng, stops, routes_list, vehicle_indexes, system_id, debug)
@@ -1552,7 +1923,7 @@ def api_trip(
 
     # Generate Base Candidates
     #    - Base No-Transfer
-    nt_cand = plan_base_no_transfer_trip(origin_stop, dest_stop, lat, lng, lat2, lng2, routes_list, vehicle_indexes, system_id)
+    nt_cand = plan_base_no_transfer_trip(origin_stop, dest_stop, lat, lng, lat2, lng2, routes_list, vehicle_indexes, system_id, stops=stops)
     if nt_cand:
         candidates.append(nt_cand)
         

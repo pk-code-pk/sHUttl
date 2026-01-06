@@ -50,6 +50,7 @@ export interface TripSegment {
     end_stop: Stop;
     stops: Stop[];
     next_bus: NextBusInfo | null;
+    polyline?: { lat: number; lng: number }[];
 }
 
 export interface TripEndpoint {

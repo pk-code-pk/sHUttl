@@ -1,0 +1,2 @@
+agency_id,agency_name,agency_email,agency_url,agency_timezone,agency_lang,agency_phone,agency_fare_url
+831,Harvard University,,https://www.transportation.harvard.edu/,America/New_York,en,617-495-0400,

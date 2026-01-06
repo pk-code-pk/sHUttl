@@ -235,16 +235,38 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
 
 
 
+    const [revealedSegments, setRevealedSegments] = useState<Set<number>>(new Set());
+
+    useEffect(() => {
+        setRevealedSegments(new Set());
+    }, [trip]);
+
     const tripPolylines = useMemo(() => {
         if (!trip || !trip.segments || trip.segments.length === 0) return [];
 
         return trip.segments.map((seg: TripSegment, idx: number) => {
-            const positions: LatLngExpression[] = seg.stops.map((s: Stop) => [s.lat, s.lng] as [number, number]);
+            let positions: LatLngExpression[];
+
+            if (seg.polyline && seg.polyline.length > 0) {
+                // Use the detailed shape polyline if available
+                positions = seg.polyline.map(p => [p.lat, p.lng] as [number, number]);
+            } else {
+                // Fallback to connecting stops
+                positions = (seg.stops || []).map(s => [s.lat, s.lng] as [number, number]);
+            }
+
             // Use segment color, or fallback to palette based on index
-            const color = seg.color || FALLBACK_ROUTE_COLORS[idx % FALLBACK_ROUTE_COLORS.length];
-            return { positions, color };
+            const originalColor = seg.color || FALLBACK_ROUTE_COLORS[idx % FALLBACK_ROUTE_COLORS.length];
+            const isRevealed = revealedSegments.has(idx);
+
+            // Default "Active Path": Red, Pulsing
+            // Revealed: Static Route Color
+            const color = isRevealed ? originalColor : '#FF0000';
+            const className = isRevealed ? "" : "animate-pulse";
+
+            return { positions, color, className, idx, isRevealed };
         });
-    }, [trip]);
+    }, [trip, revealedSegments]);
 
     return (
         <div className="relative h-full w-full bg-neutral-900">
@@ -304,24 +326,52 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                         })}
 
                     {/* Planned trip path (if any) */}
-                    {tripPolylines.map((line: { positions: LatLngExpression[], color: string }, idx: number) => (
+                    {tripPolylines.map((line, idx) => (
                         <React.Fragment key={`trip-${idx}`}>
                             {/* Soft glow */}
                             <Polyline
                                 positions={line.positions}
                                 pathOptions={{
                                     color: line.color,
-                                    weight: 11,
-                                    opacity: 0.30,
+                                    weight: 12,
+                                    opacity: line.isRevealed ? 0.30 : 0.50,
+                                    className: line.className
+                                }}
+                                eventHandlers={{
+                                    click: () => {
+                                        setRevealedSegments(prev => {
+                                            const next = new Set(prev);
+                                            if (next.has(line.idx)) {
+                                                next.delete(line.idx);
+                                            } else {
+                                                next.add(line.idx);
+                                            }
+                                            return next;
+                                        });
+                                    }
                                 }}
                             />
-                            {/* Core line */}
+                            {/* Solid Core */}
                             <Polyline
                                 positions={line.positions}
                                 pathOptions={{
                                     color: line.color,
                                     weight: 5,
                                     opacity: 0.98,
+                                    className: line.className
+                                }}
+                                eventHandlers={{
+                                    click: () => {
+                                        setRevealedSegments(prev => {
+                                            const next = new Set(prev);
+                                            if (next.has(line.idx)) {
+                                                next.delete(line.idx);
+                                            } else {
+                                                next.add(line.idx);
+                                            }
+                                            return next;
+                                        });
+                                    }
                                 }}
                             />
                         </React.Fragment>
