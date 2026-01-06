@@ -810,20 +810,32 @@ export const TripPlannerPanel = ({
                         aria-busy={planning}
                         aria-live="polite"
                     >
-                        {/* Progress Fill */}
+                        {/* Progress Fill with Shimmer */}
                         <AnimatePresence>
                             {(planning || showSuccess) && (
                                 <motion.div
                                     className="absolute inset-y-0 left-0 bg-white/10"
-                                    initial={{ width: 0 }}
+                                    style={{
+                                        background: "linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.15) 50%, transparent 100%)",
+                                        backgroundSize: "200% 100%",
+                                    }}
+                                    initial={{ width: 0, x: "-100%" }}
                                     animate={{
-                                        width: showSuccess ? "100%" : "80%",
+                                        width: showSuccess ? "100%" : ["0%", "40%", "75%", "98%"],
+                                        x: 0,
+                                        backgroundPosition: ["200% 0", "-200% 0"]
                                     }}
                                     exit={{ opacity: 0 }}
                                     transition={{
                                         width: {
-                                            duration: showSuccess ? 0.2 : 3,
-                                            ease: showSuccess ? "easeOut" : "linear"
+                                            times: [0, 0.05, 0.2, 1],
+                                            duration: showSuccess ? 0.3 : 60,
+                                            ease: showSuccess ? "easeOut" : "circOut"
+                                        },
+                                        backgroundPosition: {
+                                            duration: 1.5,
+                                            repeat: Infinity,
+                                            ease: "linear"
                                         }
                                     }}
                                 />

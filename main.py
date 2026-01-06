@@ -18,7 +18,7 @@ from fastapi_limiter import FastAPILimiter
 from fastapi_limiter.depends import RateLimiter
 from passio_client import get_stops, get_vehicles, get_routes, DEFAULT_SYSTEM_ID, get_all_systems
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("trip")
 
 REDIS_URL = os.getenv("REDIS_URL")
 redis_client: Optional[Redis] = None
@@ -558,17 +558,56 @@ def api_match_stops(lat: float, lng: float, lat2: float, lng2: float, system_id:
 
 
 
-def find_common_routes(origin_stop, dest_stop, all_routes: list):
+def build_trip_indexes(stops, routes, vehicles):
+    """
+    Build reusable indexes for the /trip request.
+    """
+    stops_by_id = {str(s.id): s for s in stops}
+    routes_by_id = {str(r.myid): r for r in routes if hasattr(r, "myid")}
+    
+    # Map stop_id -> set of route_ids
+    routes_by_stop = defaultdict(set)
+    for s in stops:
+        sid = str(s.id)
+        rap = getattr(s, "routesAndPositions", {}) or {}
+        for rid in rap.keys():
+            routes_by_stop[sid].add(str(rid))
+            
+    # Map route_id -> list of vehicles
+    route_to_vehicles = defaultdict(list)
+    for v in vehicles:
+        for rk in get_vehicle_route_keys(v):
+            route_to_vehicles[rk].append(v)
+            
+    # Map route_name -> list of vehicles (for fuzzy matching)
+    name_to_vehicles = defaultdict(list)
+    rid_to_name = {norm_id(r.myid): r.name for r in routes if hasattr(r, "myid") and r.myid}
+    for v in vehicles:
+        for rk in get_vehicle_route_keys(v):
+            rname = rid_to_name.get(rk)
+            if rname:
+                name_to_vehicles[rname.lower()].append(v)
+                
+    return {
+        "stops_by_id": stops_by_id,
+        "routes_by_id": routes_by_id,
+        "routes_by_stop": routes_by_stop,
+        "route_to_vehicles": route_to_vehicles,
+        "name_to_vehicles": name_to_vehicles,
+        "rid_to_name": rid_to_name
+    }
+
+
+def find_common_routes(origin_stop, dest_stop, routes_by_id: dict):
+    # This now just filters the routes using set intersection on IDs
     origin_routes = getattr(origin_stop, "routesAndPositions", {}) or {}
     dest_routes = getattr(dest_stop, "routesAndPositions", {}) or {}
 
     common_route_ids = set(origin_routes.keys()) & set(dest_routes.keys()) 
-
-    routes_by_id = {r.myid: r for r in all_routes}
         
     result = []
     for rid in common_route_ids:
-        route = routes_by_id.get(rid)
+        route = routes_by_id.get(str(rid))
         if route:
             # Use groupColor first, fallback to color, normalize with # prefix
             color = getattr(route, "groupColor", None) or getattr(route, "color", None)
@@ -580,41 +619,15 @@ def find_common_routes(origin_stop, dest_stop, all_routes: list):
                 "short_name": getattr(route, "shortName", None),
                 "color": color,
             })
-        else: 
-            result.append({
-                "route_id": rid,
-                "route_name": None,
-                "short_name": None, 
-                "color": None, 
-            })
     return result 
 
 
 NEAR_STOP_METERS = 30
 
-def enrich_routes_with_next_bus(routes, origin_stop, vehicles, routes_list, system_id: int = DEFAULT_SYSTEM_ID, debug: bool = False):
-    # Build indexes for faster lookup
-    route_to_vehicles = {}
-    name_to_vehicles = {}
-    
-    for v in vehicles:
-        v_keys = get_vehicle_route_keys(v)
-        # 1. Exact match index
-        for rk in v_keys:
-            route_to_vehicles.setdefault(rk, []).append(v)
-        
-        # 2. Name-based index for fuzzy matching (variants)
-        # Note: Passio vehicle objects usually don't have route names directly, 
-        # so we rely on the routes list to bridge them if needed.
-        # But for now, we'll build it from 'routes' if we have it.
-    
-    # Bridge route names to vehicles
-    rid_to_name = {norm_id(r.myid): r.name for r in routes_list if r.myid}
-    for v in vehicles:
-        for rk in get_vehicle_route_keys(v):
-            rname = rid_to_name.get(rk)
-            if rname:
-                name_to_vehicles.setdefault(rname.lower(), []).append(v)
+def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id: int = DEFAULT_SYSTEM_ID, debug: bool = False):
+    route_to_vehicles = vehicle_indexes["route_to_vehicles"]
+    name_to_vehicles = vehicle_indexes["name_to_vehicles"]
+    rid_to_name = vehicle_indexes["rid_to_name"]
 
     result = [] 
     for route in routes:
@@ -853,25 +866,22 @@ def shortest_stop_path(graph, origin_stop_id: str, dest_stop_id: str):
     return path_ids, edges 
 
 
-def find_k_paths(graph, origin_stop_id: str, dest_stop_id: str, k: int = 5, max_depth: int = 5):
+def find_k_paths(graph, origin, dest, k=1, max_depth=20, max_transfers=1):
     """
     Find up to K distinct paths from origin to dest using BFS.
     Each path is (nodes, edges).
     Deduplicated by (route_id sequence, stop_id sequence).
     """
-    origin = str(origin_stop_id)
-    dest = str(dest_stop_id)
-    
     if origin == dest:
         return [([origin], [])]
 
-    # queue of (current_node, nodes_list, edges_list)
-    queue = deque([(origin, [origin], [])])
+    # queue of (current_node, nodes_list, edges_list, last_route_id, transfers_count)
+    queue = deque([(origin, [origin], [], None, 0)])
     results = []
     seen_signatures = set()
 
     while queue and len(results) < k:
-        curr, path_nodes, path_edges = queue.popleft()
+        curr, path_nodes, path_edges, last_rid, transfers = queue.popleft()
         
         if len(path_nodes) > max_depth + 1:
             continue
@@ -880,10 +890,17 @@ def find_k_paths(graph, origin_stop_id: str, dest_stop_id: str, k: int = 5, max_
             nxt = edge["to"]
             rid = edge["route_id"]
             
-            # Simple cycle prevention within a single path
+            # Simple cycle prevention
             if nxt in path_nodes:
                 continue
                 
+            new_transfers = transfers
+            if last_rid is not None and rid != last_rid:
+                new_transfers += 1
+                
+            if new_transfers > max_transfers:
+                continue
+
             new_nodes = path_nodes + [nxt]
             new_edges = path_edges + [(curr, nxt, rid)]
             
@@ -894,7 +911,7 @@ def find_k_paths(graph, origin_stop_id: str, dest_stop_id: str, k: int = 5, max_
                     results.append((new_nodes, new_edges))
                     seen_signatures.add(sig)
             else:
-                queue.append((nxt, new_nodes, new_edges))
+                queue.append((nxt, new_nodes, new_edges, rid, new_transfers))
                 
     return results
 
@@ -1023,7 +1040,7 @@ def compress_path_by_route(path_stop_ids, edges, rid_to_canonical=None):
     return segments
 
 
-def build_trip_segments(path_stop_ids, segments, stop_by_id, stops, routes_list, vehicles, system_id: int = DEFAULT_SYSTEM_ID, debug: bool = False):
+def build_trip_segments(path_stop_ids, segments, stop_by_id, stops, routes_list, vehicle_indexes, system_id: int = DEFAULT_SYSTEM_ID, debug: bool = False):
     """
     Turn compressed segments into enriched trip segments:
     each with route info, start/end stop, list of stops on that leg, and next_bus.
@@ -1046,7 +1063,7 @@ def build_trip_segments(path_stop_ids, segments, stop_by_id, stops, routes_list,
         leg_stops = [stopdict(stop_by_id[sid]) for sid in leg_stop_ids]
 
         # get route metadata, next_bus using existing funcs
-        candidate_routes = find_common_routes(start_stop, end_stop, routes_list)
+        candidate_routes = find_common_routes(start_stop, end_stop, vehicle_indexes["routes_by_id"])
         # find the route dict that matches this rid
         chosen_route = None
         for r in candidate_routes:
@@ -1067,7 +1084,7 @@ def build_trip_segments(path_stop_ids, segments, stop_by_id, stops, routes_list,
         payload_route = dict(chosen_route)
         payload_route["stops"] = leg_stops
 
-        enriched_list = enrich_routes_with_next_bus([payload_route], start_stop, vehicles, routes_list, system_id, debug=debug)
+        enriched_list = enrich_routes_with_next_bus([payload_route], start_stop, vehicle_indexes, system_id, debug=debug)
         enriched_route = enriched_list[0] if enriched_list else payload_route
 
         trip_segments.append({
@@ -1095,25 +1112,25 @@ def build_trip_segments(path_stop_ids, segments, stop_by_id, stops, routes_list,
 
 
 
-def build_direct_candidate(origin_stop, dest_stop, routes_list, vehicles, system_id: int):
+def build_direct_candidate(origin_stop, dest_stop, routes_list, vehicle_indexes, system_id: int):
     # 1. Find common routes
-    routes = find_common_routes(origin_stop, dest_stop, routes_list)
+    routes = find_common_routes(origin_stop, dest_stop, vehicle_indexes["routes_by_id"])
     if not routes:
         return {"segments": None, "has_live_bus": False, "all_live": False}
         
     # 2. Enrich all of them to find the best functioning one
     #    We need to attach full stop lists for accurate ETA
-    real_routes = {r.myid: r for r in get_routes(system_id)}
+    routes_by_id = vehicle_indexes["routes_by_id"]
     
     enrichable_routes = []
     for r in routes:
-        rr = real_routes.get(r["route_id"])
+        rr = routes_by_id.get(str(r["route_id"]))
         r_copy = dict(r)
         if rr and hasattr(rr, 'getStops'):
              r_copy["stops"] = [stopdict(s) for s in rr.getStops()]
         enrichable_routes.append(r_copy)
         
-    enriched_routes = enrich_routes_with_next_bus(enrichable_routes, origin_stop, vehicles, routes_list, system_id)
+    enriched_routes = enrich_routes_with_next_bus(enrichable_routes, origin_stop, vehicle_indexes, system_id)
     
     # 3. Classify live vs dead
     live = [r for r in enriched_routes if r.get("next_bus") and is_valid_eta(r["next_bus"].get("eta_to_origin_stop"))]
@@ -1172,24 +1189,24 @@ def plan_base_no_transfer_trip(
     user_dest_lat: float,
     user_dest_lng: float,
     routes_list: list,
-    vehicles: list,
+    vehicle_indexes: dict,
     system_id: int,
 ):
-    routes = find_common_routes(origin_stop, dest_stop, routes_list)
+    routes = find_common_routes(origin_stop, dest_stop, vehicle_indexes["routes_by_id"])
     if not routes:
         return None
 
     # Enrich to check liveness
-    real_routes = {r.myid: r for r in routes_list}
+    routes_by_id = vehicle_indexes["routes_by_id"]
     enrichable_routes = []
     for r in routes:
-        rr = real_routes.get(r["route_id"])
+        rr = routes_by_id.get(str(r["route_id"]))
         r_copy = dict(r)
         if rr and hasattr(rr, 'getStops'):
              r_copy["stops"] = [stopdict(s) for s in rr.getStops()]
         enrichable_routes.append(r_copy)
         
-    enriched_routes = enrich_routes_with_next_bus(enrichable_routes, origin_stop, vehicles, routes_list, system_id)
+    enriched_routes = enrich_routes_with_next_bus(enrichable_routes, origin_stop, vehicle_indexes, system_id)
     
     # Prefer live
     live_routes = [
@@ -1257,7 +1274,7 @@ def plan_base_transfer_trip(
     user_dest_lng: float,
     stops: list,
     routes_list: list,
-    vehicles: list,
+    vehicle_indexes: dict,
     system_id: int,
     debug: bool = False
 ):
@@ -1265,15 +1282,16 @@ def plan_base_transfer_trip(
     origin_id = str(origin_stop.id)
     dest_id = str(dest_stop.id)
 
-    path_candidates = find_k_paths(graph, origin_id, dest_id, k=1, max_depth=5)
+    # Limit to 1 transfer and max 20 stops for performance on campus systems
+    path_candidates = find_k_paths(graph, origin_id, dest_id, k=1, max_depth=20, max_transfers=1)
     if not path_candidates:
         return None
 
     nodes, edges = path_candidates[0]
-    rid_to_name = {norm_id(r.myid): r.name for r in routes_list if r.myid}
+    rid_to_name = vehicle_indexes["rid_to_name"]
 
     raw_segments = compress_path_by_route(nodes, edges, rid_to_canonical=rid_to_name)
-    segments = build_trip_segments(nodes, raw_segments, stop_by_id, stops, routes_list, vehicles, system_id, debug=debug)
+    segments = build_trip_segments(nodes, raw_segments, stop_by_id, stops, routes_list, vehicle_indexes, system_id, debug=debug)
     segments = merge_segments_for_display(segments)
 
     if not segments:
@@ -1319,7 +1337,7 @@ def plan_walk_modified_trip(
     user_dest_lng: float,
     stops: list,
     routes_list: list,
-    vehicles: list,
+    vehicle_indexes: dict,
     system_id: int,
     debug: bool = False
 ):
@@ -1328,25 +1346,18 @@ def plan_walk_modified_trip(
     dest_candidates = find_nearby_stops(user_dest_lat, user_dest_lng, stops)
     
     best_candidate = None
-    # We want to minimize score:
-    # score = num_transfers*300 + total_walk*0.5 + (live penalty?)
-    # But wait, we just want to find ONE best "walk-modified" trip to propose as a candidate.
-    # The global selector compares types.
-    # So here we want to return the "best reachable trip via walking".
-    
     best_score = float("inf")
 
     # To optimize: try nearest first (candidates are sorted by distance)
     # We'll try up to N combinations, let's say top 3x3 = 9 check
-    # But for each pair we try Direct then Transfer.
     
     for o_stop, o_walk_dist in origin_candidates:
         for d_stop, d_walk_dist in dest_candidates:
             # 1. Try No-Transfer first (cheaper, preferred)
-            cand = plan_base_no_transfer_trip(o_stop, d_stop, user_origin_lat, user_origin_lng, user_dest_lat, user_dest_lng, routes_list, vehicles, system_id)
+            cand = plan_base_no_transfer_trip(o_stop, d_stop, user_origin_lat, user_origin_lng, user_dest_lat, user_dest_lng, routes_list, vehicle_indexes, system_id)
             if not cand:
                 # 2. Try Transfer
-                cand = plan_base_transfer_trip(o_stop, d_stop, user_origin_lat, user_origin_lng, user_dest_lat, user_dest_lng, stops, routes_list, vehicles, system_id, debug)
+                cand = plan_base_transfer_trip(o_stop, d_stop, user_origin_lat, user_origin_lng, user_dest_lat, user_dest_lng, stops, routes_list, vehicle_indexes, system_id, debug)
             
             if not cand:
                 continue
@@ -1440,19 +1451,28 @@ def api_trip(
         except Exception as e:
             logger.warning("Redis error reading trip cache", exc_info=e)
 
-    total_start = time.perf_counter()
+    t0 = time.perf_counter()
 
     # 1. Fetch data once
-    fetch_start = time.perf_counter()
+    t_stops0 = time.perf_counter()
     stops = get_stops(system_id)
-    routes_list = get_routes(system_id)
-    vehicles = get_vehicles(system_id)
-    fetch_time = time.perf_counter() - fetch_start
+    t_stops1 = time.perf_counter()
 
-    # 2. Match Nearest Stops (Base Case)
-    match_start = time.perf_counter()
+    t_routes0 = time.perf_counter()
+    routes_list = get_routes(system_id)
+    t_routes1 = time.perf_counter()
+
+    t_vehicles0 = time.perf_counter()
+    vehicles = get_vehicles(system_id)
+    t_vehicles1 = time.perf_counter()
+
+    # 2. Trip logic (Indexing + Matching + Routing)
+    t_logic0 = time.perf_counter()
+    
+    # Precompute indexes
+    vehicle_indexes = build_trip_indexes(stops, routes_list, vehicles)
+    
     _, origin_stop, dest_stop = match_stops(lat, lng, lat2, lng2, stops)
-    match_time = time.perf_counter() - match_start
 
     if origin_stop is None or dest_stop is None:
         raise HTTPException(
@@ -1462,25 +1482,21 @@ def api_trip(
 
     candidates = []
 
-    # 3. Generate Base Candidates
-    routes_start = time.perf_counter()
-    
+    # Generate Base Candidates
     #    - Base No-Transfer
-    nt_cand = plan_base_no_transfer_trip(origin_stop, dest_stop, lat, lng, lat2, lng2, routes_list, vehicles, system_id)
+    nt_cand = plan_base_no_transfer_trip(origin_stop, dest_stop, lat, lng, lat2, lng2, routes_list, vehicle_indexes, system_id)
     if nt_cand:
         candidates.append(nt_cand)
         
     #    - Base Transfer
-    tr_cand = plan_base_transfer_trip(origin_stop, dest_stop, lat, lng, lat2, lng2, stops, routes_list, vehicles, system_id, debug=debug)
+    tr_cand = plan_base_transfer_trip(origin_stop, dest_stop, lat, lng, lat2, lng2, stops, routes_list, vehicle_indexes, system_id, debug=debug)
     if tr_cand:
         candidates.append(tr_cand)
 
-    # 4. Generate Walk-Modified Candidate
-    walk_cand = plan_walk_modified_trip(lat, lng, lat2, lng2, stops, routes_list, vehicles, system_id, debug=debug)
+    # Generate Walk-Modified Candidate
+    walk_cand = plan_walk_modified_trip(lat, lng, lat2, lng2, stops, routes_list, vehicle_indexes, system_id, debug=debug)
     if walk_cand:
         candidates.append(walk_cand)
-    
-    routes_time = time.perf_counter() - routes_start
 
     if not candidates:
         raise HTTPException(
@@ -1488,8 +1504,9 @@ def api_trip(
             detail="No shuttle route with live tracking found.",
         )
 
-    # 5. Select Best
+    # Select Best
     chosen = select_best_candidate(candidates)
+    t_logic1 = time.perf_counter()
     
     # If debug enabled, inject selection info
     if debug_paths:
@@ -1508,12 +1525,17 @@ def api_trip(
         
     final_result = chosen["trip"]
     
-    total_time = time.perf_counter() - total_start
+    t_total = time.perf_counter() - t0
     
-    # Log timings as requested: match_stops (fetch+match), routes, enrich (approximated here), total
-    # Since enrich is inside routes_search now, we'll label accordingly or just be precise
+    # Log timings system=... total=... stops=... routes=... vehicles=... logic=...
     logger.info(
-        f"TRIP timings: match_stops={fetch_time+match_time:.3f}s routes={routes_time:.3f}s enrich=0.000s total={total_time:.3f}s"
+        "TRIP timings system=%s total=%.3fs stops=%.3fs routes=%.3fs vehicles=%.3fs logic=%.3fs",
+        system_id,
+        t_total,
+        t_stops1 - t_stops0,
+        t_routes1 - t_routes0,
+        t_vehicles1 - t_vehicles0,
+        t_logic1 - t_logic0,
     )
 
     # Cache response
