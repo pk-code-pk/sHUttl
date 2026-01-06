@@ -83,6 +83,7 @@ export const TripPlannerPanel = ({
     const [destStopId, setDestStopId] = useState<string>('');
     const [planning, setPlanning] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [showSuccess, setShowSuccess] = useState(false);
     const [itineraryOpen, setItineraryOpen] = useState(true);
     const isMobile = useIsMobile();
 
@@ -362,6 +363,8 @@ export const TripPlannerPanel = ({
             });
             setLastUpdatedAt(new Date());
             setIsLiveUpdating(true);
+            setShowSuccess(true);
+            setTimeout(() => setShowSuccess(false), 800);
         } catch (e) {
             console.error(e);
             const message = e instanceof Error ? e.message : "Unknown error";
@@ -792,18 +795,45 @@ export const TripPlannerPanel = ({
                         <ArrowUpDown size={16} />
                     </button>
 
-                    <button
+                    <motion.button
                         onClick={handlePlanTrip}
                         disabled={planning || !system || (!originStopId && !originUseCurrentLocation) || !destStopId}
+                        whileTap={{ scale: 0.98 }}
+                        animate={error ? { x: [0, -4, 4, -4, 4, 0] } : {}}
+                        transition={{ duration: 0.4 }}
                         className={clsx(
-                            "h-10 flex-1 text-sm font-bold rounded-lg transition-all",
+                            "h-10 flex-1 text-sm font-bold rounded-lg transition-all relative overflow-hidden",
                             (system && (originStopId || originUseCurrentLocation) && destStopId)
-                                ? "bg-[#A20202] hover:bg-[#8a0101] text-white shadow-lg shadow-red-900/30"
+                                ? (planning ? "bg-[#6a0101] text-white/50" : "bg-[#A20202] hover:bg-[#8a0101] text-white shadow-lg shadow-red-900/30")
                                 : "bg-neutral-800 text-neutral-500 cursor-not-allowed"
                         )}
+                        aria-busy={planning}
+                        aria-live="polite"
                     >
-                        {planning ? 'Planning...' : 'Plan Trip'}
-                    </button>
+                        {/* Progress Fill */}
+                        <AnimatePresence>
+                            {(planning || showSuccess) && (
+                                <motion.div
+                                    className="absolute inset-y-0 left-0 bg-white/10"
+                                    initial={{ width: 0 }}
+                                    animate={{
+                                        width: showSuccess ? "100%" : "80%",
+                                    }}
+                                    exit={{ opacity: 0 }}
+                                    transition={{
+                                        width: {
+                                            duration: showSuccess ? 0.2 : 3,
+                                            ease: showSuccess ? "easeOut" : "linear"
+                                        }
+                                    }}
+                                />
+                            )}
+                        </AnimatePresence>
+
+                        <span className="relative z-10 flex items-center justify-center gap-2">
+                            {planning ? 'Planning...' : 'Plan Trip'}
+                        </span>
+                    </motion.button>
                 </div>
 
                 {error && <p className="text-xs text-red-400 font-medium -mt-2 mb-2 px-1">{error}</p>}

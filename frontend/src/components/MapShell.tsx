@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { MapContainer, TileLayer, Popup, Polyline, useMap, Marker } from 'react-leaflet';
 import { Navigation as NavigationIcon } from 'lucide-react';
+import clsx from 'clsx';
 import L from 'leaflet';
 import type { LatLngExpression } from 'leaflet';
 import { ShuttleMarker } from './ShuttleMarker';
@@ -393,18 +394,16 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
             <div className="
                 md:hidden
                 fixed top-4 inset-x-4 z-[1000]
-                flex items-start justify-between gap-2
+                flex items-center justify-between gap-2
                 pointer-events-none
             ">
                 {/* Left: Status Pill */}
-                <div className="pointer-events-auto flex items-center h-9">
-                    <div className="rounded-full bg-black/60 backdrop-blur-md px-3 py-1.5 text-[10px] font-medium text-neutral-300 border border-white/10 shadow-lg flex items-center justify-center h-full min-w-[32px]">
-                        {systemId
-                            ? loading
-                                ? '...'
-                                : <span className="whitespace-nowrap">{stops.length} stops • {vehicles.length} bus</span>
-                            : 'Select system'}
-                    </div>
+                <div className="pointer-events-auto h-9 rounded-full bg-black/60 backdrop-blur-md px-3 py-1.5 text-[10px] font-medium leading-none text-neutral-300 border border-white/10 shadow-lg flex items-center justify-center min-w-[32px]">
+                    {systemId
+                        ? loading
+                            ? '...'
+                            : <span className="whitespace-nowrap">{stops.length} stops • {vehicles.length} bus</span>
+                        : 'Select system'}
                 </div>
 
                 {/* Center: Recenter Button */}
@@ -430,20 +429,18 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                 )}
 
                 {/* Right: Show Routes Toggle */}
-                <div className="pointer-events-auto h-9 flex items-center">
-                    <button
-                        type="button"
-                        onClick={() => setShowRoutes((prev) => !prev)}
-                        className={[
-                            'rounded-full border px-3 h-full text-[10px] font-medium transition-all backdrop-blur-md shadow-lg flex items-center justify-center whitespace-nowrap',
-                            showRoutes
-                                ? 'border-crimson bg-crimson/20 text-crimson animate-pulse-subtle'
-                                : 'border-white/10 bg-black/60 text-neutral-300 hover:border-white/20',
-                        ].join(' ')}
-                    >
-                        {showRoutes ? 'Hide Routes' : 'Show Routes'}
-                    </button>
-                </div>
+                <button
+                    type="button"
+                    onClick={() => setShowRoutes((prev) => !prev)}
+                    className={clsx(
+                        'pointer-events-auto h-9 rounded-full border px-3 py-1.5 text-[10px] font-medium leading-none transition-all backdrop-blur-md shadow-lg flex items-center justify-center whitespace-nowrap min-w-[32px]',
+                        showRoutes
+                            ? 'border-crimson bg-crimson/20 text-crimson animate-pulse-subtle'
+                            : 'border-white/10 bg-black/60 text-neutral-300 hover:border-white/20'
+                    )}
+                >
+                    {showRoutes ? 'Hide Routes' : 'Show Routes'}
+                </button>
             </div>
 
 
