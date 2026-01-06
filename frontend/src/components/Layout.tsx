@@ -64,7 +64,7 @@ export const Layout = ({ system, onChangeSystem, trip, onTripChange }: LayoutPro
                 {/* Developer Footer - hidden on mobile bottom sheet mode to save space, visible on desktop */}
                 <div className="hidden md:block fixed bottom-2 left-1/2 -translate-x-1/2 pointer-events-none">
                     <p className="pointer-events-auto bg-black/40 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-white/50 font-medium">
-                        Developed by Keyan K
+                        Developed by Praneel Khiantani
                     </p>
                 </div>
             </div>
