@@ -1881,8 +1881,9 @@ def plan_walk_modified_trip(
 
     # To optimize: try nearest first (candidates are sorted by distance)
     # Reducing from 5x5=25 to 2x2=4 for much faster performance with negligible quality loss.
-    o_cands = origin_candidates[:2]
-    d_cands = dest_candidates[:2]
+    # EXPANDED to 5x5 to catch cases where the best stop is slightly further (e.g. Winthrop -> Leverett for AL)
+    o_cands = origin_candidates[:5]
+    d_cands = dest_candidates[:5]
     
     for o_stop, o_walk_dist in o_cands:
         for d_stop, d_walk_dist in d_cands:
