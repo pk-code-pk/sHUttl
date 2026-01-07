@@ -187,6 +187,77 @@ def distance_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     return R * c 
 
 
+def slice_shape_to_segment(
+    shape_coords: list[tuple[float, float]],
+    start_stop_lat: float,
+    start_stop_lng: float,
+    end_stop_lat: float,
+    end_stop_lng: float,
+) -> list[tuple[float, float]]:
+    """
+    Slice a GTFS shape polyline to only include the portion between start and end stops.
+    
+    Args:
+        shape_coords: List of (lat, lon) tuples representing the full route shape
+        start_stop_lat, start_stop_lng: Coordinates of boarding stop
+        end_stop_lat, end_stop_lng: Coordinates of alighting stop
+    
+    Returns:
+        Sliced portion of shape_coords between the two stops
+    """
+    if not shape_coords or len(shape_coords) < 2:
+        return shape_coords
+    
+    # Find index of shape point closest to start stop
+    start_idx = 0
+    min_start_dist = float('inf')
+    for i, (lat, lon) in enumerate(shape_coords):
+        d = distance_m(lat, lon, start_stop_lat, start_stop_lng)
+        if d < min_start_dist:
+            min_start_dist = d
+            start_idx = i
+    
+    # Find index of shape point closest to end stop
+    end_idx = len(shape_coords) - 1
+    min_end_dist = float('inf')
+    for i, (lat, lon) in enumerate(shape_coords):
+        d = distance_m(lat, lon, end_stop_lat, end_stop_lng)
+        if d < min_end_dist:
+            min_end_dist = d
+            end_idx = i
+            
+    # Check if shape is effectively a loop (start is close to end)
+    is_loop = False
+    if len(shape_coords) > 2:
+        start_pt = shape_coords[0]
+        end_pt = shape_coords[-1]
+        if distance_m(start_pt[0], start_pt[1], end_pt[0], end_pt[1]) < 150: # 150m threshold
+            is_loop = True
+
+    # Handle slicing
+    if start_idx <= end_idx:
+        # Standard case: forward along shape
+        sliced = shape_coords[start_idx:end_idx + 1]
+    else:
+        # start_idx > end_idx
+        if is_loop:
+            # Wrap around: start -> end of shape -> beginning of shape -> end index
+            # This covers the Quad Express 90 -> 10 case
+            sliced = shape_coords[start_idx:] + shape_coords[:end_idx + 1]
+        else:
+            # Not a loop, so probably moving in reverse direction along the shape
+            # Swap and reverse
+            start_idx, end_idx = end_idx, start_idx
+            sliced = shape_coords[start_idx:end_idx + 1]
+            sliced = list(reversed(sliced))
+    
+    # Return at least 2 points for a valid polyline
+    if len(sliced) < 2:
+        return [(start_stop_lat, start_stop_lng), (end_stop_lat, end_stop_lng)]
+    
+    return sliced
+
+
 def latlng_to_xy_m(lat: float, lng: float, ref_lat: float, ref_lng: float) -> tuple[float, float]:
     # Equirectangular approximation (good for small areas around Cambridge)
     r = 6371000.0
@@ -1467,7 +1538,13 @@ def plan_base_no_transfer_trip(
                      shape = get_harvard_shape_for_route_direction(gtfs_id, None)
 
         if shape:
-            segment["polyline"] = [{"lat": lat, "lng": lon} for lat, lon in shape]
+            # Slice the shape to only include the portion between boarding and alighting stops
+            sliced_shape = slice_shape_to_segment(
+                shape,
+                origin_stop.latitude, origin_stop.longitude,
+                dest_stop.latitude, dest_stop.longitude
+            )
+            segment["polyline"] = [{"lat": lat, "lng": lon} for lat, lon in sliced_shape]
     
     segments = [segment]
     
@@ -1729,7 +1806,24 @@ def _plan_base_transfer_trip_harvard(
                     shape = get_harvard_shape_for_route_direction(gtfs_id, None)
         
         if shape:
-            seg["polyline"] = [{"lat": lat, "lng": lon} for lat, lon in shape]
+            # Get start and end stop coords for this segment
+            start_stop = seg.get("start_stop", {})
+            end_stop = seg.get("end_stop", {})
+            start_lat = start_stop.get("lat") or start_stop.get("latitude")
+            start_lng = start_stop.get("lng") or start_stop.get("longitude")
+            end_lat = end_stop.get("lat") or end_stop.get("latitude")
+            end_lng = end_stop.get("lng") or end_stop.get("longitude")
+            
+            if start_lat and start_lng and end_lat and end_lng:
+                # Slice the shape to only include the ridden portion
+                sliced_shape = slice_shape_to_segment(
+                    shape,
+                    start_lat, start_lng,
+                    end_lat, end_lng
+                )
+                seg["polyline"] = [{"lat": lat, "lng": lon} for lat, lon in sliced_shape]
+            else:
+                seg["polyline"] = [{"lat": lat, "lng": lon} for lat, lon in shape]
 
     if not segments:
         return None

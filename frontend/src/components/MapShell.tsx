@@ -48,14 +48,25 @@ function computeTripBounds(trip: TripResponse | null): L.LatLngBounds | null {
     return L.latLngBounds(pts);
 }
 
+// Compute a unique key for a trip based on system and endpoints
+function computeTripKey(trip: TripResponse | null): string | null {
+    if (!trip) return null;
+    const systemId = trip.system_id;
+    const originId = trip.origin?.nearest_stop?.id ?? '';
+    const destId = trip.destination?.nearest_stop?.id ?? '';
+    return `${systemId}:${originId}:${destId}`;
+}
+
 // Separate component to safely use useMap()
 function MapController({
     systemBounds,
     activeTripBounds,
+    tripKey,
     setMap,
 }: {
     systemBounds: L.LatLngBounds | null;
     activeTripBounds: L.LatLngBounds | null;
+    tripKey: string | null;
     setMap: (map: L.Map) => void;
 }) {
     const map = useMap();
@@ -78,12 +89,21 @@ function MapController({
         hasInitialSystemFit.current = false;
     }, [systemBounds]);
 
-    // Fit to trip bounds whenever a new one is set
+    // Smart trip centering: only fit bounds when trip key changes (new trip)
+    const lastCenteredTripKey = useRef<string | null>(null);
     useEffect(() => {
-        if (map && activeTripBounds) {
-            map.fitBounds(activeTripBounds, { padding: [80, 80] });
+        if (map && activeTripBounds && tripKey) {
+            // Only center if this is a different trip than last time
+            if (tripKey !== lastCenteredTripKey.current) {
+                map.fitBounds(activeTripBounds, { padding: [80, 80] });
+                lastCenteredTripKey.current = tripKey;
+            }
         }
-    }, [map, activeTripBounds]);
+        // Reset when trip is cancelled
+        if (!tripKey) {
+            lastCenteredTripKey.current = null;
+        }
+    }, [map, activeTripBounds, tripKey]);
 
     return null;
 }
@@ -110,12 +130,12 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
         iconAnchor: [14, 14],
     }), []);
 
-    // Crimson pulsing icon for origin/destination stops
-    const tripStopIcon = useMemo(() => L.divIcon({
-        className: 'stop-marker-container',
-        html: `<div class="stop-marker-dot stop-marker-dot--crimson"></div>`,
-        iconSize: [32, 32],
-        iconAnchor: [16, 16],
+    // White pulsing icon for trip origin/destination stops (larger, radar glow)
+    const tripEndpointIcon = useMemo(() => L.divIcon({
+        className: 'trip-endpoint-container',
+        html: `<div class="trip-endpoint-dot"></div>`,
+        iconSize: [40, 40],
+        iconAnchor: [20, 20],
     }), []);
 
     // Blue pulsing icon for user's current location
@@ -233,13 +253,26 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
         setActiveTripBounds(computeTripBounds(trip));
     }, [trip]);
 
+    // Compute trip key for smart centering
+    const tripKey = useMemo(() => computeTripKey(trip), [trip]);
 
-
-    const [revealedSegments, setRevealedSegments] = useState<Set<number>>(new Set());
-
+    // Auto-off "Show Routes" on first trip only
+    const previousTripRef = useRef<TripResponse | null>(null);
+    const hasAutoDisabledRoutes = useRef(false);
     useEffect(() => {
-        setRevealedSegments(new Set());
-    }, [trip]);
+        const hadTripBefore = previousTripRef.current !== null;
+        const hasTripNow = trip !== null;
+
+        // If transitioning from no trip → first trip, auto-off showRoutes (once)
+        if (!hadTripBefore && hasTripNow && showRoutes && !hasAutoDisabledRoutes.current) {
+            setShowRoutes(false);
+            hasAutoDisabledRoutes.current = true;
+        }
+
+        previousTripRef.current = trip;
+    }, [trip, showRoutes]);
+
+
 
     const tripPolylines = useMemo(() => {
         if (!trip || !trip.segments || trip.segments.length === 0) return [];
@@ -248,25 +281,19 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
             let positions: LatLngExpression[];
 
             if (seg.polyline && seg.polyline.length > 0) {
-                // Use the detailed shape polyline if available
+                // Use the sliced GTFS shape polyline if available
                 positions = seg.polyline.map(p => [p.lat, p.lng] as [number, number]);
             } else {
                 // Fallback to connecting stops
                 positions = (seg.stops || []).map(s => [s.lat, s.lng] as [number, number]);
             }
 
-            // Use segment color, or fallback to palette based on index
-            const originalColor = seg.color || FALLBACK_ROUTE_COLORS[idx % FALLBACK_ROUTE_COLORS.length];
-            const isRevealed = revealedSegments.has(idx);
+            // Always use segment's route color with pulsing animation
+            const color = seg.color || FALLBACK_ROUTE_COLORS[idx % FALLBACK_ROUTE_COLORS.length];
 
-            // Default "Active Path": Red, Pulsing
-            // Revealed: Static Route Color
-            const color = isRevealed ? originalColor : '#FF0000';
-            const className = isRevealed ? "" : "animate-pulse";
-
-            return { positions, color, className, idx, isRevealed };
+            return { positions, color, idx };
         });
-    }, [trip, revealedSegments]);
+    }, [trip]);
 
     return (
         <div className="relative h-full w-full bg-neutral-900">
@@ -282,6 +309,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                     <MapController
                         systemBounds={systemBounds}
                         activeTripBounds={activeTripBounds}
+                        tripKey={tripKey}
                         setMap={setMapInstance}
                     />
 
@@ -325,53 +353,27 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                             );
                         })}
 
-                    {/* Planned trip path (if any) */}
-                    {tripPolylines.map((line, idx) => (
-                        <React.Fragment key={`trip-${idx}`}>
-                            {/* Soft glow */}
+                    {/* Planned trip path (if any) - Route-colored with pulsing glow */}
+                    {tripPolylines.map((line) => (
+                        <React.Fragment key={`trip-${line.idx}`}>
+                            {/* Outer glow layer */}
                             <Polyline
                                 positions={line.positions}
                                 pathOptions={{
                                     color: line.color,
-                                    weight: 12,
-                                    opacity: line.isRevealed ? 0.30 : 0.50,
-                                    className: line.className
-                                }}
-                                eventHandlers={{
-                                    click: () => {
-                                        setRevealedSegments(prev => {
-                                            const next = new Set(prev);
-                                            if (next.has(line.idx)) {
-                                                next.delete(line.idx);
-                                            } else {
-                                                next.add(line.idx);
-                                            }
-                                            return next;
-                                        });
-                                    }
+                                    weight: 14,
+                                    opacity: 0.35,
+                                    className: 'trip-segment-active'
                                 }}
                             />
-                            {/* Solid Core */}
+                            {/* Core line */}
                             <Polyline
                                 positions={line.positions}
                                 pathOptions={{
                                     color: line.color,
                                     weight: 5,
-                                    opacity: 0.98,
-                                    className: line.className
-                                }}
-                                eventHandlers={{
-                                    click: () => {
-                                        setRevealedSegments(prev => {
-                                            const next = new Set(prev);
-                                            if (next.has(line.idx)) {
-                                                next.delete(line.idx);
-                                            } else {
-                                                next.add(line.idx);
-                                            }
-                                            return next;
-                                        });
-                                    }
+                                    opacity: 0.95,
+                                    className: 'trip-segment-active'
                                 }}
                             />
                         </React.Fragment>
@@ -384,7 +386,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                             <Marker
                                 key={stop.id}
                                 position={[stop.lat, stop.lng]}
-                                icon={isTripStop ? tripStopIcon : stopIcon}
+                                icon={isTripStop ? tripEndpointIcon : stopIcon}
                                 zIndexOffset={isTripStop ? 100 : 0}
                             >
                                 <Popup>

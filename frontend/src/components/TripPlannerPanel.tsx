@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { motion, AnimatePresence, type PanInfo } from "framer-motion";
-import { MapPin, Navigation as NavigationIcon, ArrowUpDown, Clock, Info, ChevronDown } from "lucide-react";
+import { MapPin, Navigation as NavigationIcon, ArrowUpDown, Clock, Info, ChevronDown, X } from "lucide-react";
 import clsx from "clsx";
 import type { TripResponse } from "./types";
 import {
@@ -846,6 +846,20 @@ export const TripPlannerPanel = ({
                             {planning ? 'Planning...' : 'Plan Trip'}
                         </span>
                     </motion.button>
+
+                    {/* Cancel Trip Button - visible only when trip is active */}
+                    {trip && (
+                        <button
+                            onClick={() => {
+                                onTripChange(null);
+                                resetLiveState();
+                            }}
+                            className="h-10 px-3 rounded-lg bg-neutral-800 hover:bg-red-900/50 text-neutral-400 hover:text-red-400 transition-colors flex items-center justify-center border border-transparent hover:border-red-500/30"
+                            title="Cancel trip"
+                        >
+                            <X size={16} />
+                        </button>
+                    )}
                 </div>
 
                 {error && <p className="text-xs text-red-400 font-medium -mt-2 mb-2 px-1">{error}</p>}

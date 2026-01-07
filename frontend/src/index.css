@@ -181,3 +181,91 @@
 .animate-pulse-subtle {
   animation: pulse-subtle 3s ease-in-out infinite;
 }
+
+/* Trip segment polyline pulsing animation */
+@keyframes tripSegmentPulse {
+  0% {
+    opacity: 0.6;
+  }
+
+  50% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0.6;
+  }
+}
+
+.trip-segment-active {
+  animation: tripSegmentPulse 1.8s ease-in-out infinite;
+}
+
+/* Trip endpoint markers (bright white with radar glow) */
+.trip-endpoint-container {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  cursor: pointer;
+}
+
+.trip-endpoint-dot {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 14px;
+  height: 14px;
+  transform: translate(-50%, -50%);
+  border-radius: 9999px;
+  background: #ffffff;
+  box-shadow: 0 0 12px rgba(255, 255, 255, 0.9), 0 0 24px rgba(255, 255, 255, 0.5);
+}
+
+/* Radar pulse ring - first ring */
+.trip-endpoint-dot::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 14px;
+  height: 14px;
+  transform: translate(-50%, -50%);
+  border-radius: 9999px;
+  border: 2px solid rgba(255, 255, 255, 0.8);
+  animation: endpoint-radar-pulse 1.8s ease-out infinite;
+}
+
+/* Second ring - offset timing */
+.trip-endpoint-dot::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 14px;
+  height: 14px;
+  transform: translate(-50%, -50%);
+  border-radius: 9999px;
+  border: 2px solid rgba(255, 255, 255, 0.8);
+  animation: endpoint-radar-pulse 1.8s ease-out infinite 0.9s;
+}
+
+@keyframes endpoint-radar-pulse {
+  0% {
+    width: 14px;
+    height: 14px;
+    opacity: 1;
+    border-width: 2px;
+  }
+
+  100% {
+    width: 60px;
+    height: 60px;
+    opacity: 0;
+    border-width: 1px;
+  }
+}
+
+.trip-endpoint-container:hover .trip-endpoint-dot {
+  transform: translate(-50%, -50%) scale(1.2);
+  box-shadow: 0 0 16px rgba(255, 255, 255, 1), 0 0 32px rgba(255, 255, 255, 0.7);
+}
