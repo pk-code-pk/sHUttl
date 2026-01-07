@@ -105,14 +105,14 @@ export const TripPlannerPanel = ({
     // offsets shift it down to reveal less.
     const yOffset = useMemo(() => {
         // Minimized always takes precedence
-        if (sheetState === 'minimized') return '77vh';
+        if (sheetState === 'minimized') return '77dvh';
 
         // If itinerary is closed, slide down to compact view (INPUTS ONLY)
         // This applies to both Default and Expanded states to prevent empty space
-        if (!itineraryOpen) return '50vh';
+        if (!itineraryOpen) return '50dvh';
 
         // Otherwise follow state
-        return sheetState === 'expanded' ? '0vh' : '22vh';
+        return sheetState === 'expanded' ? '0dvh' : '22dvh';
     }, [sheetState, itineraryOpen]);
 
     // Handle drag/swipe on the grab handle
@@ -495,7 +495,7 @@ export const TripPlannerPanel = ({
                 "flex flex-col",
 
                 // Mobile: fixed tall height, slide using transform
-                "h-[92vh]",
+                "h-[92dvh]",
 
                 "md:max-h-[85vh] md:h-auto md:translate-y-0", // Reset on desktop
                 className
@@ -520,7 +520,7 @@ export const TripPlannerPanel = ({
                 )} />
             </motion.div>
 
-            <div className="px-4 pb-4 pt-1 md:pt-4 flex flex-col h-full min-h-0">
+            <div className="px-4 pb-4 pt-1 md:pt-4 flex flex-col h-full min-h-0 pb-[env(safe-area-inset-bottom)]">
                 {/* Header with System Selector */}
                 <div className="flex items-center justify-between shrink-0 mb-3">
                     <div className="flex items-center gap-2">
@@ -894,14 +894,14 @@ export const TripPlannerPanel = ({
                                 animate={{ opacity: 1, height: 'auto' }}
                                 exit={{ opacity: 0, height: 0 }}
                                 transition={{ duration: 0.3, ease: 'circOut' }}
-                                className="overflow-hidden flex flex-col"
+                                className="min-h-0 flex flex-col"
                             >
                                 {/* 
                                   Scrollable Container
                                   - constrained max height on mobile to prevent full screen takeover
                                   - full height on desktop within panel limits 
                                 */}
-                                <div className="max-h-[60vh] md:max-h-[45vh] overflow-y-auto overscroll-contain touch-pan-y custom-scrollbar pr-1 pb-2 space-y-3">
+                                <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain touch-pan-y custom-scrollbar pr-1 pb-2 space-y-3">
                                     <AnimatePresence mode="wait">
                                         {!hasTrip ? (
                                             <motion.div
