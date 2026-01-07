@@ -505,7 +505,7 @@ export const TripPlannerPanel = ({
                 y: isMobile ? yOffset : 0,
                 opacity: 1
             }}
-            transition={{ type: "spring", damping: 20, stiffness: 200, mass: 0.8 }}
+            transition={{ type: "spring", damping: 28, stiffness: 240, mass: 0.8 }}
         >
             {/* Mobile Grab Handle - Swipeable */}
             <motion.div

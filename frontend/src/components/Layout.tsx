@@ -19,7 +19,7 @@ export const Layout = ({ system, onChangeSystem, trip, onTripChange }: LayoutPro
     const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
 
     return (
-        <div className="relative w-full h-[100dvh] overflow-hidden">
+        <div className="relative w-full h-[100dvh] overflow-hidden bg-neutral-950 overscroll-none">
             {/* Background Map - fills entire screen */}
             <div className="absolute inset-0 z-0">
                 <MapShell systemId={system?.id ?? null} trip={trip} userLocation={userLocation} />
