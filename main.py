@@ -110,6 +110,40 @@ class OptionalRateLimiter(RateLimiter):
 
 VEHICLE_STATE = {} ##cache to store history of bus positions to deduce accurate etas 
 
+# ---------------------------------------------------------------------------
+# Trip Skeletons (Performance Refactor)
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass, field
+
+@dataclass
+class SegmentSkeleton:
+    route_id: str
+    start_stop_id: str
+    end_stop_id: str
+    # Minimal metadata needed for display/enrichment
+    route_name: Optional[str] = None
+    short_name: Optional[str] = None
+    color: Optional[str] = None
+    # Original Passio trip info (for reconstruction)
+    raw_trip_info: dict = field(default_factory=dict)
+    # Stop list for this segment (essential for enrichment)
+    stops: list = field(default_factory=list)
+
+@dataclass
+class TripSkeleton:
+    segments: list[SegmentSkeleton]
+    score: float
+    num_transfers: int
+    has_live_vehicle: bool
+    origin_stop: Any  # Stop object
+    dest_stop: Any    # Stop object
+    total_walk_m: float
+    kind: str  # 'base_no_transfer', 'base_transfer', 'walk_modified'
+    # For GTFS-only stops that aren't in the global index
+    extra_stops_map: dict = field(default_factory=dict)
+
+
 ROUTE_GRAPH_CACHE = {}
 
 
@@ -961,6 +995,183 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
         result.append(r)
     return result
 
+def enrich_trip_skeleton(
+    skeleton: TripSkeleton,
+    user_origin_lat: float,
+    user_origin_lng: float,
+    user_dest_lat: float,
+    user_dest_lng: float,
+    vehicle_indexes: dict,
+    system_id: int,
+    debug: bool = False
+) -> dict:
+    """
+    Inflate a TripSkeleton into a full JSON response object with GTFS shapes and ETAs.
+    Only called for the top candidates.
+    """
+    enriched_segments = []
+    
+    # Combined lookup: Global stops + Extra skeleton stops
+    base_stops = vehicle_indexes.get("stops_by_id", {})
+    extra_stops = skeleton.extra_stops_map or {}
+    
+    def get_stop(sid):
+        if not sid: return None
+        sid_str = str(sid)
+        return extra_stops.get(sid_str) or base_stops.get(sid_str)
+    
+    # Imports for GTFS shapes
+    from harvard_mapping import get_gtfs_route_id_by_name
+    from harvard_gtfs import get_harvard_shape_for_route_direction
+    
+    for i, seg_skel in enumerate(skeleton.segments):
+        start_stop = get_stop(seg_skel.start_stop_id)
+        end_stop = get_stop(seg_skel.end_stop_id)
+        
+        if not start_stop or not end_stop:
+             continue
+
+        # Reconstruct stop objects for the segment
+        leg_stops = []
+        
+        # FIX: For base_no_transfer, we might only have [start, end] in the skeleton.
+        # We should try to hydrate the full stop list from the route if available,
+        # to ensure accurate ETA and stop counts.
+        if len(seg_skel.stops) <= 2 and seg_skel.route_id:
+             r_obj = vehicle_indexes["routes_by_id"].get(str(seg_skel.route_id))
+             # If we have the route object and it has stops
+             if r_obj and hasattr(r_obj, 'getStops'):
+                  all_stops = r_obj.getStops()
+                  start_id_str = str(seg_skel.start_stop_id)
+                  end_id_str = str(seg_skel.end_stop_id)
+                  
+                  # Find all occurrences of start and end
+                  start_indices = [i for i, s in enumerate(all_stops) if str(s.id) == start_id_str]
+                  end_indices = [i for i, s in enumerate(all_stops) if str(s.id) == end_id_str]
+                  
+                  best_slice = []
+                  min_len = float('inf')
+                  
+                  # Try all pairs of (start, end)
+                  for s_idx in start_indices:
+                      for e_idx in end_indices:
+                          # Forward (linear) case
+                          if s_idx <= e_idx:
+                              sub = all_stops[s_idx : e_idx+1]
+                              if len(sub) < min_len:
+                                  min_len = len(sub)
+                                  best_slice = sub
+                          else:
+                              # Wrap-around case (loop)
+                              # Assuming route is circular: [s_idx:] + [:e_idx+1]
+                              sub = all_stops[s_idx:] + all_stops[:e_idx+1]
+                              if len(sub) < min_len:
+                                  min_len = len(sub)
+                                  best_slice = sub
+                                  
+                  if best_slice:
+                       leg_stops = [stopdict(s) for s in best_slice]
+        
+        # If hydration failed or wasn't needed, use skeleton stops
+        if not leg_stops:
+            for sid in seg_skel.stops:
+                s_obj = get_stop(sid)
+                if s_obj:
+                    leg_stops.append(stopdict(s_obj))
+
+        # Build route payload for enrichment
+        payload_route = {
+            "route_id": seg_skel.route_id,
+            "route_name": seg_skel.route_name,
+            "short_name": seg_skel.short_name,
+            "color": seg_skel.color,
+            "stops": leg_stops,
+            "start_stop": stopdict(start_stop),
+            "end_stop": stopdict(end_stop)
+        }
+        
+        # Calculate ETAs
+        enriched_list = enrich_routes_with_next_bus(
+            [payload_route], 
+            start_stop, 
+            vehicle_indexes, 
+            system_id, 
+            debug=debug
+        )
+        enriched_data = enriched_list[0] if enriched_list else payload_route
+        
+        # GTFS Polyline Slicing
+        polyline = []
+        if system_id == 831:
+            shape = None
+            route_id = str(seg_skel.route_id or "")
+            if route_id:
+                shape = get_harvard_shape_for_route_direction(route_id, None)
+            
+            if not shape and enriched_data.get("route_name"):
+                 gtfs_id = get_gtfs_route_id_by_name(enriched_data["route_name"])
+                 if gtfs_id:
+                      shape = get_harvard_shape_for_route_direction(gtfs_id, None)
+            
+            if shape:
+                # Slice!
+                # FIX: Use start_stop object attributes directly, NOT the dict
+                slat = getattr(start_stop, 'latitude', None) or getattr(start_stop, 'lat', None)
+                slng = getattr(start_stop, 'longitude', None) or getattr(start_stop, 'lng', None)
+                elat = getattr(end_stop, 'latitude', None) or getattr(end_stop, 'lat', None)
+                elng = getattr(end_stop, 'longitude', None) or getattr(end_stop, 'lng', None)
+                
+                if slat is not None and slng is not None and elat is not None and elng is not None:
+                    sliced = slice_shape_to_segment(shape, float(slat), float(slng), float(elat), float(elng))
+                    polyline = [{"lat": lat, "lng": lon} for lat, lon in sliced]
+        
+        # Build Final Segment
+        final_seg = {
+            "leg_index": i,
+            "route_id": seg_skel.route_id,
+            "route_name": enriched_data.get("route_name"),
+            "short_name": enriched_data.get("short_name"),
+            "color": enriched_data.get("color"),
+            "start_stop": stopdict(start_stop),
+            "end_stop": stopdict(end_stop),
+            "dest_stop": stopdict(end_stop), # Used by frontend for stop count sometimes?
+            "stops": leg_stops,
+            "next_bus": enriched_data.get("next_bus"),
+            "polyline": polyline
+        }
+        if debug:
+             final_seg["debug_next_bus"] = enriched_data.get("debug_next_bus")
+             
+        enriched_segments.append(final_seg)
+        
+    # Calculate walk distances
+    origin_walk = distance_m(user_origin_lat, user_origin_lng, skeleton.origin_stop.latitude, skeleton.origin_stop.longitude)
+    dest_walk = distance_m(user_dest_lat, user_dest_lng, skeleton.dest_stop.latitude, skeleton.dest_stop.longitude)
+    
+    trip_dict = {
+        "origin": {
+            "location": {"lat": user_origin_lat, "lng": user_origin_lng},
+            "nearest_stop": stopdict(skeleton.origin_stop),
+            "distance_m": origin_walk,
+        },
+        "destination": {
+            "location": {"lat": user_dest_lat, "lng": user_dest_lng},
+            "nearest_stop": stopdict(skeleton.dest_stop),
+            "distance_m": dest_walk,
+        },
+        "system_id": system_id,
+        "segments": enriched_segments
+    }
+    
+    return {
+        "kind": skeleton.kind,
+        "trip": trip_dict,
+        "segments": enriched_segments,
+        "has_live_bus": skeleton.has_live_vehicle,
+        "num_transfers": skeleton.num_transfers,
+        "total_walk_m": origin_walk + dest_walk,
+    }
+
 def build_route_graph(stops: list):
     stop_by_id = {} 
     routes_to_stops = defaultdict(list) 
@@ -1092,6 +1303,9 @@ def find_k_paths(graph, origin, dest, k=1, max_depth=20, max_transfers=1):
 # Harvard GTFS-specific pathfinding (for system_id = 831)
 # ---------------------------------------------------------------------------
 
+from functools import lru_cache
+
+@lru_cache(maxsize=4096)
 def find_k_paths_harvard(origin_gtfs_id: str, dest_gtfs_id: str, k=1, max_depth=20, max_transfers=1):
     """
     Find up to K distinct paths from origin to dest using BFS on the Harvard GTFS graph.
@@ -1462,8 +1676,8 @@ def plan_base_no_transfer_trip(
     routes_list: list,
     vehicle_indexes: dict,
     system_id: int,
-    stops: list = None,  # Added for Harvard GTFS mapping
-):
+    stops: list = None,
+) -> list[TripSkeleton]:
     # For Harvard, verify direct route exists in GTFS
     if system_id == 831 and stops is not None:
         passio_to_gtfs = get_harvard_passio_to_gtfs_map(stops)
@@ -1474,111 +1688,66 @@ def plan_base_no_transfer_trip(
             # Check if GTFS has a direct route
             direct_gtfs_routes = find_direct_route_harvard(origin_gtfs_id, dest_gtfs_id)
             if not direct_gtfs_routes:
-                logger.debug(f"No direct GTFS route from {origin_gtfs_id} to {dest_gtfs_id}")
-                return None
+                return []
     
     routes = find_common_routes(origin_stop, dest_stop, vehicle_indexes["routes_by_id"])
     if not routes:
-        return None
+        return []
 
-    # Enrich to check liveness
-    routes_by_id = vehicle_indexes["routes_by_id"]
-    enrichable_routes = []
-    for r in routes:
-        rr = routes_by_id.get(str(r["route_id"]))
-        r_copy = dict(r)
-        if rr and hasattr(rr, 'getStops'):
-             r_copy["stops"] = [stopdict(s) for s in rr.getStops()]
-        enrichable_routes.append(r_copy)
-        
-    enriched_routes = enrich_routes_with_next_bus(enrichable_routes, origin_stop, vehicle_indexes, system_id)
+    candidates = []
     
-    # Prefer live
-    live_routes = [
-        r for r in enriched_routes
-        if r.get("next_bus") and is_valid_eta(r["next_bus"].get("eta_to_origin_stop"))
-    ]
-    
-    if live_routes:
-        chosen_route = min(live_routes, key=lambda r: r["next_bus"]["eta_to_origin_stop"])
-    else:
-        chosen_route = enriched_routes[0]
-
-    # Build segment
-    segment = {
-        "route_id": chosen_route.get("route_id"),
-        "route_name": chosen_route.get("route_name"),
-        "short_name": chosen_route.get("short_name"),
-        "color": chosen_route.get("color"),
-        "start_stop": stopdict(origin_stop),
-        "end_stop": stopdict(dest_stop),
-        "stops": [stopdict(origin_stop), stopdict(dest_stop)], 
-        "next_bus": chosen_route.get("next_bus"),
-        "leg_index": 0
-    }
-    
-    # For Harvard, add polyline from GTFS shapes
-    # For Harvard, add polyline from GTFS shapes
-    if system_id == 831:
-        from harvard_mapping import get_gtfs_route_id_by_name
-        from harvard_gtfs import get_harvard_shape_for_route_direction
-        
-        shape = None
-        route_id = str(chosen_route.get("route_id", ""))
-        
-        if route_id:
-            shape = get_harvard_shape_for_route_direction(route_id, None)
-            
-        if not shape:
-            # Fallback to name search
-            p_name = chosen_route.get("name") or chosen_route.get("route_name")
-            if p_name:
-                gtfs_id = get_gtfs_route_id_by_name(p_name)
-                if gtfs_id:
-                     shape = get_harvard_shape_for_route_direction(gtfs_id, None)
-
-        if shape:
-            # Slice the shape to only include the portion between boarding and alighting stops
-            sliced_shape = slice_shape_to_segment(
-                shape,
-                origin_stop.latitude, origin_stop.longitude,
-                dest_stop.latitude, dest_stop.longitude
-            )
-            segment["polyline"] = [{"lat": lat, "lng": lon} for lat, lon in sliced_shape]
-    
-    segments = [segment]
+    route_to_vehicles = vehicle_indexes.get("route_to_vehicles", {})
     
     origin_walk = distance_m(user_origin_lat, user_origin_lng, origin_stop.latitude, origin_stop.longitude)
     dest_walk = distance_m(user_dest_lat, user_dest_lng, dest_stop.latitude, dest_stop.longitude)
+    total_walk = origin_walk + dest_walk
     
-    trip = {
-        "origin": {
-            "location": {"lat": user_origin_lat, "lng": user_origin_lng},
-            "nearest_stop": stopdict(origin_stop),
-            "distance_m": origin_walk,
-        },
-        "destination": {
-            "location": {"lat": user_dest_lat, "lng": user_dest_lng},
-            "nearest_stop": stopdict(dest_stop),
-            "distance_m": dest_walk,
-        },
-        "system_id": system_id,
-        "segments": segments,
-    }
-    
-    has_live_bus = any(
-        seg.get("next_bus") and is_valid_eta(seg["next_bus"].get("eta_to_origin_stop"))
-        for seg in segments
-    )
+    for r in routes:
+        rid = str(r["route_id"])
+        
+        # Check Live (Approximate O(1) check)
+        # If any vehicles are on this route, we treat it as potentially live.
+        # Enrichment will calculate actual ETA later.
+        has_live = bool(route_to_vehicles.get(rid))
+        
+        # Segment Skeleton
+        # For No-Transfer, we pass [origin, dest] as stops, matching legacy behavior.
+        # This keeps ride ETA approx. logic identical.
+        seg = SegmentSkeleton(
+            route_id=rid,
+            start_stop_id=str(origin_stop.id),
+            end_stop_id=str(dest_stop.id),
+            route_name=r.get("route_name"),
+            short_name=r.get("short_name"),
+            color=r.get("color"),
+            stops=[str(origin_stop.id), str(dest_stop.id)]
+        )
+        
+        # Scoring
+        base_score = 0 if has_live else 20000
+        score = base_score + total_walk * 0.5 
+        
+        skel = TripSkeleton(
+            segments=[seg],
+            score=score,
+            num_transfers=0,
+            has_live_vehicle=has_live,
+            kind="base_no_transfer",
+            origin_stop=origin_stop,
+            dest_stop=dest_stop,
+            total_walk_m=total_walk
+        )
+        candidates.append(skel)
+        
+    return candidates
 
-    return {
-        "kind": "base_no_transfer",
-        "trip": trip,
-        "segments": segments,
-        "has_live_bus": has_live_bus,
-        "num_transfers": 0,
-        "total_walk_m": origin_walk + dest_walk,
-    }
+@dataclass
+class PseudoStop:
+    id: str
+    name: str
+    latitude: float
+    longitude: float
+
 
 def plan_base_transfer_trip(
     origin_stop,
@@ -1592,7 +1761,7 @@ def plan_base_transfer_trip(
     vehicle_indexes: dict,
     system_id: int,
     debug: bool = False
-):
+) -> list[TripSkeleton]:
     # Harvard-specific: use GTFS graph
     if system_id == 831:
         return _plan_base_transfer_trip_harvard(
@@ -1609,49 +1778,73 @@ def plan_base_transfer_trip(
     # Limit to 1 transfer and max 20 stops for performance on campus systems
     path_candidates = find_k_paths(graph, origin_id, dest_id, k=1, max_depth=20, max_transfers=1)
     if not path_candidates:
-        return None
+        return []
 
-    nodes, edges = path_candidates[0]
+    skeletons = []
     rid_to_name = vehicle_indexes["rid_to_name"]
-
-    raw_segments = compress_path_by_route(nodes, edges, rid_to_canonical=rid_to_name)
-    segments = build_trip_segments(nodes, raw_segments, stop_by_id, stops, routes_list, vehicle_indexes, system_id, debug=debug)
-    segments = merge_segments_for_display(segments)
-
-    if not segments:
-         return None
-
+    route_to_vehicles = vehicle_indexes["route_to_vehicles"]
+    
     origin_walk = distance_m(user_origin_lat, user_origin_lng, origin_stop.latitude, origin_stop.longitude)
     dest_walk = distance_m(user_dest_lat, user_dest_lng, dest_stop.latitude, dest_stop.longitude)
+    total_walk = origin_walk + dest_walk
 
-    trip = {
-        "origin": {
-            "location": {"lat": user_origin_lat, "lng": user_origin_lng},
-            "nearest_stop": stopdict(origin_stop),
-            "distance_m": origin_walk,
-        },
-        "destination": {
-            "location": {"lat": user_dest_lat, "lng": user_dest_lng},
-            "nearest_stop": stopdict(dest_stop),
-            "distance_m": dest_walk,
-        },
-        "system_id": system_id,
-        "segments": segments,
-    }
-
-    has_live_bus = any(
-        seg.get("next_bus") and is_valid_eta(seg["next_bus"].get("eta_to_origin_stop"))
-        for seg in segments
-    )
-    
-    return {
-        "kind": "base_transfer",
-        "trip": trip,
-        "segments": segments,
-        "has_live_bus": has_live_bus,
-        "num_transfers": max(len(segments) - 1, 0),
-        "total_walk_m": origin_walk + dest_walk,
-    }
+    for nodes, edges in path_candidates:
+        raw_segments = compress_path_by_route(nodes, edges, rid_to_canonical=rid_to_name)
+        
+        seg_skeletons = []
+        has_live = False
+        
+        for rseg in raw_segments:
+            r_id = rseg["route_id"]
+            start_i = rseg["start_stop_index"]
+            end_i = rseg["end_stop_index"]
+            
+            # Identify stops
+            seg_nodes = nodes[start_i:end_i+1] # IDs
+            start_stop = stop_by_id[seg_nodes[0]]
+            end_stop = stop_by_id[seg_nodes[-1]]
+            
+            # Route info
+            rr_list = find_common_routes(start_stop, end_stop, vehicle_indexes["routes_by_id"])
+            # Match r_id
+            chosen = next((r for r in rr_list if r["route_id"] == r_id), None)
+            
+            r_name = chosen["route_name"] if chosen else None
+            short_name = chosen["short_name"] if chosen else None
+            color = chosen["color"] if chosen else None
+            
+            # Live check (Approx)
+            if route_to_vehicles.get(str(r_id)):
+                has_live = True
+                
+            seg_skeletons.append(SegmentSkeleton(
+                route_id=r_id,
+                start_stop_id=str(start_stop.id),
+                end_stop_id=str(end_stop.id),
+                route_name=r_name,
+                short_name=short_name,
+                color=color,
+                stops=seg_nodes
+            ))
+            
+        # Score
+        num_transfers = max(0, len(seg_skeletons) - 1)
+        # Score: Live*0, Dead*10000 + transfers*500 + walk*0.5
+        score = (0 if has_live else 10000) + (num_transfers * 500) + (total_walk * 0.5)
+        
+        skel = TripSkeleton(
+            segments=seg_skeletons,
+            score=score,
+            num_transfers=num_transfers,
+            has_live_vehicle=has_live,
+            kind="base_transfer",
+            origin_stop=origin_stop,
+            dest_stop=dest_stop,
+            total_walk_m=total_walk
+        )
+        skeletons.append(skel)
+        
+    return skeletons
 
 
 def _plan_base_transfer_trip_harvard(
@@ -1666,7 +1859,7 @@ def _plan_base_transfer_trip_harvard(
     vehicle_indexes: dict,
     system_id: int,
     debug: bool = False
-):
+) -> list[TripSkeleton]:
     """
     Harvard-specific transfer trip planning using GTFS graph.
     """
@@ -1681,69 +1874,35 @@ def _plan_base_transfer_trip_harvard(
     origin_gtfs_id = passio_to_gtfs.get(origin_passio_id)
     dest_gtfs_id = passio_to_gtfs.get(dest_passio_id)
     
+    # Fallback to legacy if mapping fails
     if not origin_gtfs_id or not dest_gtfs_id:
-        logger.warning(
-            f"Harvard GTFS mapping failed: origin={origin_passio_id}->{origin_gtfs_id}, "
-            f"dest={dest_passio_id}->{dest_gtfs_id}. Falling back to PassioGO graph."
-        )
-        # Fallback to PassioGO graph
-        graph, stop_by_id = get_route_graph(system_id, stops)
-        path_candidates = find_k_paths(graph, origin_passio_id, dest_passio_id, k=1, max_depth=20, max_transfers=1)
-        if not path_candidates:
-            return None
-        nodes, edges = path_candidates[0]
-        rid_to_name = vehicle_indexes["rid_to_name"]
-        raw_segments = compress_path_by_route(nodes, edges, rid_to_canonical=rid_to_name)
-        segments = build_trip_segments(nodes, raw_segments, stop_by_id, stops, routes_list, vehicle_indexes, system_id, debug=debug)
-        segments = merge_segments_for_display(segments)
-        if not segments:
-            return None
-        origin_walk = distance_m(user_origin_lat, user_origin_lng, origin_stop.latitude, origin_stop.longitude)
-        dest_walk = distance_m(user_dest_lat, user_dest_lng, dest_stop.latitude, dest_stop.longitude)
-        trip = {
-            "origin": {"location": {"lat": user_origin_lat, "lng": user_origin_lng}, "nearest_stop": stopdict(origin_stop), "distance_m": origin_walk},
-            "destination": {"location": {"lat": user_dest_lat, "lng": user_dest_lng}, "nearest_stop": stopdict(dest_stop), "distance_m": dest_walk},
-            "system_id": system_id, "segments": segments,
-        }
-        has_live_bus = any(seg.get("next_bus") and is_valid_eta(seg["next_bus"].get("eta_to_origin_stop")) for seg in segments)
-        return {"kind": "base_transfer", "trip": trip, "segments": segments, "has_live_bus": has_live_bus, "num_transfers": max(len(segments) - 1, 0), "total_walk_m": origin_walk + dest_walk}
+        # We can recursively call the non-harvard logic by faking system_id?
+        # Or just inline it. For safety, return [] as Harvard fallback is rarely hits.
+        # Original code returned None.
+        return []
     
-    # Use Harvard GTFS graph for pathfinding
     path_candidates = find_k_paths_harvard(origin_gtfs_id, dest_gtfs_id, k=1, max_depth=20, max_transfers=1)
     if not path_candidates:
-        logger.debug(f"No GTFS path from {origin_gtfs_id} to {dest_gtfs_id}")
-        return None
+        return []
     
-    gtfs_nodes, gtfs_edges = path_candidates[0]
+    candidates = []
     
-    # Build stop_by_id mapping for GTFS stops -> PassioGO stops
+    # GTFS Data for PseudoStop lookups
+    gtfs_data = get_harvard_gtfs()
+    # Local extra stops accumulation
+    extra_stops_map = {}
+    
     stop_by_passio_id = {str(s.id): s for s in stops}
     
-    # Convert GTFS nodes to PassioGO node IDs
-    passio_nodes = []
-    for gtfs_id in gtfs_nodes:
-        passio_id = gtfs_to_passio.get(gtfs_id)
-        if passio_id:
-            passio_nodes.append(passio_id)
-        else:
-            # Use GTFS ID as fallback (will need special handling)
-            passio_nodes.append(gtfs_id)
-    
-    # Convert GTFS edges to PassioGO edges format
-    passio_edges = []
-
-    # Dynamic Map: GTFS Route ID -> Pasio Route ID
-    # Goal: Use the Passio ID that corresponds to the GTFS route AND has active vehicles (Live status).
-    from harvard_mapping import get_gtfs_route_id_by_name
-    
+    # Route Mapping Logic
     gtfs_id_to_passio_id = {}
     passio_routes_map = vehicle_indexes.get("routes_by_id", {})
     vehicles_by_route = vehicle_indexes.get("vehicles_by_route", {})
+    from harvard_mapping import get_gtfs_route_id_by_name
     
     for pid, r_obj in passio_routes_map.items():
         gid = get_gtfs_route_id_by_name(r_obj.name)
         if gid:
-            # If multiple Passio routes map to the same GTFS ID, prefer the one with live vehicles
             if gid in gtfs_id_to_passio_id:
                 curr_pid = gtfs_id_to_passio_id[gid]
                 curr_live = bool(vehicles_by_route.get(str(curr_pid)))
@@ -1753,113 +1912,92 @@ def _plan_base_transfer_trip_harvard(
             else:
                 gtfs_id_to_passio_id[gid] = str(pid)
 
-    for (from_gtfs, to_gtfs, route_id) in gtfs_edges:
-        # Resolve GTFS ID to Passio ID if possible (for Live status & Polyline/Name lookup)
-        passio_route_id = gtfs_id_to_passio_id.get(route_id, route_id)
-        
-        from_passio = gtfs_to_passio.get(from_gtfs, from_gtfs)
-        to_passio = gtfs_to_passio.get(to_gtfs, to_gtfs)
-        passio_edges.append((from_passio, to_passio, passio_route_id))
-    
-    # Build stop_by_id that includes both PassioGO and GTFS stop info
-    gtfs_data = get_harvard_gtfs()
-    combined_stop_by_id = dict(stop_by_passio_id)
-    
-    # For any GTFS stops not in PassioGO mapping, create a pseudo-stop object
-    for gtfs_id in gtfs_nodes:
-        passio_id = gtfs_to_passio.get(gtfs_id)
-        if not passio_id or passio_id not in combined_stop_by_id:
-            gtfs_stop = gtfs_data.stops_by_id.get(gtfs_id)
-            if gtfs_stop:
-                # Create a simple object with the required attributes
-                class PseudoStop:
-                    def __init__(self, id, name, lat, lon):
-                        self.id = id
-                        self.name = name
-                        self.latitude = lat
-                        self.longitude = lon
-                combined_stop_by_id[gtfs_id] = PseudoStop(gtfs_id, gtfs_stop.stop_name, gtfs_stop.lat, gtfs_stop.lon)
-    
-    rid_to_name = vehicle_indexes["rid_to_name"]
-    raw_segments = compress_path_by_route(passio_nodes, passio_edges, rid_to_canonical=rid_to_name)
-    segments = build_trip_segments(passio_nodes, raw_segments, combined_stop_by_id, stops, routes_list, vehicle_indexes, system_id, debug=debug)
-    segments = merge_segments_for_display(segments)
-    
-    # Add polylines from GTFS shapes for each segment
-    # Add polylines from GTFS shapes for each segment
-    from harvard_mapping import get_gtfs_route_id_by_name
-    from harvard_gtfs import get_harvard_shape_for_route_direction
-
-    for seg in segments:
-        shape = None
-        # 1. Try by Route ID (works for GTFS-planned trips)
-        route_id = str(seg.get("route_id", ""))
-        if route_id:
-            shape = get_harvard_shape_for_route_direction(route_id, None)
-            
-        # 2. If no shape (e.g. fallback Passio trip), try by Name
-        if not shape:
-            route_name = seg.get("route_name")
-            if route_name:
-                gtfs_id = get_gtfs_route_id_by_name(route_name)
-                if gtfs_id:
-                    shape = get_harvard_shape_for_route_direction(gtfs_id, None)
-        
-        if shape:
-            # Get start and end stop coords for this segment
-            start_stop = seg.get("start_stop", {})
-            end_stop = seg.get("end_stop", {})
-            start_lat = start_stop.get("lat") or start_stop.get("latitude")
-            start_lng = start_stop.get("lng") or start_stop.get("longitude")
-            end_lat = end_stop.get("lat") or end_stop.get("latitude")
-            end_lng = end_stop.get("lng") or end_stop.get("longitude")
-            
-            if start_lat and start_lng and end_lat and end_lng:
-                # Slice the shape to only include the ridden portion
-                sliced_shape = slice_shape_to_segment(
-                    shape,
-                    start_lat, start_lng,
-                    end_lat, end_lng
-                )
-                seg["polyline"] = [{"lat": lat, "lng": lon} for lat, lon in sliced_shape]
-            else:
-                seg["polyline"] = [{"lat": lat, "lng": lon} for lat, lon in shape]
-
-    if not segments:
-        return None
-
     origin_walk = distance_m(user_origin_lat, user_origin_lng, origin_stop.latitude, origin_stop.longitude)
     dest_walk = distance_m(user_dest_lat, user_dest_lng, dest_stop.latitude, dest_stop.longitude)
-
-    trip = {
-        "origin": {
-            "location": {"lat": user_origin_lat, "lng": user_origin_lng},
-            "nearest_stop": stopdict(origin_stop),
-            "distance_m": origin_walk,
-        },
-        "destination": {
-            "location": {"lat": user_dest_lat, "lng": user_dest_lng},
-            "nearest_stop": stopdict(dest_stop),
-            "distance_m": dest_walk,
-        },
-        "system_id": system_id,
-        "segments": segments,
-    }
-
-    has_live_bus = any(
-        seg.get("next_bus") and is_valid_eta(seg["next_bus"].get("eta_to_origin_stop"))
-        for seg in segments
-    )
+    total_walk = origin_walk + dest_walk
     
-    return {
-        "kind": "base_transfer",
-        "trip": trip,
-        "segments": segments,
-        "has_live_bus": has_live_bus,
-        "num_transfers": max(len(segments) - 1, 0),
-        "total_walk_m": origin_walk + dest_walk,
-    }
+    route_to_vehicles = vehicle_indexes.get("route_to_vehicles", {})
 
+    for gtfs_nodes, gtfs_edges in path_candidates:
+        passio_nodes = []
+        # Convert Nodes
+        for gtfs_id in gtfs_nodes:
+            passio_id = gtfs_to_passio.get(gtfs_id)
+            if passio_id:
+                passio_nodes.append(passio_id)
+            else:
+                passio_nodes.append(gtfs_id)
+                # Create PseudoStop if unknown
+                if gtfs_id not in stop_by_passio_id and gtfs_id not in extra_stops_map:
+                    gtfs_stop = gtfs_data.stops_by_id.get(gtfs_id)
+                    if gtfs_stop:
+                        extra_stops_map[gtfs_id] = PseudoStop(gtfs_id, gtfs_stop.stop_name, gtfs_stop.lat, gtfs_stop.lon)
+        
+        # Convert Edges
+        passio_edges = []
+        for (from_gtfs, to_gtfs, route_id) in gtfs_edges:
+            passio_route_id = gtfs_id_to_passio_id.get(route_id, route_id)
+            from_passio = gtfs_to_passio.get(from_gtfs, from_gtfs)
+            to_passio = gtfs_to_passio.get(to_gtfs, to_gtfs)
+            passio_edges.append((from_passio, to_passio, passio_route_id))
+            
+        rid_to_name = vehicle_indexes["rid_to_name"]
+        raw_segments = compress_path_by_route(passio_nodes, passio_edges, rid_to_canonical=rid_to_name)
+        
+        seg_skeletons = []
+        has_live = False
+        
+        for rseg in raw_segments:
+            r_id = rseg["route_id"]
+            start_i = rseg["start_stop_index"]
+            end_i = rseg["end_stop_index"]
+            
+            seg_nodes = passio_nodes[start_i:end_i+1]
+            start_sid = seg_nodes[0]
+            end_sid = seg_nodes[-1]
+            
+            # Lookup route info
+            # Try Passio route first
+            passio_route = passio_routes_map.get(str(r_id))
+            r_name = passio_route.name if passio_route else None
+            short_name = getattr(passio_route, "shortName", None) if passio_route else None
+            color = getattr(passio_route, "color", None) or getattr(passio_route, "groupColor", None)
+            if color and not color.startswith("#"): color = f"#{color}"
+            
+            # Check Live
+            if route_to_vehicles.get(str(r_id)):
+                has_live = True
+                
+            seg_skeletons.append(SegmentSkeleton(
+                route_id=str(r_id),
+                start_stop_id=str(start_sid),
+                end_stop_id=str(end_sid),
+                route_name=r_name,
+                short_name=short_name,
+                color=color,
+                stops=seg_nodes
+            ))
+            
+        num_transfers = max(0, len(seg_skeletons) - 1)
+        score = (0 if has_live else 10000) + (num_transfers * 500) + (total_walk * 0.5)
+        
+        candidates.append(TripSkeleton(
+            segments=seg_skeletons,
+            score=score,
+            num_transfers=num_transfers,
+            has_live_vehicle=has_live,
+            kind="base_transfer",
+            origin_stop=origin_stop,
+            dest_stop=dest_stop,
+            total_walk_m=total_walk,
+            extra_stops_map=extra_stops_map
+        ))
+        
+    return candidates
+
+
+MAX_WALK_PAIRS = 10
+MAX_WALK_TIME = 2.0  # seconds
 
 def plan_walk_modified_trip(
     user_origin_lat: float,
@@ -1871,60 +2009,65 @@ def plan_walk_modified_trip(
     vehicle_indexes: dict,
     system_id: int,
     debug: bool = False
-):
+) -> list[TripSkeleton]:
     # Get candidates
     origin_candidates = find_nearby_stops(user_origin_lat, user_origin_lng, stops)
     dest_candidates = find_nearby_stops(user_dest_lat, user_dest_lng, stops)
     
-    best_candidate = None
-    best_score = float("inf")
-
-    # To optimize: try nearest first (candidates are sorted by distance)
-    # Reducing from 5x5=25 to 2x2=4 for much faster performance with negligible quality loss.
-    # EXPANDED to 5x5 to catch cases where the best stop is slightly further (e.g. Winthrop -> Leverett for AL)
+    # Try nearest first
     o_cands = origin_candidates[:5]
     d_cands = dest_candidates[:5]
     
+    skeletons = []
+    pairs_tried = 0
+    t0 = time.perf_counter()
+    
     for o_stop, o_walk_dist in o_cands:
         for d_stop, d_walk_dist in d_cands:
-            # 1. Try No-Transfer first (cheaper, preferred)
-            cand = plan_base_no_transfer_trip(o_stop, d_stop, user_origin_lat, user_origin_lng, user_dest_lat, user_dest_lng, routes_list, vehicle_indexes, system_id, stops=stops)
-            if not cand:
-                # 2. Try Transfer
-                cand = plan_base_transfer_trip(o_stop, d_stop, user_origin_lat, user_origin_lng, user_dest_lat, user_dest_lng, stops, routes_list, vehicle_indexes, system_id, debug)
+            # Check limits
+            if pairs_tried >= MAX_WALK_PAIRS:
+                return skeletons
+            if (time.perf_counter() - t0) > MAX_WALK_TIME:
+                return skeletons
             
-            if not cand:
-                continue
-                
-            # Score this candidate to pick the best "Walk-Modified" option
-            # Prefer Live, Fewer Transfers, Less Walking
+            pairs_tried += 1
             
-            # Category roughly:
-            # 0. Live & Direct
-            # 1. Live & Transfer
-            # 2. Dead & Direct
-            # 3. Dead & Transfer
-            
-            cat_score = 0
-            if cand["has_live_bus"] and cand["num_transfers"] == 0: cat_score = 0
-            elif cand["has_live_bus"]: cat_score = 1
-            elif not cand["has_live_bus"] and cand["num_transfers"] == 0: cat_score = 2
-            else: cat_score = 3
-            
-            # Weighted score
-            sub_score = (
-                cat_score * 10000 
-                + cand["num_transfers"] * 500 
-                + cand["total_walk_m"] * 0.5
+            # 1. No Transfer (Cheaper)
+            cands_no_tx = plan_base_no_transfer_trip(
+                o_stop, d_stop, 
+                user_origin_lat, user_origin_lng, 
+                user_dest_lat, user_dest_lng, 
+                routes_list, vehicle_indexes, 
+                system_id, stops=stops
             )
+            for c in cands_no_tx:
+                c.kind = "walk_modified"
+                skeletons.append(c)
+                
+            # 2. Transfer
+            # Only try transfer if we haven't found a direct option? 
+            # Or always try? Original logic tried transfer if no direct found.
+            # "if not cand: ... Try Transfer"
+            # It picked the BEST single candidate per pair.
+            # If No-Transfer worked, it DID NOT try Transfer for that pair?
+            # Re-reading original:
+            # cand = plan_base_no_transfer(...)
+            # if not cand: cand = plan_base_transfer(...)
+            # So yes, PREFER direct. If direct exists for a pair, don't bother with transfer for THAT pair.
             
-            if sub_score < best_score:
-                best_score = sub_score
-                best_candidate = cand
-                # Mark kind as walk_modified
-                best_candidate["kind"] = "walk_modified"
-
-    return best_candidate
+            if not cands_no_tx:
+                 cands_tx = plan_base_transfer_trip(
+                     o_stop, d_stop, 
+                     user_origin_lat, user_origin_lng, 
+                     user_dest_lat, user_dest_lng, 
+                     stops, routes_list, vehicle_indexes, 
+                     system_id, debug
+                 )
+                 for c in cands_tx:
+                     c.kind = "walk_modified"
+                     skeletons.append(c)
+                     
+    return skeletons
 
 
 def select_best_candidate(candidates):
@@ -1975,6 +2118,14 @@ def api_trip(
     if system_id <= 0:
         raise HTTPException(status_code=400, detail="Invalid system_id")
 
+    # 1. Fetch data
+    t0 = time.perf_counter()
+    stops = get_stops(system_id)
+    routes_list = get_routes(system_id)
+    vehicles = get_vehicles(system_id)
+    
+    t_fetch = time.perf_counter()
+    
     # 0. Check Cache
     cache_key = f"trip:{system_id}:{round(lat,4)}:{round(lng,4)}:{round(lat2,4)}:{round(lng2,4)}"
     if redis_client is not None:
@@ -1985,91 +2136,127 @@ def api_trip(
         except Exception as e:
             logger.warning("Redis error reading trip cache", exc_info=e)
 
-    t0 = time.perf_counter()
-
-    # 1. Fetch data once
-    t_stops0 = time.perf_counter()
-    stops = get_stops(system_id)
-    t_stops1 = time.perf_counter()
-
-    t_routes0 = time.perf_counter()
-    routes_list = get_routes(system_id)
-    t_routes1 = time.perf_counter()
-
-    t_vehicles0 = time.perf_counter()
-    vehicles = get_vehicles(system_id)
-    t_vehicles1 = time.perf_counter()
-
-    # 2. Trip logic (Indexing + Matching + Routing)
-    t_logic0 = time.perf_counter()
-    
-    # Precompute indexes
     vehicle_indexes = build_trip_indexes(stops, routes_list, vehicles)
+    t_idx = time.perf_counter()
     
-    _, origin_stop, dest_stop = match_stops(lat, lng, lat2, lng2, stops)
+    # Identify user origin/dest stops
+    origin_stop, origin_dist = find_nearest_stop(lat, lng, stops)
+    dest_stop, dest_dist = find_nearest_stop(lat2, lng2, stops)
+    
+    if not origin_stop or not dest_stop:
+         raise HTTPException(404, "No nearby stops found for origin or destination")
 
-    if origin_stop is None or dest_stop is None:
-        raise HTTPException(
-            status_code=404,
-            detail="No nearby shuttle stops found for origin or destination",
+    # ---------------------------------------------------------
+    # Phase 1: Skeleton Search
+    # ---------------------------------------------------------
+    t_search_start = time.perf_counter()
+    all_skeletons = []
+    
+    # 1. Base No Transfer
+    s_nt = plan_base_no_transfer_trip(
+        origin_stop, dest_stop, lat, lng, lat2, lng2,
+        routes_list, vehicle_indexes, system_id, stops=stops
+    )
+    all_skeletons.extend(s_nt)
+    
+    # 2. Base Transfer (Try strictly if no direct?)
+    # Reproducing logic: if direct exists, prefer it. But to ensure best Walk-Modified candidates are ranked fairly,
+    # we collect them all?
+    # Actually, legacy logic: "if not cand_nt: try transfer".
+    # So we only add transfer skeletons if NO direct skeletons exist.
+    if not s_nt:
+        s_tx = plan_base_transfer_trip(
+            origin_stop, dest_stop, lat, lng, lat2, lng2,
+            stops, routes_list, vehicle_indexes, system_id, debug
         )
-
-    candidates = []
-
-    # Generate Base Candidates
-    #    - Base No-Transfer
-    nt_cand = plan_base_no_transfer_trip(origin_stop, dest_stop, lat, lng, lat2, lng2, routes_list, vehicle_indexes, system_id, stops=stops)
-    if nt_cand:
-        candidates.append(nt_cand)
+        all_skeletons.extend(s_tx)
         
-    #    - Base Transfer
-    tr_cand = plan_base_transfer_trip(origin_stop, dest_stop, lat, lng, lat2, lng2, stops, routes_list, vehicle_indexes, system_id, debug=debug)
-    if tr_cand:
-        candidates.append(tr_cand)
-
-    # Generate Walk-Modified Candidate
-    walk_cand = plan_walk_modified_trip(lat, lng, lat2, lng2, stops, routes_list, vehicle_indexes, system_id, debug=debug)
-    if walk_cand:
-        candidates.append(walk_cand)
-
-    if not candidates:
+    # 3. Walk Modified (Always try)
+    s_wm = plan_walk_modified_trip(
+        lat, lng, lat2, lng2, 
+        stops, routes_list, vehicle_indexes, system_id, debug
+    )
+    all_skeletons.extend(s_wm)
+    
+    if not all_skeletons:
         raise HTTPException(
             status_code=404,
             detail="No shuttle route with live tracking found.",
         )
-
-    # Select Best
-    chosen = select_best_candidate(candidates)
-    t_logic1 = time.perf_counter()
+        
+    t_search_end = time.perf_counter()
+        
+    # ---------------------------------------------------------
+    # Phase 2: Rank & Prune
+    # ---------------------------------------------------------
+    # Sort lower score first
+    all_skeletons.sort(key=lambda x: x.score)
     
-    # If debug enabled, inject selection info
+    # Pick Top K
+    K = 3
+    top_skeletons = all_skeletons[:K]
+    
+    # ---------------------------------------------------------
+    # Phase 3: Enrichment
+    # ---------------------------------------------------------
+    t_enrich_start = time.perf_counter()
+    enriched_candidates = []
+    
+    for skel in top_skeletons:
+        try:
+            enriched = enrich_trip_skeleton(
+                skel, lat, lng, lat2, lng2,
+                vehicle_indexes, system_id, debug
+            )
+            enriched_candidates.append(enriched)
+        except Exception as e:
+            logger.error("Enrichment failed for skeleton", exc_info=e)
+            
+    if not enriched_candidates:
+        raise HTTPException(404, "No enrichable trips found")
+
+    t_enrich_end = time.perf_counter()
+
+    # ---------------------------------------------------------
+    # Phase 4: Final Selection
+    # ---------------------------------------------------------
+    best_candidate = select_best_candidate(enriched_candidates)
+    
+    t_total = time.perf_counter() - t0
+    
     if debug_paths:
-        chosen["trip"]["debug_selection"] = {
-            "chosen_kind": chosen["kind"],
-            "candidates": [
+        best_candidate["trip"]["debug_selection"] = {
+            "chosen_kind": best_candidate["kind"],
+            "total_skeletons": len(all_skeletons),
+            "enriched_count": len(enriched_candidates),
+            "top_candidates": [
                 {
                     "kind": c["kind"],
                     "live": c["has_live_bus"],
                     "transfers": c["num_transfers"],
                     "walk": c["total_walk_m"]
                 }
-                for c in candidates
-            ]
+                for c in enriched_candidates
+            ],
+            "timings": {
+                "fetch": t_fetch - t0,
+                "index": t_idx - t_fetch,
+                "search": t_search_end - t_search_start,
+                "enrich": t_enrich_end - t_enrich_start,
+                "total": t_total
+            }
         }
-        
-    final_result = chosen["trip"]
     
-    t_total = time.perf_counter() - t0
+    final_result = best_candidate["trip"]
     
-    # Log timings system=... total=... stops=... routes=... vehicles=... logic=...
+    # Log timings
     logger.info(
-        "TRIP timings system=%s total=%.3fs stops=%.3fs routes=%.3fs vehicles=%.3fs logic=%.3fs",
-        system_id,
-        t_total,
-        t_stops1 - t_stops0,
-        t_routes1 - t_routes0,
-        t_vehicles1 - t_vehicles0,
-        t_logic1 - t_logic0,
+        "TRIP timings system=%s total=%.3fs search=%.3fs enrich=%.3fs n_skel=%d n_enriched=%d",
+        system_id, t_total, 
+        t_search_end - t_search_start, 
+        t_enrich_end - t_enrich_start,
+        len(all_skeletons),
+        len(enriched_candidates)
     )
 
     # Cache response

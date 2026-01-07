@@ -469,7 +469,7 @@ export const TripPlannerPanel = ({
 
     const destWalkM = trip?.destination.distance_m ?? 0;
     const destWalkMin = metersToMinutes(destWalkM);
-    const shouldShowDestWalk = isWalkReasonable(destWalkM);
+    const shouldShowDestWalk = destWalkM > 5; // Show even for short walks to destination
 
     const numSegments = normalizedSegments.length;
     const numTransfers = Math.max(0, numSegments - 1);
