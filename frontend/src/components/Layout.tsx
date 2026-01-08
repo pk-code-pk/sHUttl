@@ -19,7 +19,7 @@ export const Layout = ({ system, onChangeSystem, trip, onTripChange }: LayoutPro
     const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
 
     return (
-        <div className="relative w-full h-[100dvh] overflow-hidden bg-neutral-950 overscroll-none">
+        <div className="fixed inset-0 md:relative md:w-full md:h-[100dvh] overflow-hidden bg-neutral-950 overscroll-none">
             {/* Background Map - fills entire screen */}
             <div className="absolute inset-0 z-0">
                 <MapShell systemId={system?.id ?? null} trip={trip} userLocation={userLocation} />
@@ -34,12 +34,11 @@ export const Layout = ({ system, onChangeSystem, trip, onTripChange }: LayoutPro
             <div className="
                 pointer-events-none
                 fixed inset-0 z-20 
-                /* Mobile: Full edge-to-edge width */
                 w-full
                 
                 /* Desktop: reset positioning */
                 md:static md:inset-auto md:h-full md:w-full
-                flex flex-col justify-end md:flex-row md:items-start md:p-6
+                flex flex-col md:flex-row md:justify-start md:items-start md:p-6
             ">
                 {/* 
                   Trip Planner Panel Container 

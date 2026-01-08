@@ -100,19 +100,14 @@ export const TripPlannerPanel = ({
 
     // ... (rest of component internal logic)
 
-    // Compute vertical offset for smooth sliding animation
-    // Height is fixed at 92vh on mobile.
-    // offsets shift it down to reveal less.
+    // Compute slide offset (translateY)
+    // Panel is fixed at bottom with 100dvh height.
+    // y=0 means fully expanded (covering screen).
+    // y=30dvh means pushed down by 30dvh (top at 30dvh).
     const yOffset = useMemo(() => {
-        // Minimized always takes precedence
-        if (sheetState === 'minimized') return '77dvh';
-
-        // If itinerary is closed, slide down to compact view (INPUTS ONLY)
-        // This applies to both Default and Expanded states to prevent empty space
+        if (sheetState === 'minimized') return '85dvh';
         if (!itineraryOpen) return '50dvh';
-
-        // Otherwise follow state
-        return sheetState === 'expanded' ? '0dvh' : '22dvh';
+        return sheetState === 'expanded' ? '8dvh' : '30dvh';
     }, [sheetState, itineraryOpen]);
 
     // Handle drag/swipe on the grab handle
@@ -487,22 +482,25 @@ export const TripPlannerPanel = ({
             className={clsx(
                 // Interactive element
                 "pointer-events-auto",
-                // Mobile: rounded-t-3xl only, border top only, full width
+                // Mobile: fixed to viewport bottom
+                "fixed left-0 right-0 bottom-0 md:static md:bottom-auto",
                 "rounded-t-3xl md:rounded-xl",
                 "bg-neutral-900/95 backdrop-blur-xl md:backdrop-blur-md",
                 "border-t md:border border-white/10 md:border-white/5",
                 "shadow-[0_-8px_30px_rgba(0,0,0,0.5)] md:shadow-xl",
                 "flex flex-col",
-
-                // Mobile: fixed tall height, slide using transform
-                "h-[92dvh]",
-
-                "md:max-h-[85vh] md:h-auto md:translate-y-0", // Reset on desktop
+                // Mobile: 100dvh tall. We slide it down to hide parts.
+                "h-[100dvh] md:h-auto md:max-h-[85vh]",
                 className
             )}
+            style={{
+                bottom: isMobile ? 0 : undefined,
+            }}
             initial={{ y: "100%", opacity: 0 }}
             animate={{
                 y: isMobile ? yOffset : 0,
+                // Reset top in case it was set previously
+                top: "auto",
                 opacity: 1
             }}
             transition={{ type: "spring", damping: 28, stiffness: 240, mass: 0.8 }}
