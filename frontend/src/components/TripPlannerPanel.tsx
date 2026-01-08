@@ -520,7 +520,7 @@ export const TripPlannerPanel = ({
                 )} />
             </motion.div>
 
-            <div className="px-4 pb-4 pt-1 md:pt-4 flex flex-col h-full min-h-0 pb-[env(safe-area-inset-bottom)]">
+            <div className="px-4 pb-[env(safe-area-inset-bottom,16px)] pt-1 md:pt-4 md:pb-4 flex flex-col h-full min-h-0">
                 {/* Header with System Selector */}
                 <div className="flex items-center justify-between shrink-0 mb-3">
                     <div className="flex items-center gap-2">

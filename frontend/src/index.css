@@ -150,6 +150,32 @@
   --color-crimson-light: #c41e1e;
 }
 
+/* Dark background for html/body to prevent white flash on overscroll */
+html,
+body {
+  background: #0a0a0a;
+}
+
+/* MOBILE ONLY: Lock body/document scroll to prevent Safari keyboard push and letterbox gaps */
+@media (max-width: 767px) {
+
+  html,
+  body {
+    position: fixed;
+    overflow: hidden;
+    width: 100%;
+    height: 100%;
+    overscroll-behavior: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  #root {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+  }
+}
+
 @layer base {
   :root {
     color-scheme: dark;
@@ -159,8 +185,11 @@
     @apply bg-neutral-950 text-white antialiased;
   }
 
-  #root {
-    @apply min-h-screen flex flex-col;
+  /* Desktop only: use min-h-screen for standard layout */
+  @media (min-width: 768px) {
+    #root {
+      @apply min-h-screen flex flex-col;
+    }
   }
 }
 
