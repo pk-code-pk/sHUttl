@@ -73,11 +73,10 @@ app.add_middleware(
 )
 
 #intialize our app with FastAPI framework 
-@app.get("/health")
-#test health of our api endpoint  
-def health_check():
-    return {"status": "ok", "message": "Backend is running!"}
 
+@app.api_route("/health", methods=["GET", "HEAD"])
+def health_check(response: Response):
+    return {"status": "ok", "message": "Backend is running!"}
 
 @app.on_event("startup")
 async def startup_event():
