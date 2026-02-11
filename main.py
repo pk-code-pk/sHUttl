@@ -77,6 +77,10 @@ app.add_middleware(
 @app.api_route("/health", methods=["GET", "HEAD"])
 def health_check(response: Response):
     return {"status": "ok", "message": "Backend is running!"}
+    
+@app.head("/health")
+def health_head():
+    return Response(status_code=200)
 
 @app.on_event("startup")
 async def startup_event():
@@ -806,7 +810,27 @@ def find_common_routes(origin_stop, dest_stop, routes_by_id: dict):
                 "short_name": getattr(route, "shortName", None),
                 "color": color,
             })
-    return result 
+    return result
+
+
+def _gtfs_routes_to_passio_routes(gtfs_route_ids: list[str], routes_by_id: dict) -> list[dict]:
+    """Map GTFS route IDs to PassioGO route dicts (same shape as find_common_routes output)."""
+    from harvard_mapping import get_gtfs_route_id_by_name
+    target = set(gtfs_route_ids)
+    routes = []
+    for pid, r_obj in routes_by_id.items():
+        gid = get_gtfs_route_id_by_name(r_obj.name)
+        if gid and gid in target:
+            color = getattr(r_obj, "groupColor", None) or getattr(r_obj, "color", None)
+            if color and not color.startswith("#"):
+                color = f"#{color}"
+            routes.append({
+                "route_id": pid,
+                "route_name": r_obj.name,
+                "short_name": getattr(r_obj, "shortName", None),
+                "color": color,
+            })
+    return routes
 
 
 NEAR_STOP_METERS = 30
@@ -1678,18 +1702,21 @@ def plan_base_no_transfer_trip(
     stops: list = None,
 ) -> list[TripSkeleton]:
     # For Harvard, verify direct route exists in GTFS
+    direct_gtfs_routes = None
     if system_id == 831 and stops is not None:
         passio_to_gtfs = get_harvard_passio_to_gtfs_map(stops)
         origin_gtfs_id = passio_to_gtfs.get(str(origin_stop.id))
         dest_gtfs_id = passio_to_gtfs.get(str(dest_stop.id))
-        
+
         if origin_gtfs_id and dest_gtfs_id:
-            # Check if GTFS has a direct route
             direct_gtfs_routes = find_direct_route_harvard(origin_gtfs_id, dest_gtfs_id)
             if not direct_gtfs_routes:
                 return []
-    
+
     routes = find_common_routes(origin_stop, dest_stop, vehicle_indexes["routes_by_id"])
+    if not routes and direct_gtfs_routes:
+        # PassioGO routesAndPositions missed this pair, but GTFS confirms a direct route
+        routes = _gtfs_routes_to_passio_routes(direct_gtfs_routes, vehicle_indexes["routes_by_id"])
     if not routes:
         return []
 
@@ -2069,6 +2096,91 @@ def plan_walk_modified_trip(
     return skeletons
 
 
+SHORT_SEGMENT_THRESHOLD_M = 300
+
+
+def collapse_short_transit_segments(
+    skeletons: list[TripSkeleton],
+    user_origin_lat: float,
+    user_origin_lng: float,
+    user_dest_lat: float,
+    user_dest_lng: float,
+    vehicle_indexes: dict,
+) -> list[TripSkeleton]:
+    """Replace trivially walkable first/last transit segments with walk legs.
+
+    For multi-segment trips, if the first or last segment covers less than
+    SHORT_SEGMENT_THRESHOLD_M, remove it and turn that leg into a walk by
+    adjusting the skeleton's origin/dest stop.
+    """
+    stops_by_id = vehicle_indexes["stops_by_id"]
+    route_to_vehicles = vehicle_indexes.get("route_to_vehicles", {})
+    result = []
+
+    for skel in skeletons:
+        if len(skel.segments) < 2:
+            result.append(skel)
+            continue
+
+        modified = False
+
+        # --- Check first segment ---
+        first_seg = skel.segments[0]
+        start_stop = stops_by_id.get(first_seg.start_stop_id) or skel.extra_stops_map.get(first_seg.start_stop_id)
+        end_stop = stops_by_id.get(first_seg.end_stop_id) or skel.extra_stops_map.get(first_seg.end_stop_id)
+        if start_stop and end_stop:
+            seg_dist = distance_m(start_stop.latitude, start_stop.longitude,
+                                  end_stop.latitude, end_stop.longitude)
+            if seg_dist < SHORT_SEGMENT_THRESHOLD_M:
+                skel.segments = skel.segments[1:]
+                skel.origin_stop = end_stop
+                skel.num_transfers = max(0, skel.num_transfers - 1)
+                skel.kind = "walk_modified"
+                modified = True
+
+        # --- Check last segment (after potential first-segment removal) ---
+        if len(skel.segments) >= 2:
+            last_seg = skel.segments[-1]
+            start_stop = stops_by_id.get(last_seg.start_stop_id) or skel.extra_stops_map.get(last_seg.start_stop_id)
+            end_stop = stops_by_id.get(last_seg.end_stop_id) or skel.extra_stops_map.get(last_seg.end_stop_id)
+            if start_stop and end_stop:
+                seg_dist = distance_m(start_stop.latitude, start_stop.longitude,
+                                      end_stop.latitude, end_stop.longitude)
+                if seg_dist < SHORT_SEGMENT_THRESHOLD_M:
+                    skel.segments = skel.segments[:-1]
+                    skel.dest_stop = start_stop
+                    skel.num_transfers = max(0, skel.num_transfers - 1)
+                    skel.kind = "walk_modified"
+                    modified = True
+
+        # Skip skeletons with no segments left (entire trip is walkable)
+        if not skel.segments:
+            continue
+
+        if modified:
+            # Recalculate walk distance and score
+            origin_walk = distance_m(user_origin_lat, user_origin_lng,
+                                     skel.origin_stop.latitude, skel.origin_stop.longitude)
+            dest_walk = distance_m(user_dest_lat, user_dest_lng,
+                                   skel.dest_stop.latitude, skel.dest_stop.longitude)
+            skel.total_walk_m = origin_walk + dest_walk
+
+            has_live = any(
+                bool(route_to_vehicles.get(norm_id(seg.route_id)))
+                for seg in skel.segments
+            )
+            skel.has_live_vehicle = has_live
+
+            if skel.num_transfers == 0:
+                skel.score = (0 if has_live else 20000) + skel.total_walk_m * 0.5
+            else:
+                skel.score = (0 if has_live else 10000) + (skel.num_transfers * 500) + (skel.total_walk_m * 0.5)
+
+        result.append(skel)
+
+    return result
+
+
 def select_best_candidate(candidates):
     def category(c) -> int:
         live = c["has_live_bus"]
@@ -2182,9 +2294,14 @@ def api_trip(
             status_code=404,
             detail="No shuttle route with live tracking found.",
         )
-        
+
+    # Collapse trivially walkable first/last transit legs into walk segments
+    all_skeletons = collapse_short_transit_segments(
+        all_skeletons, lat, lng, lat2, lng2, vehicle_indexes
+    )
+
     t_search_end = time.perf_counter()
-        
+
     # ---------------------------------------------------------
     # Phase 2: Rank & Prune
     # ---------------------------------------------------------
