@@ -5,5 +5,5 @@ pydantic
 passiogo-updated
 websocket-client
 redis
-fastapi-limiter
+fastapi-limiter==0.1.6
 python-dotenv
