@@ -505,16 +505,16 @@ export const TripPlannerPanel = ({
             }}
             transition={{ type: "spring", damping: 28, stiffness: 240, mass: 0.8 }}
         >
-            {/* Mobile Grab Handle - Swipeable */}
+            {/* Mobile Grab Handle - Swipeable (large hitbox for easy swiping) */}
             <motion.div
-                className="md:hidden w-full flex justify-center py-3 shrink-0 cursor-grab active:cursor-grabbing touch-none z-50"
+                className="md:hidden w-full flex justify-center py-5 shrink-0 cursor-grab active:cursor-grabbing touch-none z-50"
                 onPanEnd={handleDragEnd}
                 title="Swipe up/down to resize"
             >
                 <div className={clsx(
                     "w-12 h-1.5 rounded-full bg-neutral-600/50 transition-colors",
                     sheetState === 'expanded' && "bg-crimson/50",
-                    sheetState === 'minimized' && "bg-blue-500/30" // Subtle hint for minimized
+                    sheetState === 'minimized' && "bg-blue-500/30"
                 )} />
             </motion.div>
 
