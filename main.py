@@ -230,21 +230,24 @@ def slice_shape_to_segment(
     start_stop_lng: float,
     end_stop_lat: float,
     end_stop_lng: float,
+    stop_coords: list[tuple[float, float]] | None = None,
 ) -> list[tuple[float, float]]:
     """
     Slice a GTFS shape polyline to only include the portion between start and end stops.
-    
+
     Args:
         shape_coords: List of (lat, lon) tuples representing the full route shape
         start_stop_lat, start_stop_lng: Coordinates of boarding stop
         end_stop_lat, end_stop_lng: Coordinates of alighting stop
-    
+        stop_coords: Optional ordered (lat, lon) of the route's stop sequence,
+                     used to determine travel direction on loop routes.
+
     Returns:
         Sliced portion of shape_coords between the two stops
     """
     if not shape_coords or len(shape_coords) < 2:
         return shape_coords
-    
+
     # Find index of shape point closest to start stop
     start_idx = 0
     min_start_dist = float('inf')
@@ -253,7 +256,7 @@ def slice_shape_to_segment(
         if d < min_start_dist:
             min_start_dist = d
             start_idx = i
-    
+
     # Find index of shape point closest to end stop
     end_idx = len(shape_coords) - 1
     min_end_dist = float('inf')
@@ -262,7 +265,7 @@ def slice_shape_to_segment(
         if d < min_end_dist:
             min_end_dist = d
             end_idx = i
-            
+
     # Check if shape is effectively a loop (start is close to end)
     is_loop = False
     if len(shape_coords) > 2:
@@ -271,15 +274,58 @@ def slice_shape_to_segment(
         if distance_m(start_pt[0], start_pt[1], end_pt[0], end_pt[1]) < 150: # 150m threshold
             is_loop = True
 
-    # Handle slicing
-    if start_idx <= end_idx:
+    # For loops, use the GTFS stop sequence to determine the correct direction
+    if is_loop and stop_coords and len(stop_coords) >= 2:
+        MATCH_THRESHOLD = 200  # meters
+        n_stops = len(stop_coords)
+        N = len(shape_coords)
+
+        # Find all stop-sequence indices matching start and end stops
+        start_matches = [
+            i for i, (la, lo) in enumerate(stop_coords)
+            if distance_m(la, lo, start_stop_lat, start_stop_lng) < MATCH_THRESHOLD
+        ]
+        end_matches = [
+            i for i, (la, lo) in enumerate(stop_coords)
+            if distance_m(la, lo, end_stop_lat, end_stop_lng) < MATCH_THRESHOLD
+        ]
+
+        if start_matches and end_matches:
+            # Find the (start, end) pair with shortest forward distance
+            # in the stop sequence. Handles duplicate terminal stops correctly.
+            best_fwd = float('inf')
+            best_si, best_ei = start_matches[0], end_matches[0]
+            for si in start_matches:
+                for ei in end_matches:
+                    fwd = (ei - si) % n_stops
+                    if fwd == 0:
+                        fwd = n_stops
+                    if fwd < best_fwd:
+                        best_fwd = fwd
+                        best_si, best_ei = si, ei
+
+            # Re-derive shape indices from the chosen stop-sequence endpoints.
+            # This resolves ambiguity when a stop (e.g. loop terminal) maps to
+            # multiple shape points near the closure boundary.
+            s_lat, s_lng = stop_coords[best_si]
+            e_lat, e_lng = stop_coords[best_ei]
+            start_idx = min(range(N), key=lambda i: distance_m(
+                shape_coords[i][0], shape_coords[i][1], s_lat, s_lng))
+            end_idx = min(range(N), key=lambda i: distance_m(
+                shape_coords[i][0], shape_coords[i][1], e_lat, e_lng))
+
+        # Always slice forward (the bus's travel direction)
+        if start_idx <= end_idx:
+            sliced = shape_coords[start_idx:end_idx + 1]
+        else:
+            sliced = shape_coords[start_idx:] + shape_coords[:end_idx + 1]
+    elif start_idx <= end_idx:
         # Standard case: forward along shape
         sliced = shape_coords[start_idx:end_idx + 1]
     else:
         # start_idx > end_idx
         if is_loop:
             # Wrap around: start -> end of shape -> beginning of shape -> end index
-            # This covers the Quad Express 90 -> 10 case
             sliced = shape_coords[start_idx:] + shape_coords[:end_idx + 1]
         else:
             # Not a loop, so probably moving in reverse direction along the shape
@@ -287,11 +333,11 @@ def slice_shape_to_segment(
             start_idx, end_idx = end_idx, start_idx
             sliced = shape_coords[start_idx:end_idx + 1]
             sliced = list(reversed(sliced))
-    
+
     # Return at least 2 points for a valid polyline
     if len(sliced) < 2:
         return [(start_stop_lat, start_stop_lng), (end_stop_lat, end_stop_lng)]
-    
+
     return sliced
 
 
@@ -1045,7 +1091,7 @@ def enrich_trip_skeleton(
     
     # Imports for GTFS shapes
     from harvard_mapping import get_gtfs_route_id_by_name
-    from harvard_gtfs import get_harvard_shape_for_route_direction
+    from harvard_gtfs import get_harvard_shape_for_route_direction, get_stop_coords_for_route
     
     for i, seg_skel in enumerate(skeleton.segments):
         start_stop = get_stop(seg_skel.start_stop_id)
@@ -1127,25 +1173,32 @@ def enrich_trip_skeleton(
         polyline = []
         if system_id == 831:
             shape = None
+            gtfs_rid = None
             route_id = str(seg_skel.route_id or "")
             if route_id:
                 shape = get_harvard_shape_for_route_direction(route_id, None)
-            
+                if shape:
+                    gtfs_rid = route_id
+
             if not shape and enriched_data.get("route_name"):
-                 gtfs_id = get_gtfs_route_id_by_name(enriched_data["route_name"])
-                 if gtfs_id:
-                      shape = get_harvard_shape_for_route_direction(gtfs_id, None)
-            
+                 gtfs_rid = get_gtfs_route_id_by_name(enriched_data["route_name"])
+                 if gtfs_rid:
+                      shape = get_harvard_shape_for_route_direction(gtfs_rid, None)
+
             if shape:
-                # Slice!
-                # FIX: Use start_stop object attributes directly, NOT the dict
                 slat = getattr(start_stop, 'latitude', None) or getattr(start_stop, 'lat', None)
                 slng = getattr(start_stop, 'longitude', None) or getattr(start_stop, 'lng', None)
                 elat = getattr(end_stop, 'latitude', None) or getattr(end_stop, 'lat', None)
                 elng = getattr(end_stop, 'longitude', None) or getattr(end_stop, 'lng', None)
-                
+
+                # Get stop sequence for direction-aware slicing on loops
+                stop_coords = get_stop_coords_for_route(gtfs_rid) if gtfs_rid else None
+
                 if slat is not None and slng is not None and elat is not None and elng is not None:
-                    sliced = slice_shape_to_segment(shape, float(slat), float(slng), float(elat), float(elng))
+                    sliced = slice_shape_to_segment(
+                        shape, float(slat), float(slng), float(elat), float(elng),
+                        stop_coords=stop_coords,
+                    )
                     polyline = [{"lat": lat, "lng": lon} for lat, lon in sliced]
         
         # Build Final Segment

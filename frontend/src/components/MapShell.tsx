@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { MapContainer, TileLayer, Popup, Polyline, useMap, Marker } from 'react-leaflet';
-import { Navigation as NavigationIcon } from 'lucide-react';
+import { Navigation as NavigationIcon, Settings } from 'lucide-react';
 import clsx from 'clsx';
 import L from 'leaflet';
 import type { LatLngExpression } from 'leaflet';
@@ -117,9 +117,12 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
     const [loadingRoutes, setLoadingRoutes] = useState(false);
     const [vehiclesError, setVehiclesError] = useState(false);
     const [routesError, setRoutesError] = useState(false);
+    const [routeVisibility, setRouteVisibility] = useState<Record<string, boolean>>({});
+    const [showRouteSettings, setShowRouteSettings] = useState(false);
+    const routeSettingsRef = useRef<HTMLDivElement>(null);
 
     const [systemBounds, setSystemBounds] = useState<L.LatLngBounds | null>(null);
-    const [activeTripBounds, setActiveTripBounds] = useState<L.LatLngBounds | null>(null);
+    const activeTripBounds = useMemo(() => computeTripBounds(trip), [trip]);
     const [mapInstance, setMapInstance] = useState<L.Map | null>(null);
 
     // Stop Icon with larger hitbox (white default)
@@ -237,6 +240,53 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
             .finally(() => setLoadingRoutes(false));
     }, [systemId, showRoutes]);
 
+    // Initialize route visibility when routes load
+    useEffect(() => {
+        if (routes.length > 0) {
+            // eslint-disable-next-line react-hooks/set-state-in-effect
+            setRouteVisibility(prev => {
+                const next = { ...prev };
+                for (const r of routes) {
+                    if (!(r.route_id in next)) {
+                        next[r.route_id] = true;
+                    }
+                }
+                return next;
+            });
+        }
+    }, [routes]);
+
+    // Close route settings on outside click
+    useEffect(() => {
+        if (!showRouteSettings) return;
+        const handler = (e: MouseEvent) => {
+            const target = e.target as HTMLElement;
+            if (
+                routeSettingsRef.current &&
+                !routeSettingsRef.current.contains(target) &&
+                !target.closest('[data-route-settings-trigger]')
+            ) {
+                setShowRouteSettings(false);
+            }
+        };
+        document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+    }, [showRouteSettings]);
+
+    const toggleRouteVisibility = (routeId: string) => {
+        setRouteVisibility(prev => ({
+            ...prev,
+            [routeId]: prev[routeId] === false,
+        }));
+    };
+
+    const handleRouteSettingsClick = () => {
+        if (!showRouteSettings && !showRoutes) {
+            setShowRoutes(true);
+        }
+        setShowRouteSettings(prev => !prev);
+    };
+
     // Compute center from stops, fallback to Harvard if none
     const center: LatLngExpression = useMemo(() => {
         if (stops.length === 0) {
@@ -247,11 +297,6 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
         const avgLng = stops.reduce((sum, s) => sum + s.lng, 0) / stops.length;
         return [avgLat, avgLng];
     }, [stops]);
-
-    // Compute active trip bounds when trip changes
-    useEffect(() => {
-        setActiveTripBounds(computeTripBounds(trip));
-    }, [trip]);
 
     // Compute trip key for smart centering
     const tripKey = useMemo(() => computeTripKey(trip), [trip]);
@@ -323,7 +368,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
 
                     {/* Route polylines (glowing) */}
                     {showRoutes &&
-                        routes.map((r) => {
+                        routes.filter((r) => routeVisibility[r.route_id] !== false).map((r) => {
                             if (!r.path || r.path.length === 0) return null;
 
                             const positions: LatLngExpression[] = r.path.map((p) => [p.lat, p.lng]);
@@ -446,11 +491,11 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
             <div className="
                 md:hidden
                 fixed top-4 inset-x-4 z-[1000]
-                flex items-center justify-between gap-2
+                grid grid-cols-[1fr_auto_1fr] items-center
                 pointer-events-none
             ">
                 {/* Left: Status Pill */}
-                <div className="pointer-events-auto h-9 rounded-full bg-black/60 backdrop-blur-md px-3 py-1.5 text-[10px] font-medium leading-none text-neutral-300 border border-white/10 shadow-lg flex items-center justify-center min-w-[32px]">
+                <div className="justify-self-start pointer-events-auto h-9 rounded-full bg-black/60 backdrop-blur-md px-3 py-1.5 text-[10px] font-medium leading-none text-neutral-300 border border-white/10 shadow-lg flex items-center justify-center min-w-[32px]">
                     {systemId
                         ? loading
                             ? '...'
@@ -458,34 +503,47 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                         : 'Select system'}
                 </div>
 
-                {/* Center: Recenter Button */}
-                {systemId && (
-                    <button
-                        type="button"
-                        onClick={() => {
-                            if (!mapInstance) return;
-                            if (activeTripBounds) {
-                                mapInstance.fitBounds(activeTripBounds, { padding: [80, 80] });
-                            } else if (systemBounds) {
-                                mapInstance.fitBounds(systemBounds, { padding: [80, 80] });
-                            }
-                        }}
-                        // Absolute positioning to center it relative to screen
-                        // Removed manual offset (-ml-2) to restore true center
-                        className="pointer-events-auto absolute left-1/2 -translate-x-1/2 top-0 rounded-full bg-neutral-900/90 w-9 h-9 flex items-center justify-center text-white shadow-xl backdrop-blur-md border border-white/10 hover:bg-neutral-800 active:scale-95 transition-all"
-                        aria-label="Recenter map"
-                    >
-                        {/* Optically centered icon (slightly shifted) */}
-                        <NavigationIcon size={14} className="fill-current -translate-x-[1px] translate-y-[1px]" />
-                    </button>
-                )}
+                {/* Center: Recenter + Route Settings Buttons */}
+                {systemId ? (
+                    <div className="pointer-events-auto flex items-center gap-1.5">
+                        <button
+                            type="button"
+                            onClick={() => {
+                                if (!mapInstance) return;
+                                if (activeTripBounds) {
+                                    mapInstance.fitBounds(activeTripBounds, { padding: [80, 80] });
+                                } else if (systemBounds) {
+                                    mapInstance.fitBounds(systemBounds, { padding: [80, 80] });
+                                }
+                            }}
+                            className="rounded-full bg-neutral-900/90 w-9 h-9 flex items-center justify-center text-white shadow-xl backdrop-blur-md border border-white/10 hover:bg-neutral-800 active:scale-95 transition-all"
+                            aria-label="Recenter map"
+                        >
+                            <NavigationIcon size={14} className="fill-current -translate-x-[1px] translate-y-[1px]" />
+                        </button>
+                        <button
+                            type="button"
+                            data-route-settings-trigger
+                            onClick={handleRouteSettingsClick}
+                            className={clsx(
+                                'rounded-full w-9 h-9 flex items-center justify-center shadow-xl backdrop-blur-md border active:scale-95 transition-all',
+                                showRouteSettings
+                                    ? 'bg-crimson/20 border-crimson/40 text-crimson'
+                                    : 'bg-neutral-900/90 border-white/10 text-neutral-300 hover:bg-neutral-800'
+                            )}
+                            aria-label="Route settings"
+                        >
+                            <Settings size={14} />
+                        </button>
+                    </div>
+                ) : <div />}
 
                 {/* Right: Show Routes Toggle */}
                 <button
                     type="button"
                     onClick={() => setShowRoutes((prev) => !prev)}
                     className={clsx(
-                        'pointer-events-auto h-9 rounded-full border px-3 py-1.5 text-[10px] font-medium leading-none transition-all backdrop-blur-md shadow-lg flex items-center justify-center whitespace-nowrap min-w-[32px]',
+                        'justify-self-end pointer-events-auto h-9 rounded-full border px-3 py-1.5 text-[10px] font-medium leading-none transition-all backdrop-blur-md shadow-lg flex items-center justify-center whitespace-nowrap min-w-[32px]',
                         showRoutes
                             ? 'border-crimson bg-crimson/20 text-crimson animate-pulse-subtle'
                             : 'border-white/10 bg-black/60 text-neutral-300 hover:border-white/20'
@@ -520,8 +578,28 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                     </button>
                 </div>
 
+                {/* Route Settings Button */}
+                <div className="pointer-events-auto order-2 md:order-2">
+                    <button
+                        type="button"
+                        data-route-settings-trigger
+                        onClick={handleRouteSettingsClick}
+                        className={clsx(
+                            'rounded-full border px-3 py-2 text-xs font-medium transition-all backdrop-blur-md shadow-lg',
+                            showRouteSettings
+                                ? 'border-crimson bg-crimson/20 text-crimson'
+                                : 'border-white/10 bg-black/60 text-neutral-300 hover:border-white/20'
+                        )}
+                    >
+                        <div className="flex items-center gap-2">
+                            <Settings size={12} />
+                            <span>Routes</span>
+                        </div>
+                    </button>
+                </div>
+
                 {/* Status pill */}
-                <div className="pointer-events-none order-1 md:order-2 flex flex-col items-center gap-1.5">
+                <div className="pointer-events-none order-1 md:order-3 flex flex-col items-center gap-1.5">
                     <div className="rounded-full bg-black/60 backdrop-blur-md px-4 py-1.5 text-xs text-neutral-300 border border-white/10 shadow-lg">
                         {systemId
                             ? loading
@@ -558,6 +636,73 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                 >
                     Recenter
                 </button>
+            )}
+
+            {/* Route Settings Panel */}
+            {showRouteSettings && (
+                <div
+                    ref={routeSettingsRef}
+                    className="fixed z-[1001] top-16 left-4 right-4 md:absolute md:top-auto md:bottom-24 md:left-1/2 md:-translate-x-1/2 md:w-72 md:right-auto rounded-xl bg-black/80 backdrop-blur-xl border border-white/10 shadow-2xl p-3 max-h-[60vh] overflow-y-auto"
+                >
+                    <div className="flex items-center justify-between mb-2 px-1">
+                        <span className="text-xs font-semibold text-neutral-300">Routes</span>
+                        <button
+                            type="button"
+                            onClick={() => setShowRouteSettings(false)}
+                            className="text-neutral-500 hover:text-neutral-300 text-xs transition-colors"
+                        >
+                            &#x2715;
+                        </button>
+                    </div>
+                    {loadingRoutes ? (
+                        <div className="flex items-center gap-2 py-3 px-1">
+                            <div className="h-3 w-3 animate-spin rounded-full border-2 border-crimson/30 border-t-crimson" />
+                            <span className="text-[11px] text-neutral-500">Loading routes...</span>
+                        </div>
+                    ) : routes.length === 0 ? (
+                        <p className="text-[11px] text-neutral-500 py-2 px-1">No routes available</p>
+                    ) : (
+                        <div className="space-y-0.5">
+                            {routes.map(r => {
+                                const isVisible = routeVisibility[r.route_id] !== false;
+                                const color = r.color || '#a51c30';
+                                return (
+                                    <button
+                                        key={r.route_id}
+                                        type="button"
+                                        onClick={() => toggleRouteVisibility(r.route_id)}
+                                        className="flex items-center gap-2.5 w-full py-2 px-2 rounded-lg hover:bg-white/5 transition-colors"
+                                    >
+                                        <div
+                                            className="h-2.5 w-2.5 rounded-full flex-shrink-0"
+                                            style={{
+                                                backgroundColor: isVisible ? color : 'transparent',
+                                                border: isVisible ? 'none' : `2px solid ${color}`,
+                                            }}
+                                        />
+                                        <span className={clsx(
+                                            'text-[11px] flex-1 text-left truncate transition-colors',
+                                            isVisible ? 'text-neutral-200' : 'text-neutral-500'
+                                        )}>
+                                            {r.route_name || r.short_name || `Route ${r.route_id}`}
+                                        </span>
+                                        <div className={clsx(
+                                            'h-5 w-9 rounded-full transition-all duration-200 flex items-center px-0.5 flex-shrink-0',
+                                            isVisible ? 'bg-crimson/30' : 'bg-neutral-700'
+                                        )}>
+                                            <div className={clsx(
+                                                'h-3.5 w-3.5 rounded-full transition-all duration-200',
+                                                isVisible
+                                                    ? 'translate-x-[14px] bg-crimson shadow-[0_0_6px_rgba(165,28,48,0.5)]'
+                                                    : 'translate-x-0 bg-neutral-400'
+                                            )} />
+                                        </div>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
             )}
         </div>
     );

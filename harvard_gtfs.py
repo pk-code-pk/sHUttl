@@ -429,12 +429,50 @@ def get_harvard_shape_for_route_direction(
     if not matching_trips:
         return None
     
-    # Find one with a shape_id
+    # Collect all valid shape IDs from matching trips
+    shape_counts = {}
     for trip in matching_trips:
-        if trip.shape_id and trip.shape_id in gtfs.shapes_by_id:
-            return gtfs.shapes_by_id[trip.shape_id]
-    
-    return None
+        sid = trip.shape_id
+        if sid and sid in gtfs.shapes_by_id:
+            shape_counts[sid] = shape_counts.get(sid, 0) + 1
+            
+    if not shape_counts:
+        return None
+        
+    # Return the most frequent shape ID
+    best_shape_id = max(shape_counts, key=shape_counts.get)
+    return gtfs.shapes_by_id[best_shape_id]
+
+
+def get_stop_coords_for_route(
+    route_id: str,
+    direction_id: Optional[int] = None,
+) -> list[tuple[float, float]]:
+    """Return the ordered (lat, lon) coordinates of stops for a route's canonical trip.
+
+    Uses the trip with the most stop_times entries (the most complete trip).
+    """
+    gtfs = get_harvard_gtfs()
+
+    matching_trips = [
+        t for t in gtfs.trips_by_id.values()
+        if t.route_id == route_id and (direction_id is None or t.direction_id == direction_id)
+    ]
+    if not matching_trips:
+        return []
+
+    # Pick the trip with the most stop_times (most complete)
+    best_trip = max(
+        matching_trips,
+        key=lambda t: len(gtfs.stop_times_by_trip.get(t.trip_id, [])),
+    )
+    stop_times = gtfs.stop_times_by_trip.get(best_trip.trip_id, [])
+    coords = []
+    for st in stop_times:
+        stop = gtfs.stops_by_id.get(st.stop_id)
+        if stop:
+            coords.append((stop.lat, stop.lon))
+    return coords
 
 
 # ---------------------------------------------------------------------------
