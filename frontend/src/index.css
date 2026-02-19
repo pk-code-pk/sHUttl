@@ -181,6 +181,22 @@ body {
   }
 }
 
+/* Prevent iOS Safari auto-zoom on input focus.
+   iOS zooms into form fields with font-size < 16px.
+   This rule is intentionally outside @layer so it has higher
+   cascade priority than Tailwind utility classes in layers. */
+@media screen and (max-width: 767px) {
+  input[type="text"],
+  input[type="number"],
+  input[type="email"],
+  input[type="tel"],
+  input[type="search"],
+  select,
+  textarea {
+    font-size: 16px;
+  }
+}
+
 @layer base {
   :root {
     color-scheme: dark;
