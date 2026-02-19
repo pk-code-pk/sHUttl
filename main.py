@@ -153,6 +153,7 @@ ROUTE_GRAPH_CACHE = {}
 # Constants for ETA fallbacks
 FALLBACK_SPEED_MS = 5.0      # ~11 mph (reasonable campus shuttle)
 MIN_SPEED_MS_FOR_ETA = 1.0   # below this, treat as unusable for ETA
+DWELL_TIME_PER_STOP_S = 25   # seconds per intermediate stop (decelerate, doors, load, accelerate)
 
 
 def norm_id(x) -> str | None:
@@ -414,10 +415,12 @@ def distance_to_boarding_stop_along_chain_m(
     vehicle_lng: float,
     stops: list[dict],  # ordered route stops in travel order
     boarding_stop_id: str | int | None = None,
-) -> float | None:
+) -> tuple[float, int] | None:
     """
-    Returns distance along the stop-chain from the vehicle's snapped position
-    forward to the boarding stop, assuming the route is a loop (cyclic).
+    Returns (distance_m, intermediate_stops) along the stop-chain from the
+    vehicle's snapped position forward to the boarding stop, assuming the
+    route is a loop (cyclic).  intermediate_stops is the number of stops
+    the bus will pass through before reaching the boarding stop.
     Falls back to None if insufficient data.
     """
     if not stops or len(stops) < 2:
@@ -493,7 +496,15 @@ def distance_to_boarding_stop_along_chain_m(
     if remaining < 0:
         remaining = 0.0
 
-    return remaining
+    # 8) Count intermediate stops between bus and boarding stop.
+    #    pts has N points (stops). The bus is on segment best_i (between
+    #    pts[best_i] and pts[best_i+1]).  Stops the bus will still visit
+    #    before reaching the boarding stop (pts[0]) are pts[best_i+1] ...
+    #    pts[N-1], giving N - 1 - best_i intermediate stops.
+    n_pts = len(pts)
+    intermediate_stops = max(0, n_pts - 1 - best_i)
+
+    return remaining, intermediate_stops
 
 
 
@@ -933,33 +944,40 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
         start_stop = route.get("start_stop", {})
         boarding_stop_id = start_stop.get("id") or start_stop.get("stop_id")
 
-        for vehicle in candidates: 
+        best_intermediate_stops = 0
+
+        for vehicle in candidates:
             v_lat = getattr(vehicle, "latitude", None)
             v_lng = getattr(vehicle, "longitude", None)
             if v_lat is None or v_lng is None:
                 continue
-            
+
             v_lat, v_lng = float(v_lat), float(v_lng)
-            
-            # Near-stop override: if bus is physically at the stop (within 30m), 
+
+            # Near-stop override: if bus is physically at the stop (within 30m),
             # treat distance as 0 to avoid snapping past the stop.
             straight_dist = distance_m(origin_stop.latitude, origin_stop.longitude, v_lat, v_lng)
-            
+
+            along_dist = None
+            intermediate_stops = 0
             if straight_dist <= NEAR_STOP_METERS:
                 along_dist = 0.0
             else:
-                along_dist = distance_to_boarding_stop_along_chain_m(
+                chain_result = distance_to_boarding_stop_along_chain_m(
                     vehicle_lat=v_lat,
                     vehicle_lng=v_lng,
                     stops=stops,
                     boarding_stop_id=boarding_stop_id,
                 )
-            
+                if chain_result is not None:
+                    along_dist, intermediate_stops = chain_result
+
             curr_dist = along_dist if along_dist is not None else straight_dist
-            
+
             if curr_dist < best_dist:
-                best_vehicle = vehicle 
+                best_vehicle = vehicle
                 best_dist = curr_dist
+                best_intermediate_stops = intermediate_stops
 
         if best_vehicle is None:
             r = dict(route)
@@ -1008,10 +1026,14 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
             speed_ms = FALLBACK_SPEED_MS
             speed_source = "fallback"
 
-        # Calculate ETA to boarding stop
-        eta_to_boarding_stop_s = best_dist / speed_ms if (best_dist is not None and speed_ms > 0) else None
+        # Calculate ETA to boarding stop (travel time + dwell time at intermediate stops)
+        eta_to_boarding_stop_s = None
+        if best_dist is not None and speed_ms > 0:
+            travel_time = best_dist / speed_ms
+            dwell_time = best_intermediate_stops * DWELL_TIME_PER_STOP_S
+            eta_to_boarding_stop_s = travel_time + dwell_time
 
-        # Calculate Segment Ride ETA
+        # Calculate Segment Ride ETA (travel time + dwell time at intermediate ride stops)
         ride_eta_s = None
         segment_eta_s = None
         leg_stops = route.get("stops", [])
@@ -1020,11 +1042,14 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
             for i in range(len(leg_stops) - 1):
                 s1 = leg_stops[i]
                 s2 = leg_stops[i+1]
-                dm = distance_m(s1["lat" if "lat" in s1 else "latitude"], s1["lng" if "lng" in s1 else "longitude"], 
+                dm = distance_m(s1["lat" if "lat" in s1 else "latitude"], s1["lng" if "lng" in s1 else "longitude"],
                                 s2["lat" if "lat" in s2 else "latitude"], s2["lng" if "lng" in s2 else "longitude"])
                 seg_dist += dm
-            
-            ride_eta_s = seg_dist / speed_ms
+
+            travel_time = seg_dist / speed_ms
+            # Intermediate stops during ride: all stops except boarding and destination
+            ride_dwell_stops = max(0, len(leg_stops) - 2)
+            ride_eta_s = travel_time + ride_dwell_stops * DWELL_TIME_PER_STOP_S
             if eta_to_boarding_stop_s is not None:
                 segment_eta_s = eta_to_boarding_stop_s + ride_eta_s
 
