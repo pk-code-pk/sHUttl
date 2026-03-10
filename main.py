@@ -151,8 +151,11 @@ ROUTE_GRAPH_CACHE = {}
 
 
 # Constants for ETA fallbacks
-FALLBACK_SPEED_MS = 5.0      # ~11 mph (reasonable campus shuttle)
+FALLBACK_SPEED_MS = 6.5      # ~14.5 mph (realistic campus shuttle average)
 MIN_SPEED_MS_FOR_ETA = 1.0   # below this, treat as unusable for ETA
+# Speed measured from straight-line GPS displacement underestimates along-route speed
+# on curved routes. This factor corrects for typical campus route tortuosity (~1.3x).
+SPEED_TORTUOSITY_CORRECTION = 1.25
 
 
 def norm_id(x) -> str | None:
@@ -929,29 +932,32 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
         best_dist = float("inf")
         best_vehicle = None 
         
+        # leg_stops: boarding→destination only (for ride ETA and display)
+        # projection_stops: full sorted route loop (for along-chain vehicle distance)
         stops = route.get("stops") or []
+        projection_stops = route.get("full_route_stops") or stops
         start_stop = route.get("start_stop", {})
         boarding_stop_id = start_stop.get("id") or start_stop.get("stop_id")
 
-        for vehicle in candidates: 
+        for vehicle in candidates:
             v_lat = getattr(vehicle, "latitude", None)
             v_lng = getattr(vehicle, "longitude", None)
             if v_lat is None or v_lng is None:
                 continue
-            
+
             v_lat, v_lng = float(v_lat), float(v_lng)
-            
-            # Near-stop override: if bus is physically at the stop (within 30m), 
+
+            # Near-stop override: if bus is physically at the stop (within 30m),
             # treat distance as 0 to avoid snapping past the stop.
             straight_dist = distance_m(origin_stop.latitude, origin_stop.longitude, v_lat, v_lng)
-            
+
             if straight_dist <= NEAR_STOP_METERS:
                 along_dist = 0.0
             else:
                 along_dist = distance_to_boarding_stop_along_chain_m(
                     vehicle_lat=v_lat,
                     vehicle_lng=v_lng,
-                    stops=stops,
+                    stops=projection_stops,
                     boarding_stop_id=boarding_stop_id,
                 )
             
@@ -1000,8 +1006,10 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
                 if dt > 0.1 and 1 <= (d/dt) <= 20: 
                     total_dist += d
                     total_dt += dt
-            if total_dt > 0: 
-                speed_ms = total_dist / total_dt
+            if total_dt > 0:
+                # Straight-line displacement underestimates along-route speed on curves.
+                # Apply tortuosity correction so ETA is consistent with along-chain distance.
+                speed_ms = (total_dist / total_dt) * SPEED_TORTUOSITY_CORRECTION
 
         speed_source = "cache"
         if speed_ms is None or not math.isfinite(speed_ms) or speed_ms < MIN_SPEED_MS_FOR_ETA:
@@ -1148,13 +1156,36 @@ def enrich_trip_skeleton(
                 if s_obj:
                     leg_stops.append(stopdict(s_obj))
 
+        # Build full sorted route stop list for accurate vehicle projection.
+        # leg_stops only covers boarding→destination, so projecting a vehicle onto
+        # that short arc gives wrong distances for buses elsewhere on the loop.
+        # We need the complete route in travel order.
+        rid_str = str(seg_skel.route_id)
+        rr = vehicle_indexes["routes_by_id"].get(rid_str)
+        full_route_stops: list[dict] = leg_stops  # fallback
+        if rr and hasattr(rr, "getStops"):
+            all_route_stops = rr.getStops() or []
+            if all_route_stops:
+                def _stop_seq(s, _rid=rid_str):
+                    rap = getattr(s, "routesAndPositions", {}) or {}
+                    positions = rap.get(_rid)
+                    if isinstance(positions, (list, tuple)) and positions:
+                        return min(int(p) for p in positions)
+                    try:
+                        return int(positions)
+                    except (TypeError, ValueError):
+                        return 9999
+                sorted_route_stops = sorted(all_route_stops, key=_stop_seq)
+                full_route_stops = [stopdict(s) for s in sorted_route_stops]
+
         # Build route payload for enrichment
         payload_route = {
             "route_id": seg_skel.route_id,
             "route_name": seg_skel.route_name,
             "short_name": seg_skel.short_name,
             "color": seg_skel.color,
-            "stops": leg_stops,
+            "stops": leg_stops,             # for display + ride ETA (leg only)
+            "full_route_stops": full_route_stops,  # for vehicle projection (full loop)
             "start_stop": stopdict(start_stop),
             "end_stop": stopdict(end_stop)
         }
