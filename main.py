@@ -2420,7 +2420,14 @@ def api_trip(
             cat = 6
         else:
             cat = 999
-        return (cat, c["total_walk_m"])
+        # Tiebreaker: within the same category and walk distance, prefer lower ETA
+        eta = float("inf")
+        for seg in c.get("segments", []):
+            nb = seg.get("next_bus") or {}
+            v = nb.get("eta_to_boarding_stop_s")
+            if v is not None and v < eta:
+                eta = v
+        return (cat, c["total_walk_m"], eta)
 
     enriched_candidates.sort(key=_candidate_sort_key)
 
