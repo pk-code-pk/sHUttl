@@ -1099,8 +1099,8 @@ export const TripPlannerPanel = ({
                                                                     <span className="text-[11px] font-bold text-white uppercase tracking-tight">Route Overview</span>
                                                                 </div>
                                                                 <div className="text-[10px] text-neutral-300 truncate">
-                                                                    From <span className="font-medium text-white">{trip.origin.nearest_stop.name}</span> to{' '}
-                                                                    <span className="font-medium text-white">{trip.destination.nearest_stop.name}</span>
+                                                                    From <span className="font-medium text-white">{trip?.origin.nearest_stop.name}</span> to{' '}
+                                                                    <span className="font-medium text-white">{trip?.destination.nearest_stop.name}</span>
                                                                 </div>
                                                                 <div className="mt-1 text-[10px] text-neutral-500 font-medium whitespace-nowrap overflow-hidden text-ellipsis">
                                                                     {numSegments} bus segment{numSegments !== 1 ? 's' : ''} •{' '}
@@ -1132,7 +1132,7 @@ export const TripPlannerPanel = ({
                                                             </div>
                                                         </div>
 
-                                                        {!isWalkReasonable(trip.origin.distance_m) && !isWalkReasonable(trip.destination.distance_m) && (
+                                                        {!isWalkReasonable(trip?.origin.distance_m ?? 0) && !isWalkReasonable(trip?.destination.distance_m ?? 0) && (
                                                             <div className="mt-2 pt-2 border-t border-white/5 flex items-start gap-1.5 text-[9px] text-amber-500/90 leading-relaxed italic">
                                                                 <Info size={10} className="shrink-0 mt-0.5" />
                                                                 <span>You seem far from this shuttle system. For realistic directions, set your origin near campus.</span>
@@ -1154,7 +1154,7 @@ export const TripPlannerPanel = ({
                                                             </div>
                                                             <div className="mt-1.5 text-neutral-300 text-[10px] leading-relaxed">
                                                                 Walk from your location to{' '}
-                                                                <span className="font-medium text-white">{trip.origin.nearest_stop.name}</span>.
+                                                                <span className="font-medium text-white">{trip?.origin.nearest_stop.name}</span>.
                                                             </div>
                                                             <div className="mt-1 text-[9px] text-neutral-500 font-medium tracking-tight">
                                                                 ~{Math.round(originWalkM)} m
@@ -1257,7 +1257,7 @@ export const TripPlannerPanel = ({
                                                             </div>
                                                             <div className="mt-1.5 text-neutral-300 text-[10px] leading-relaxed">
                                                                 From{' '}
-                                                                <span className="font-medium text-white">{trip.destination.nearest_stop.name}</span>{' '}
+                                                                <span className="font-medium text-white">{trip?.destination.nearest_stop.name}</span>{' '}
                                                                 walk to your destination.
                                                             </div>
                                                             <div className="mt-1 text-[9px] text-neutral-500 font-medium tracking-tight">
