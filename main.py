@@ -11,6 +11,7 @@ import json
 import logging
 import time
 from typing import Any, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from redis import Redis
 from redis.exceptions import RedisError
 import redis.asyncio as redis_async
@@ -48,6 +49,42 @@ if REDIS_URL:
         redis_client = None
 else:
     logger.info("REDIS_URL not set, running without Redis caching")
+
+# ---------------------------------------------------------------------------
+# In-process TTL cache for PassioGO objects (stops, routes)
+# These cannot be JSON-serialized for Redis, so we keep them in-memory.
+# Stops: 10 min (match Redis STOPS_TTL).  Routes: 5 min (change at most daily).
+# ---------------------------------------------------------------------------
+_passio_cache: dict[str, tuple[Any, float]] = {}
+
+def _passio_cache_get(key: str, ttl: float) -> Any:
+    entry = _passio_cache.get(key)
+    if entry is not None:
+        data, ts = entry
+        if time.time() - ts < ttl:
+            return data
+    return None
+
+def _passio_cache_set(key: str, data: Any) -> None:
+    _passio_cache[key] = (data, time.time())
+
+def get_stops_cached(system_id: int):
+    key = f"stops:{system_id}"
+    cached = _passio_cache_get(key, 600)
+    if cached is not None:
+        return cached
+    data = get_stops(system_id)
+    _passio_cache_set(key, data)
+    return data
+
+def get_routes_cached(system_id: int):
+    key = f"routes:{system_id}"
+    cached = _passio_cache_get(key, 300)
+    if cached is not None:
+        return cached
+    data = get_routes(system_id)
+    _passio_cache_set(key, data)
+    return data
 
 ENV = os.getenv("ENV", "development").lower()
 ENABLE_DOCS = os.getenv("ENABLE_DOCS", "true").lower() == "true"
@@ -1080,7 +1117,9 @@ def enrich_trip_skeleton(
     user_dest_lng: float,
     vehicle_indexes: dict,
     system_id: int,
-    debug: bool = False
+    debug: bool = False,
+    route_stops_cache: dict | None = None,
+    polyline_slice_cache: dict | None = None,
 ) -> dict:
     """
     Inflate a TripSkeleton into a full JSON response object with GTFS shapes and ETAs.
@@ -1118,7 +1157,13 @@ def enrich_trip_skeleton(
              r_obj = vehicle_indexes["routes_by_id"].get(str(seg_skel.route_id))
              # If we have the route object and it has stops
              if r_obj and hasattr(r_obj, 'getStops'):
-                  all_stops = r_obj.getStops()
+                  _cache_key_leg = str(seg_skel.route_id)
+                  if route_stops_cache is not None and _cache_key_leg in route_stops_cache:
+                      all_stops = route_stops_cache[_cache_key_leg]
+                  else:
+                      all_stops = r_obj.getStops()
+                      if route_stops_cache is not None:
+                          route_stops_cache[_cache_key_leg] = all_stops
                   start_id_str = str(seg_skel.start_stop_id)
                   end_id_str = str(seg_skel.end_stop_id)
                   
@@ -1164,7 +1209,13 @@ def enrich_trip_skeleton(
         rr = vehicle_indexes["routes_by_id"].get(rid_str)
         full_route_stops: list[dict] = leg_stops  # fallback
         if rr and hasattr(rr, "getStops"):
-            all_route_stops = rr.getStops() or []
+            _cache_key_full = str(seg_skel.route_id)
+            if route_stops_cache is not None and _cache_key_full in route_stops_cache:
+                all_route_stops = route_stops_cache[_cache_key_full] or []
+            else:
+                all_route_stops = rr.getStops() or []
+                if route_stops_cache is not None:
+                    route_stops_cache[_cache_key_full] = all_route_stops
             if all_route_stops:
                 def _stop_seq(s, _rid=rid_str):
                     rap = getattr(s, "routesAndPositions", {}) or {}
@@ -1226,10 +1277,16 @@ def enrich_trip_skeleton(
                 stop_coords = get_stop_coords_for_route(gtfs_rid) if gtfs_rid else None
 
                 if slat is not None and slng is not None and elat is not None and elng is not None:
-                    sliced = slice_shape_to_segment(
-                        shape, float(slat), float(slng), float(elat), float(elng),
-                        stop_coords=stop_coords,
-                    )
+                    _slice_key = (gtfs_rid, str(seg_skel.start_stop_id), str(seg_skel.end_stop_id))
+                    if polyline_slice_cache is not None and _slice_key in polyline_slice_cache:
+                        sliced = polyline_slice_cache[_slice_key]
+                    else:
+                        sliced = slice_shape_to_segment(
+                            shape, float(slat), float(slng), float(elat), float(elng),
+                            stop_coords=stop_coords,
+                        )
+                        if polyline_slice_cache is not None:
+                            polyline_slice_cache[_slice_key] = sliced
                     polyline = [{"lat": lat, "lng": lon} for lat, lon in sliced]
         
         # Build Final Segment
@@ -1465,6 +1522,7 @@ def find_k_paths_harvard(origin_gtfs_id: str, dest_gtfs_id: str, k=1, max_depth=
     return results
 
 
+@lru_cache(maxsize=4096)
 def find_direct_route_harvard(origin_gtfs_id: str, dest_gtfs_id: str) -> list[str]:
     """
     Check if there's a direct (no-transfer) route from origin to dest in Harvard GTFS.
@@ -2293,15 +2351,9 @@ def api_trip(
     if system_id <= 0:
         raise HTTPException(status_code=400, detail="Invalid system_id")
 
-    # 1. Fetch data
     t0 = time.perf_counter()
-    stops = get_stops(system_id)
-    routes_list = get_routes(system_id)
-    vehicles = get_vehicles(system_id)
-    
-    t_fetch = time.perf_counter()
-    
-    # 0. Check Cache
+
+    # 0. Check cache before any data fetches
     cache_key = f"trip_v2:{system_id}:{round(lat,4)}:{round(lng,4)}:{round(lat2,4)}:{round(lng2,4)}"
     if redis_client is not None:
         try:
@@ -2310,6 +2362,13 @@ def api_trip(
                 return json.loads(cached)
         except Exception as e:
             logger.warning("Redis error reading trip cache", exc_info=e)
+
+    # 1. Fetch data (stops + routes from in-process cache; vehicles always fresh)
+    stops = get_stops_cached(system_id)
+    routes_list = get_routes_cached(system_id)
+    vehicles = get_vehicles(system_id)
+
+    t_fetch = time.perf_counter()
 
     vehicle_indexes = build_trip_indexes(stops, routes_list, vehicles)
     t_idx = time.perf_counter()
@@ -2378,16 +2437,33 @@ def api_trip(
     # ---------------------------------------------------------
     t_enrich_start = time.perf_counter()
     enriched_candidates = []
+    _route_stops_cache: dict = {}    # shared across workers; GIL makes dict ops thread-safe
+    _polyline_slice_cache: dict = {}  # keyed by (gtfs_rid, start_stop_id, end_stop_id)
 
-    for skel in top_skeletons:
+    def _enrich_one(skel: TripSkeleton) -> dict | None:
         try:
-            enriched = enrich_trip_skeleton(
+            return enrich_trip_skeleton(
                 skel, lat, lng, lat2, lng2,
-                vehicle_indexes, system_id, debug
+                vehicle_indexes, system_id, debug,
+                route_stops_cache=_route_stops_cache,
+                polyline_slice_cache=_polyline_slice_cache,
             )
-            enriched_candidates.append(enriched)
         except Exception as e:
             logger.error("Enrichment failed for skeleton", exc_info=e)
+            return None
+
+    with ThreadPoolExecutor(max_workers=min(len(top_skeletons), 4)) as pool:
+        # Key futures by index to avoid TripSkeleton hashability issues (dataclass __hash__ = None)
+        futures = {pool.submit(_enrich_one, skel): i for i, skel in enumerate(top_skeletons)}
+        results: list[dict | None] = [None] * len(top_skeletons)
+        for fut in as_completed(futures):
+            idx = futures[fut]
+            results[idx] = fut.result()
+
+    # Preserve original skeleton order
+    for result in results:
+        if result is not None:
+            enriched_candidates.append(result)
 
     if not enriched_candidates:
         raise HTTPException(404, "No enrichable trips found")
