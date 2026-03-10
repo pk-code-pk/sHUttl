@@ -66,3 +66,14 @@ export interface TripResponse {
     segments: TripSegment[];
     error?: string;
 }
+
+export interface TripCandidate extends TripResponse {
+    is_live: boolean;
+    kind: string;
+    num_transfers: number;
+    total_walk_m: number;
+}
+
+export interface TripCandidatesResponse {
+    candidates: TripCandidate[];
+}

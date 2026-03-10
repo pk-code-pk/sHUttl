@@ -1,8 +1,8 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { motion, AnimatePresence, type PanInfo } from "framer-motion";
-import { MapPin, Navigation as NavigationIcon, ArrowUpDown, Clock, Info, ChevronDown, X } from "lucide-react";
+import { MapPin, Navigation as NavigationIcon, ArrowUpDown, Clock, Info, ChevronDown, ChevronLeft, X } from "lucide-react";
 import clsx from "clsx";
-import type { TripResponse } from "./types";
+import type { TripResponse, TripCandidate, TripCandidatesResponse } from "./types";
 import {
     metersToMinutes,
     formatMinutesLabel,
@@ -67,6 +67,71 @@ function useIsMobile() {
         return () => window.removeEventListener('resize', check);
     }, []);
     return isMobile;
+}
+
+interface CandidateCardProps {
+    candidate: TripCandidate;
+    isSelected: boolean;
+    onSelect: () => void;
+}
+
+function CandidateCard({ candidate, isSelected, onSelect }: CandidateCardProps) {
+    const firstSeg = candidate.segments[0];
+    const waitSeconds =
+        firstSeg?.next_bus?.eta_to_boarding_stop_s ??
+        firstSeg?.next_bus?.eta_to_origin_stop ??
+        null;
+    const etaLabel = formatEtaSeconds(waitSeconds);
+    const routeLabel = candidate.segments
+        .map((s) => s.short_name || s.route_name || 'Route')
+        .join(' → ');
+
+    return (
+        <button
+            type="button"
+            onClick={onSelect}
+            className={clsx(
+                "w-full rounded-xl p-2.5 text-left border transition-all",
+                isSelected
+                    ? "bg-crimson/10 border-crimson/40"
+                    : "bg-neutral-900/70 border-white/5 hover:bg-white/5 hover:border-white/10"
+            )}
+        >
+            <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0 flex-1">
+                    <div className="flex items-center gap-0.5 shrink-0">
+                        {candidate.segments.map((s, si) => (
+                            <div
+                                key={si}
+                                className="w-2 h-2 rounded-full"
+                                style={{ backgroundColor: s.color || '#A51C30' }}
+                            />
+                        ))}
+                    </div>
+                    <span className="text-[11px] font-bold text-white truncate">{routeLabel}</span>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                    {candidate.num_transfers > 0 && (
+                        <span className="text-[9px] text-neutral-500 bg-neutral-800/50 px-1.5 py-0.5 rounded border border-white/5">
+                            {candidate.num_transfers}× transfer
+                        </span>
+                    )}
+                    {etaLabel ? (
+                        <span className="text-[9px] font-bold text-green-400 bg-green-500/10 px-1.5 py-0.5 rounded border border-green-500/20">
+                            {etaLabel}
+                        </span>
+                    ) : (
+                        <span className="text-[9px] text-neutral-600 bg-neutral-800/30 px-1.5 py-0.5 rounded border border-white/5">
+                            No ETA
+                        </span>
+                    )}
+                </div>
+            </div>
+            {candidate.total_walk_m > 20 && (
+                <p className="mt-1 text-[9px] text-neutral-500">~{Math.round(candidate.total_walk_m)}m walk</p>
+            )}
+        </button>
+    );
 }
 
 export const TripPlannerPanel = ({
@@ -168,6 +233,17 @@ export const TripPlannerPanel = ({
     const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
     const [isLiveUpdating, setIsLiveUpdating] = useState(false);
     const POLL_INTERVAL_MS = 8000; // ~8 seconds
+
+    // Multi-candidate state
+    const [candidates, setCandidates] = useState<TripCandidate[]>([]);
+    const [selectedIndex, setSelectedIndex] = useState(0);
+    type TripView = 'candidates' | 'itinerary';
+    const [view, setView] = useState<TripView>('candidates');
+    const selectedIndexRef = useRef(0);
+    const candidatesRef = useRef<TripCandidate[]>([]);
+    // Keep refs in sync with state for use inside async callbacks
+    useEffect(() => { selectedIndexRef.current = selectedIndex; }, [selectedIndex]);
+    useEffect(() => { candidatesRef.current = candidates; }, [candidates]);
 
 
     // Autocomplete filtering logic
@@ -345,8 +421,17 @@ export const TripPlannerPanel = ({
                 }
                 throw new Error(message);
             }
-            const data: TripResponse = await res.json();
-            onTripChange(data);
+            const data: TripCandidatesResponse = await res.json();
+            const newCandidates = data.candidates || [];
+            if (newCandidates.length === 0) throw new Error("No trip candidates found.");
+            setCandidates(newCandidates);
+            setSelectedIndex(0);
+            selectedIndexRef.current = 0;
+            candidatesRef.current = newCandidates;
+            onTripChange(newCandidates[0]);
+            // If only one option, go straight to itinerary; otherwise show candidate list
+            setView(newCandidates.length === 1 ? 'itinerary' : 'candidates');
+            if (isMobile && sheetState === 'minimized') setSheetState('default');
 
             // Start live updates on success
             setActiveTripParams({
@@ -370,11 +455,16 @@ export const TripPlannerPanel = ({
         }
     };
 
-    // Helper: Reset live updates when inputs change significantly
+    // Helper: Reset live updates and candidates when inputs change significantly
     const resetLiveState = () => {
         setActiveTripParams(null);
         setIsLiveUpdating(false);
         setLastUpdatedAt(null);
+        setCandidates([]);
+        setSelectedIndex(0);
+        selectedIndexRef.current = 0;
+        candidatesRef.current = [];
+        setView('candidates');
     };
 
     // Helper: Check if trip has real-time data
@@ -386,7 +476,8 @@ export const TripPlannerPanel = ({
     // Polling logic for live updates
     useEffect(() => {
         if (!isLiveUpdating || !activeTripParams || !trip) return;
-        if (!hasRealtimeData(trip)) {
+        // Keep polling as long as at least one candidate has live data
+        if (!candidatesRef.current.some((c) => c.is_live)) {
             setIsLiveUpdating(false);
             return;
         }
@@ -406,10 +497,14 @@ export const TripPlannerPanel = ({
 
                 const res = await fetch(`${API_BASE_URL}/trip?${params.toString()}`);
                 if (!res.ok) throw new Error(`Trip refresh failed: ${res.status}`);
-                const data: TripResponse = await res.json();
+                const data: TripCandidatesResponse = await res.json();
+                const newCandidates = data.candidates || [];
 
-                if (!isCancelled) {
-                    onTripChange(data);
+                if (!isCancelled && newCandidates.length > 0) {
+                    setCandidates(newCandidates);
+                    candidatesRef.current = newCandidates;
+                    const idx = Math.min(selectedIndexRef.current, newCandidates.length - 1);
+                    onTripChange(newCandidates[idx]);
                     setLastUpdatedAt(new Date());
                 }
             } catch (err) {
@@ -447,7 +542,7 @@ export const TripPlannerPanel = ({
     const normalizedSegments = useMemo(() => {
         if (!trip || !trip.segments) return [];
         return trip.segments.map((seg) => {
-            const etaSeconds = seg.next_bus?.eta_to_origin_stop ?? null;
+            const etaSeconds = seg.next_bus?.eta_to_boarding_stop_s ?? seg.next_bus?.eta_to_origin_stop ?? null;
             const etaMin = etaSecondsToMinutes(etaSeconds);
             return {
                 ...seg,
@@ -556,7 +651,7 @@ export const TripPlannerPanel = ({
                                 onClick={() => setOriginMode((m) => (m === 'search' ? 'dropdown' : 'search'))}
                                 className="text-[9px] font-bold text-neutral-500 hover:text-white transition-colors uppercase tracking-tight bg-neutral-800/50 px-2 py-0.5 rounded-full border border-white/5"
                             >
-                                {originMode === 'search' ? 'Use List' : 'Use Search'}
+                                {originMode === 'search' ? 'Browse All' : 'Search'}
                             </button>
                         </div>
 
@@ -575,7 +670,6 @@ export const TripPlannerPanel = ({
                                     }}
                                     onFocus={() => {
                                         setOriginOpen(true);
-                                        setItineraryOpen(false); // Auto-collapse on focus for mobile space
                                     }}
                                     onBlur={() => {
                                         setTimeout(() => setOriginOpen(false), 120);
@@ -666,7 +760,7 @@ export const TripPlannerPanel = ({
                                 onClick={() => setDestMode((m) => (m === 'search' ? 'dropdown' : 'search'))}
                                 className="text-[9px] font-bold text-neutral-500 hover:text-white transition-colors uppercase tracking-tight bg-neutral-800/50 px-2 py-0.5 rounded-full border border-white/5"
                             >
-                                {destMode === 'search' ? 'Use List' : 'Use Search'}
+                                {destMode === 'search' ? 'Browse All' : 'Search'}
                             </button>
                         </div>
 
@@ -683,7 +777,6 @@ export const TripPlannerPanel = ({
                                     }}
                                     onFocus={() => {
                                         setDestOpen(true);
-                                        setItineraryOpen(false);
                                     }}
                                     onBlur={() => {
                                         setTimeout(() => setDestOpen(false), 120);
@@ -757,15 +850,23 @@ export const TripPlannerPanel = ({
                     </div>
                 )}
 
-                {error && (
-                    <div className="mt-3 rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] text-red-100/90 leading-relaxed shadow-sm animate-in fade-in slide-in-from-top-1 duration-200">
-                        <div className="flex items-center gap-2 mb-0.5">
-                            <div className="w-1 h-1 rounded-full bg-red-500 animate-pulse" />
-                            <span className="font-bold uppercase tracking-tight">Trip Error</span>
-                        </div>
-                        {error}
-                    </div>
-                )}
+                <AnimatePresence initial={false}>
+                    {error && (
+                        <motion.div
+                            initial={{ opacity: 0, y: -4 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: -4 }}
+                            transition={{ duration: 0.18 }}
+                            className="mt-3 rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] text-red-100/90 leading-relaxed shadow-sm"
+                        >
+                            <div className="flex items-center gap-2 mb-0.5">
+                                <div className="w-1 h-1 rounded-full bg-red-500 animate-pulse" />
+                                <span className="font-bold uppercase tracking-tight">Trip Error</span>
+                            </div>
+                            {error}
+                        </motion.div>
+                    )}
+                </AnimatePresence>
 
                 {/* Actions Row - improved spacing and layout */}
                 <div className="flex items-center gap-3 pt-3 mt-2 shrink-0 mb-4">
@@ -788,7 +889,7 @@ export const TripPlannerPanel = ({
                             resetLiveState();
                         }}
                         className="h-10 px-3 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-400 hover:text-white transition-colors flex items-center justify-center"
-                        title="Swap locations"
+                        aria-label="Swap origin and destination"
                     >
                         <ArrowUpDown size={16} />
                     </button>
@@ -853,27 +954,38 @@ export const TripPlannerPanel = ({
                                 resetLiveState();
                             }}
                             className="h-10 px-3 rounded-lg bg-neutral-800 hover:bg-red-900/50 text-neutral-400 hover:text-red-400 transition-colors flex items-center justify-center border border-transparent hover:border-red-500/30"
-                            title="Cancel trip"
+                            aria-label="Cancel trip"
                         >
                             <X size={16} />
                         </button>
                     )}
                 </div>
 
-                {error && <p className="text-xs text-red-400 font-medium -mt-2 mb-2 px-1">{error}</p>}
-
                 {/* Itinerary Section */}
                 <div className="flex-1 overflow-hidden flex flex-col pt-2 min-h-0 border-t border-white/5 mt-auto">
-                    {/* ITINERARY header with collapse toggle */}
-                    <div
-                        className="py-2 flex items-center justify-between text-xs text-neutral-500 cursor-pointer"
-                        onClick={() => setItineraryOpen((o) => !o)}
-                    >
-                        <div className="flex items-center gap-2 group">
-                            <span className="tracking-[0.2em] uppercase font-bold text-[10px] text-neutral-500">Itinerary</span>
-                        </div>
-
-                        <div className="rounded-full bg-neutral-800/50 p-1 hover:bg-neutral-800 transition-colors">
+                    {/* Header — shows back button when in itinerary view, section title otherwise */}
+                    <div className="py-2 flex items-center justify-between shrink-0">
+                        {view === 'itinerary' && candidates.length > 1 ? (
+                            <button
+                                type="button"
+                                onClick={() => setView('candidates')}
+                                className="flex items-center gap-1.5 text-neutral-400 hover:text-white transition-colors"
+                                aria-label="Back to route options"
+                            >
+                                <ChevronLeft size={14} />
+                                <span className="text-[10px] font-bold uppercase tracking-wider">Route Options</span>
+                            </button>
+                        ) : (
+                            <span className="tracking-[0.2em] uppercase font-bold text-[10px] text-neutral-500">
+                                {hasTrip ? 'Routes' : 'Itinerary'}
+                            </span>
+                        )}
+                        <button
+                            type="button"
+                            onClick={() => setItineraryOpen((o) => !o)}
+                            aria-label={itineraryOpen ? 'Collapse itinerary' : 'Expand itinerary'}
+                            className="rounded-full bg-neutral-800/50 p-1.5 hover:bg-neutral-800 transition-colors"
+                        >
                             <ChevronDown
                                 size={12}
                                 className={clsx(
@@ -881,7 +993,7 @@ export const TripPlannerPanel = ({
                                     itineraryOpen ? "rotate-180" : ""
                                 )}
                             />
-                        </div>
+                        </button>
                     </div>
 
                     <AnimatePresence initial={false}>
@@ -892,244 +1004,290 @@ export const TripPlannerPanel = ({
                                 animate={{ opacity: 1, height: 'auto' }}
                                 exit={{ opacity: 0, height: 0 }}
                                 transition={{ duration: 0.3, ease: 'circOut' }}
-                                className="min-h-0 flex flex-col"
+                                className="min-h-0 flex flex-col flex-1"
                             >
-                                {/* 
-                                  Scrollable Container
-                                  - constrained max height on mobile to prevent full screen takeover
-                                  - full height on desktop within panel limits 
-                                */}
-                                <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain touch-pan-y custom-scrollbar pr-1 pb-2 space-y-3">
-                                    <AnimatePresence mode="wait">
-                                        {!hasTrip ? (
-                                            <motion.div
-                                                key="empty-state"
-                                                initial={{ opacity: 0 }}
-                                                animate={{ opacity: 1 }}
-                                                exit={{ opacity: 0 }}
-                                                className="flex flex-col items-center justify-center py-6 text-center text-neutral-500"
-                                            >
-                                                <Info size={24} className="mb-2 opacity-20" />
-                                                <p className="text-[11px] leading-relaxed max-w-[180px]">
-                                                    Select your stops and tap <span className="text-neutral-400 font-semibold">Plan Trip</span>.
-                                                </p>
-                                            </motion.div>
-                                        ) : (
-                                            <motion.div
-                                                key="itinerary-list"
-                                                initial={{ opacity: 0, y: 10 }}
-                                                animate={{ opacity: 1, y: 0 }}
-                                                className="space-y-4"
-                                            >
-                                                {/* Overview */}
-                                                <div className="rounded-xl bg-neutral-900/80 p-3 text-xs border border-white/5 shadow-sm">
-                                                    <div className="flex items-center justify-between">
-                                                        <div className="flex flex-col flex-1 min-w-0">
-                                                            <div className="flex items-center gap-2 mb-1">
-                                                                <div className="w-1.5 h-1.5 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]" />
-                                                                <span className="text-[11px] font-bold text-white uppercase tracking-tight">Route Overview</span>
-                                                            </div>
-                                                            <div className="text-[10px] text-neutral-300 truncate">
-                                                                From <span className="font-medium text-white">{trip.origin.nearest_stop.name}</span> to{' '}
-                                                                <span className="font-medium text-white">{trip.destination.nearest_stop.name}</span>
-                                                            </div>
-                                                            <div className="mt-1 text-[10px] text-neutral-500 font-medium whitespace-nowrap overflow-hidden text-ellipsis">
-                                                                {numSegments} bus segment{numSegments !== 1 ? 's' : ''} •{' '}
-                                                                {numTransfers > 0
-                                                                    ? `${numTransfers} transfer${numTransfers > 1 ? 's' : ''}`
-                                                                    : 'no transfers'}
-                                                            </div>
-                                                        </div>
-
-                                                        <div className="flex flex-col items-end gap-1.5 self-start mt-0.5 sm:mt-0">
-                                                            {tripEtaLabel ? (
-                                                                <div className="rounded-full bg-neutral-900/80 border border-white/10 px-2.5 py-1 text-[10px] text-white font-bold whitespace-nowrap shadow-sm flex items-center gap-1.5">
-                                                                    <Clock size={10} className="text-neutral-400" />
-                                                                    <span>
-                                                                        Trip ≈ {tripEtaLabel}
-                                                                        {isTripEtaPartial && <span className="text-[9px] opacity-60 font-medium ml-1">(partial)</span>}
-                                                                    </span>
-                                                                </div>
-                                                            ) : (
-                                                                <div className="rounded-full bg-neutral-950/80 px-2 py-1 text-[10px] text-neutral-500 font-medium whitespace-nowrap border border-white/5">
-                                                                    No ETA
-                                                                </div>
-                                                            )}
-                                                            {totalWalkMin != null && totalWalkMin > 0 && (
-                                                                <div className="text-[9px] text-neutral-400 font-bold uppercase tracking-tight bg-neutral-800/50 px-1.5 py-0.5 rounded border border-white/5">
-                                                                    {Math.round(totalWalkMin)} min walk
-                                                                </div>
-                                                            )}
-                                                        </div>
-                                                    </div>
-
-                                                    {!isWalkReasonable(trip.origin.distance_m) && !isWalkReasonable(trip.destination.distance_m) && (
-                                                        <div className="mt-2 pt-2 border-t border-white/5 flex items-start gap-1.5 text-[9px] text-amber-500/90 leading-relaxed italic">
-                                                            <Info size={10} className="shrink-0 mt-0.5" />
-                                                            <span>You seem far from this shuttle system. For realistic directions, set your origin near campus.</span>
+                                <AnimatePresence mode="wait" initial={false}>
+                                    {view === 'candidates' ? (
+                                        /* ── CANDIDATES VIEW ── */
+                                        <motion.div
+                                            key="candidates-view"
+                                            initial={{ opacity: 0, x: -12 }}
+                                            animate={{ opacity: 1, x: 0 }}
+                                            exit={{ opacity: 0, x: -12 }}
+                                            transition={{ duration: 0.18 }}
+                                            className="flex-1 min-h-0 overflow-y-auto overscroll-contain touch-pan-y custom-scrollbar pr-1 pb-2 space-y-1.5"
+                                        >
+                                            {!hasTrip ? (
+                                                <div className="flex flex-col items-center justify-center py-6 text-center text-neutral-500">
+                                                    <Info size={24} className="mb-2 opacity-20" />
+                                                    <p className="text-[11px] leading-relaxed max-w-[180px]">
+                                                        Select your stops and tap <span className="text-neutral-400 font-semibold">Plan Trip</span>.
+                                                    </p>
+                                                </div>
+                                            ) : (
+                                                <>
+                                                    {candidates.some((c) => c.is_live) && (
+                                                        <div className="flex items-center gap-1.5 pb-0.5">
+                                                            <div className="w-1 h-1 rounded-full bg-green-500 animate-pulse" />
+                                                            <span className="text-[9px] text-green-400 font-medium">Live tracking available</span>
                                                         </div>
                                                     )}
-                                                </div>
-
-                                                {/* Walking leg: origin → nearest stop */}
-                                                {shouldShowOriginWalk && (
-                                                    <div className="rounded-xl bg-neutral-900/80 p-3 text-xs border border-white/5">
+                                                    {candidates
+                                                        .map((c, idx) => ({ c, idx }))
+                                                        .filter(({ c }) => c.is_live)
+                                                        .map(({ c, idx }) => (
+                                                            <CandidateCard
+                                                                key={idx}
+                                                                candidate={c}
+                                                                isSelected={selectedIndex === idx}
+                                                                onSelect={() => {
+                                                                    setSelectedIndex(idx);
+                                                                    selectedIndexRef.current = idx;
+                                                                    onTripChange(c);
+                                                                    setView('itinerary');
+                                                                }}
+                                                            />
+                                                        ))}
+                                                    {candidates.some((c) => c.is_live) && candidates.some((c) => !c.is_live) && (
+                                                        <div className="flex items-center gap-2 py-0.5">
+                                                            <div className="flex-1 border-t border-white/5" />
+                                                            <span className="text-[9px] text-neutral-600 uppercase tracking-wider">No live tracking</span>
+                                                            <div className="flex-1 border-t border-white/5" />
+                                                        </div>
+                                                    )}
+                                                    {candidates
+                                                        .map((c, idx) => ({ c, idx }))
+                                                        .filter(({ c }) => !c.is_live)
+                                                        .map(({ c, idx }) => (
+                                                            <CandidateCard
+                                                                key={idx}
+                                                                candidate={c}
+                                                                isSelected={selectedIndex === idx}
+                                                                onSelect={() => {
+                                                                    setSelectedIndex(idx);
+                                                                    selectedIndexRef.current = idx;
+                                                                    onTripChange(c);
+                                                                    setView('itinerary');
+                                                                }}
+                                                            />
+                                                        ))}
+                                                </>
+                                            )}
+                                        </motion.div>
+                                    ) : (
+                                        /* ── ITINERARY VIEW ── */
+                                        <motion.div
+                                            key="itinerary-view"
+                                            initial={{ opacity: 0, x: 12 }}
+                                            animate={{ opacity: 1, x: 0 }}
+                                            exit={{ opacity: 0, x: 12 }}
+                                            transition={{ duration: 0.18 }}
+                                            className="flex-1 min-h-0 overflow-y-auto overscroll-contain touch-pan-y custom-scrollbar pr-1 pb-2 space-y-3"
+                                        >
+                                            <motion.div
+                                                    key="itinerary-list"
+                                                    initial={{ opacity: 0, y: 6 }}
+                                                    animate={{ opacity: 1, y: 0 }}
+                                                    className="space-y-4"
+                                                >
+                                                    {/* Overview */}
+                                                    <div className="rounded-xl bg-neutral-900/80 p-3 text-xs border border-white/5 shadow-sm">
                                                         <div className="flex items-center justify-between">
-                                                            <div className="flex items-center gap-2">
-                                                                <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-neutral-800 text-[11px]">
-                                                                    🚶
-                                                                </span>
-                                                                <div className="font-bold text-white text-[11px]">Walk to stop</div>
-                                                            </div>
-                                                            <span className="rounded-full bg-neutral-950/80 px-2 py-1 text-[10px] text-neutral-300 font-medium">
-                                                                {originWalkMin != null ? formatMinutesLabel(originWalkMin) : ''}
-                                                            </span>
-                                                        </div>
-                                                        <div className="mt-1.5 text-neutral-300 text-[10px] leading-relaxed">
-                                                            Walk from your location to{' '}
-                                                            <span className="font-medium text-white">{trip.origin.nearest_stop.name}</span>.
-                                                        </div>
-                                                        <div className="mt-1 text-[9px] text-neutral-500 font-medium tracking-tight">
-                                                            ~{Math.round(originWalkM)} m
-                                                        </div>
-                                                    </div>
-                                                )}
-
-                                                {/* Segments */}
-                                                {normalizedSegments.map((seg, idx) => (
-                                                    <div
-                                                        key={`${seg.route_id}-${idx}`}
-                                                        className="relative pl-4 border-l-2 border-dashed border-neutral-700 pb-2 last:pb-0"
-                                                    >
-                                                        <div
-                                                            className="absolute -left-[5px] top-0 w-2 h-2 rounded-full border border-neutral-800"
-                                                            style={{ backgroundColor: seg.color || '#A51C30' }}
-                                                        />
-
-                                                        <div className="rounded-xl bg-neutral-900/70 p-3 hover:bg-white/[0.07] transition-colors border border-white/5">
-                                                            <div className="flex items-center justify-between mb-2">
-                                                                <span className="text-[11px] font-bold text-white tracking-tight">
-                                                                    {seg.short_name || seg.route_name || 'Shuttle'}
-                                                                </span>
-                                                                <div className="flex items-center gap-1.5">
-                                                                    {(() => {
-                                                                        const nb = seg.next_bus;
-                                                                        const waitSeconds = nb?.eta_to_boarding_stop_s ?? nb?.eta_to_origin_stop ?? null;
-                                                                        const waitLabel = formatEtaSeconds(waitSeconds);
-                                                                        const hasRealtimeWait = !!waitLabel;
-
-                                                                        return hasRealtimeWait ? (
-                                                                            <span className="rounded-full bg-neutral-950/80 px-2 py-0.5 text-[9px] text-neutral-100 font-bold flex items-center gap-1 border border-white/5">
-                                                                                <Clock size={10} className="text-neutral-400" />
-                                                                                <span>Bus in {waitLabel}</span>
-                                                                            </span>
-                                                                        ) : (
-                                                                            <span className="rounded-full bg-neutral-950/80 px-2 py-0.5 text-[9px] text-neutral-500 font-bold border border-white/5 tracking-tight">
-                                                                                No real-time ETA
-                                                                            </span>
-                                                                        );
-                                                                    })()}
+                                                            <div className="flex flex-col flex-1 min-w-0">
+                                                                <div className="flex items-center gap-2 mb-1">
+                                                                    <div className="w-1.5 h-1.5 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]" />
+                                                                    <span className="text-[11px] font-bold text-white uppercase tracking-tight">Route Overview</span>
+                                                                </div>
+                                                                <div className="text-[10px] text-neutral-300 truncate">
+                                                                    From <span className="font-medium text-white">{trip.origin.nearest_stop.name}</span> to{' '}
+                                                                    <span className="font-medium text-white">{trip.destination.nearest_stop.name}</span>
+                                                                </div>
+                                                                <div className="mt-1 text-[10px] text-neutral-500 font-medium whitespace-nowrap overflow-hidden text-ellipsis">
+                                                                    {numSegments} bus segment{numSegments !== 1 ? 's' : ''} •{' '}
+                                                                    {numTransfers > 0
+                                                                        ? `${numTransfers} transfer${numTransfers > 1 ? 's' : ''}`
+                                                                        : 'no transfers'}
                                                                 </div>
                                                             </div>
 
-                                                            <div className="text-[10px] text-neutral-400 mb-1">
-                                                                Board at <span className="text-neutral-200 font-medium">{seg.start_stop.name}</span>
-                                                            </div>
-
-                                                            {(() => {
-                                                                const nb = seg.next_bus;
-                                                                const waitSeconds = nb?.eta_to_boarding_stop_s ?? nb?.eta_to_origin_stop ?? null;
-                                                                const waitLabel = formatEtaSeconds(waitSeconds);
-                                                                const segEtaLabel = formatEtaSeconds(nb?.segment_eta_s ?? null);
-                                                                const rideEtaLabel = formatEtaSeconds(nb?.ride_eta_s ?? null);
-
-                                                                return (
-                                                                    <div className="mb-3 space-y-0.5">
-                                                                        {waitLabel && (
-                                                                            <p className="text-[10px] text-neutral-500">
-                                                                                Bus arrives at this stop in {waitLabel}.
-                                                                            </p>
-                                                                        )}
-                                                                        {segEtaLabel && (
-                                                                            <p className="text-[10px] text-neutral-500 leading-tight">
-                                                                                Approx. segment time ≈ {segEtaLabel}
-                                                                                {waitLabel && rideEtaLabel && (
-                                                                                    <span className="opacity-70"> — bus in {waitLabel}, then ~{rideEtaLabel} ride</span>
-                                                                                )}
-                                                                            </p>
-                                                                        )}
+                                                            <div className="flex flex-col items-end gap-1.5 self-start mt-0.5 sm:mt-0">
+                                                                {tripEtaLabel ? (
+                                                                    <div className="rounded-full bg-neutral-900/80 border border-white/10 px-2.5 py-1 text-[10px] text-white font-bold whitespace-nowrap shadow-sm flex items-center gap-1.5">
+                                                                        <Clock size={10} className="text-neutral-400" />
+                                                                        <span>
+                                                                            Trip ≈ {tripEtaLabel}
+                                                                            {isTripEtaPartial && <span className="text-[9px] opacity-60 font-medium ml-1">(partial)</span>}
+                                                                        </span>
                                                                     </div>
-                                                                );
-                                                            })()}
+                                                                ) : (
+                                                                    <div className="rounded-full bg-neutral-950/80 px-2 py-1 text-[10px] text-neutral-500 font-medium whitespace-nowrap border border-white/5">
+                                                                        No ETA
+                                                                    </div>
+                                                                )}
+                                                                {totalWalkMin != null && totalWalkMin > 0 && (
+                                                                    <div className="text-[9px] text-neutral-400 font-bold uppercase tracking-tight bg-neutral-800/50 px-1.5 py-0.5 rounded border border-white/5">
+                                                                        {Math.round(totalWalkMin)} min walk
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        </div>
 
-                                                            <div className="space-y-1.5 pt-2 border-t border-white/5">
-                                                                <span className="text-[9px] font-bold text-neutral-500 uppercase tracking-tighter block mb-1">Stops on track</span>
-                                                                <div className="max-h-24 overflow-y-auto pr-1">
-                                                                    {seg.stops.map((s, sIdx) => (
-                                                                        <div key={s.id} className="flex items-center gap-2 text-[10px] text-neutral-400 py-0.5">
-                                                                            <div className={clsx(
-                                                                                "w-1 h-1 rounded-full",
-                                                                                sIdx === 0 || sIdx === seg.stops.length - 1 ? "bg-white/40" : "bg-white/10"
-                                                                            )} />
-                                                                            <span className={clsx(sIdx === seg.stops.length - 1 && "text-neutral-200 font-medium")}>
-                                                                                {s.name}
-                                                                            </span>
+                                                        {!isWalkReasonable(trip.origin.distance_m) && !isWalkReasonable(trip.destination.distance_m) && (
+                                                            <div className="mt-2 pt-2 border-t border-white/5 flex items-start gap-1.5 text-[9px] text-amber-500/90 leading-relaxed italic">
+                                                                <Info size={10} className="shrink-0 mt-0.5" />
+                                                                <span>You seem far from this shuttle system. For realistic directions, set your origin near campus.</span>
+                                                            </div>
+                                                        )}
+                                                    </div>
+
+                                                    {/* Walking leg: origin → nearest stop */}
+                                                    {shouldShowOriginWalk && (
+                                                        <div className="rounded-xl bg-neutral-900/80 p-3 text-xs border border-white/5">
+                                                            <div className="flex items-center justify-between">
+                                                                <div className="flex items-center gap-2">
+                                                                    <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-neutral-800 text-[11px]">🚶</span>
+                                                                    <div className="font-bold text-white text-[11px]">Walk to stop</div>
+                                                                </div>
+                                                                <span className="rounded-full bg-neutral-950/80 px-2 py-1 text-[10px] text-neutral-300 font-medium">
+                                                                    {originWalkMin != null ? formatMinutesLabel(originWalkMin) : ''}
+                                                                </span>
+                                                            </div>
+                                                            <div className="mt-1.5 text-neutral-300 text-[10px] leading-relaxed">
+                                                                Walk from your location to{' '}
+                                                                <span className="font-medium text-white">{trip.origin.nearest_stop.name}</span>.
+                                                            </div>
+                                                            <div className="mt-1 text-[9px] text-neutral-500 font-medium tracking-tight">
+                                                                ~{Math.round(originWalkM)} m
+                                                            </div>
+                                                        </div>
+                                                    )}
+
+                                                    {/* Segments */}
+                                                    {normalizedSegments.map((seg, idx) => (
+                                                        <div
+                                                            key={`${seg.route_id}-${idx}`}
+                                                            className="relative pl-4 border-l-2 border-dashed border-neutral-700 pb-2 last:pb-0"
+                                                        >
+                                                            <div
+                                                                className="absolute -left-[5px] top-0 w-2 h-2 rounded-full border border-neutral-800"
+                                                                style={{ backgroundColor: seg.color || '#A51C30' }}
+                                                            />
+                                                            <div className="rounded-xl bg-neutral-900/70 p-3 hover:bg-white/[0.07] transition-colors border border-white/5">
+                                                                <div className="flex items-center justify-between mb-2">
+                                                                    <span className="text-[11px] font-bold text-white tracking-tight">
+                                                                        {seg.short_name || seg.route_name || 'Shuttle'}
+                                                                    </span>
+                                                                    <div className="flex items-center gap-1.5">
+                                                                        {(() => {
+                                                                            const nb = seg.next_bus;
+                                                                            const waitSeconds = nb?.eta_to_boarding_stop_s ?? nb?.eta_to_origin_stop ?? null;
+                                                                            const waitLabel = formatEtaSeconds(waitSeconds);
+                                                                            return waitLabel ? (
+                                                                                <span className="rounded-full bg-neutral-950/80 px-2 py-0.5 text-[9px] text-neutral-100 font-bold flex items-center gap-1 border border-white/5">
+                                                                                    <Clock size={10} className="text-neutral-400" />
+                                                                                    <span>Bus in {waitLabel}</span>
+                                                                                </span>
+                                                                            ) : (
+                                                                                <span className="rounded-full bg-neutral-950/80 px-2 py-0.5 text-[9px] text-neutral-500 font-bold border border-white/5 tracking-tight">
+                                                                                    No real-time ETA
+                                                                                </span>
+                                                                            );
+                                                                        })()}
+                                                                    </div>
+                                                                </div>
+
+                                                                <div className="text-[10px] text-neutral-400 mb-1">
+                                                                    Board at <span className="text-neutral-200 font-medium">{seg.start_stop.name}</span>
+                                                                </div>
+
+                                                                {(() => {
+                                                                    const nb = seg.next_bus;
+                                                                    const waitSeconds = nb?.eta_to_boarding_stop_s ?? nb?.eta_to_origin_stop ?? null;
+                                                                    const waitLabel = formatEtaSeconds(waitSeconds);
+                                                                    const segEtaLabel = formatEtaSeconds(nb?.segment_eta_s ?? null);
+                                                                    const rideEtaLabel = formatEtaSeconds(nb?.ride_eta_s ?? null);
+                                                                    return (
+                                                                        <div className="mb-3 space-y-0.5">
+                                                                            {waitLabel && (
+                                                                                <p className="text-[10px] text-neutral-500">Bus arrives at this stop in {waitLabel}.</p>
+                                                                            )}
+                                                                            {segEtaLabel && (
+                                                                                <p className="text-[10px] text-neutral-500 leading-tight">
+                                                                                    Approx. segment time ≈ {segEtaLabel}
+                                                                                    {waitLabel && rideEtaLabel && (
+                                                                                        <span className="opacity-70"> — bus in {waitLabel}, then ~{rideEtaLabel} ride</span>
+                                                                                    )}
+                                                                                </p>
+                                                                            )}
                                                                         </div>
-                                                                    ))}
+                                                                    );
+                                                                })()}
+
+                                                                <div className="space-y-1.5 pt-2 border-t border-white/5">
+                                                                    <span className="text-[9px] font-bold text-neutral-500 uppercase tracking-tighter block mb-1">Stops</span>
+                                                                    <div className="max-h-24 overflow-y-auto pr-1">
+                                                                        {seg.stops.map((s, sIdx) => (
+                                                                            <div key={s.id} className="flex items-center gap-2 text-[10px] text-neutral-400 py-0.5">
+                                                                                <div className={clsx(
+                                                                                    "w-1 h-1 rounded-full",
+                                                                                    sIdx === 0 || sIdx === seg.stops.length - 1 ? "bg-white/40" : "bg-white/10"
+                                                                                )} />
+                                                                                <span className={clsx(sIdx === seg.stops.length - 1 && "text-neutral-200 font-medium")}>
+                                                                                    {s.name}
+                                                                                </span>
+                                                                            </div>
+                                                                        ))}
+                                                                    </div>
                                                                 </div>
                                                             </div>
                                                         </div>
-                                                    </div>
-                                                ))}
+                                                    ))}
 
-                                                {/* Walking leg: destination stop → final destination */}
-                                                {shouldShowDestWalk && (
-                                                    <div className="rounded-xl bg-neutral-900/80 p-3 text-xs border border-white/5">
-                                                        <div className="flex items-center justify-between">
-                                                            <div className="flex items-center gap-2">
-                                                                <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-neutral-800 text-[11px]">
-                                                                    🚶
+                                                    {/* Walking leg: destination stop → final destination */}
+                                                    {shouldShowDestWalk && (
+                                                        <div className="rounded-xl bg-neutral-900/80 p-3 text-xs border border-white/5">
+                                                            <div className="flex items-center justify-between">
+                                                                <div className="flex items-center gap-2">
+                                                                    <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-neutral-800 text-[11px]">🚶</span>
+                                                                    <div className="font-bold text-white text-[11px]">Walk to destination</div>
+                                                                </div>
+                                                                <span className="rounded-full bg-neutral-950/80 px-2 py-1 text-[10px] text-neutral-300 font-medium">
+                                                                    {destWalkMin != null ? formatMinutesLabel(destWalkMin) : ''}
                                                                 </span>
-                                                                <div className="font-bold text-white text-[11px]">Walk to destination</div>
                                                             </div>
-                                                            <span className="rounded-full bg-neutral-950/80 px-2 py-1 text-[10px] text-neutral-300 font-medium">
-                                                                {destWalkMin != null ? formatMinutesLabel(destWalkMin) : ''}
-                                                            </span>
-                                                        </div>
-                                                        <div className="mt-1.5 text-neutral-300 text-[10px] leading-relaxed">
-                                                            From{' '}
-                                                            <span className="font-medium text-white">{trip.destination.nearest_stop.name}</span>{' '}
-                                                            walk to your destination.
-                                                        </div>
-                                                        <div className="mt-1 text-[9px] text-neutral-500 font-medium tracking-tight">
-                                                            ~{Math.round(destWalkM)} m
-                                                        </div>
-                                                    </div>
-                                                )}
-
-                                                <div className="text-[10px] text-neutral-500 text-center pt-2 pb-1 border-t border-white/5 mx-2">
-                                                    {hasRealtimeData(trip) ? (
-                                                        <div className="flex flex-col gap-0.5">
-                                                            <div className="flex items-center justify-center gap-1.5">
-                                                                {isLiveUpdating && (
-                                                                    <div className="w-1 h-1 rounded-full bg-green-500 animate-pulse" />
-                                                                )}
-                                                                <span>{updatedLabel}</span>
+                                                            <div className="mt-1.5 text-neutral-300 text-[10px] leading-relaxed">
+                                                                From{' '}
+                                                                <span className="font-medium text-white">{trip.destination.nearest_stop.name}</span>{' '}
+                                                                walk to your destination.
                                                             </div>
-                                                            {isLiveUpdating && (
-                                                                <span className="text-[9px] opacity-70">
-                                                                    Live tracking every {POLL_INTERVAL_MS / 1000}s
-                                                                </span>
-                                                            )}
+                                                            <div className="mt-1 text-[9px] text-neutral-500 font-medium tracking-tight">
+                                                                ~{Math.round(destWalkM)} m
+                                                            </div>
                                                         </div>
-                                                    ) : (
-                                                        <span className="italic opacity-70">No real-time data for this route</span>
                                                     )}
-                                                </div>
-                                            </motion.div>
-                                        )}
-                                    </AnimatePresence>
-                                </div>
+
+                                                    {/* Live status footer */}
+                                                    <div className="text-[10px] text-neutral-500 text-center pt-2 pb-1 border-t border-white/5 mx-2">
+                                                        {hasRealtimeData(trip) ? (
+                                                            <div className="flex flex-col gap-0.5">
+                                                                <div className="flex items-center justify-center gap-1.5">
+                                                                    {isLiveUpdating && (
+                                                                        <div className="w-1 h-1 rounded-full bg-green-500 animate-pulse" />
+                                                                    )}
+                                                                    <span>{updatedLabel}</span>
+                                                                </div>
+                                                                {isLiveUpdating && (
+                                                                    <span className="text-[9px] opacity-70">Live tracking every {POLL_INTERVAL_MS / 1000}s</span>
+                                                                )}
+                                                            </div>
+                                                        ) : (
+                                                            <span className="italic opacity-70">No real-time data for this route</span>
+                                                        )}
+                                                    </div>
+                                                </motion.div>
+                                        </motion.div>
+                                    )}
+                                </AnimatePresence>
                             </motion.div>
                         )}
                     </AnimatePresence>

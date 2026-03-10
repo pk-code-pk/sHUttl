@@ -1452,7 +1452,7 @@ def find_direct_route_harvard(origin_gtfs_id: str, dest_gtfs_id: str) -> list[st
     while queue:
         curr, path, route_id = queue.popleft()
         
-        if len(path) > 25:  # Limit depth
+        if len(path) > 50:  # Limit depth
             continue
         
         for edge in graph.get(curr, []):
@@ -1727,8 +1727,8 @@ def build_direct_candidate(origin_stop, dest_stop, routes_list, vehicle_indexes,
     }
 
 
-MAX_WALK_M = 500
-MAX_NEARBY_STOPS = 5
+MAX_WALK_M = 800
+MAX_NEARBY_STOPS = 8
 
 def find_nearby_stops(lat: float, lng: float, stops: list) -> list[tuple[object, float]]:
     candidates = []
@@ -1754,7 +1754,9 @@ def plan_base_no_transfer_trip(
     system_id: int,
     stops: list = None,
 ) -> list[TripSkeleton]:
-    # For Harvard, verify direct route exists in GTFS
+    # For Harvard, use GTFS to supplement PassioGO route discovery — but never to block it.
+    # GTFS BFS can fail (depth limits, mapping misses, loop route quirks) and silently killing
+    # valid routes is worse than occasionally suggesting one that needs direction verification.
     direct_gtfs_routes = None
     if system_id == 831 and stops is not None:
         passio_to_gtfs = get_harvard_passio_to_gtfs_map(stops)
@@ -1762,9 +1764,9 @@ def plan_base_no_transfer_trip(
         dest_gtfs_id = passio_to_gtfs.get(str(dest_stop.id))
 
         if origin_gtfs_id and dest_gtfs_id:
-            direct_gtfs_routes = find_direct_route_harvard(origin_gtfs_id, dest_gtfs_id)
-            if not direct_gtfs_routes:
-                return []
+            direct_gtfs_routes = find_direct_route_harvard(origin_gtfs_id, dest_gtfs_id) or None
+            # Note: if GTFS finds nothing, direct_gtfs_routes stays None.
+            # We fall through to PassioGO's find_common_routes regardless.
 
     routes = find_common_routes(origin_stop, dest_stop, vehicle_indexes["routes_by_id"])
     if not routes and direct_gtfs_routes:
@@ -1909,7 +1911,7 @@ def plan_base_transfer_trip(
         # Score
         num_transfers = max(0, len(seg_skeletons) - 1)
         # Score: Live*0, Dead*10000 + transfers*500 + walk*0.5
-        score = (0 if has_live else 10000) + (num_transfers * 500) + (total_walk * 0.5)
+        score = (0 if has_live else 10000) + (num_transfers * 10000) + (total_walk * 0.5)
         
         skel = TripSkeleton(
             segments=seg_skeletons,
@@ -2058,7 +2060,7 @@ def _plan_base_transfer_trip_harvard(
             ))
             
         num_transfers = max(0, len(seg_skeletons) - 1)
-        score = (0 if has_live else 10000) + (num_transfers * 500) + (total_walk * 0.5)
+        score = (0 if has_live else 10000) + (num_transfers * 10000) + (total_walk * 0.5)
         
         candidates.append(TripSkeleton(
             segments=seg_skeletons,
@@ -2075,8 +2077,8 @@ def _plan_base_transfer_trip_harvard(
     return candidates
 
 
-MAX_WALK_PAIRS = 10
-MAX_WALK_TIME = 2.0  # seconds
+MAX_WALK_PAIRS = 20
+MAX_WALK_TIME = 3.0  # seconds
 
 def plan_walk_modified_trip(
     user_origin_lat: float,
@@ -2093,9 +2095,9 @@ def plan_walk_modified_trip(
     origin_candidates = find_nearby_stops(user_origin_lat, user_origin_lng, stops)
     dest_candidates = find_nearby_stops(user_dest_lat, user_dest_lng, stops)
     
-    # Try nearest first
-    o_cands = origin_candidates[:5]
-    d_cands = dest_candidates[:5]
+    # Try nearest first (respects MAX_NEARBY_STOPS from find_nearby_stops)
+    o_cands = origin_candidates
+    d_cands = dest_candidates
     
     skeletons = []
     pairs_tried = 0
@@ -2227,46 +2229,24 @@ def collapse_short_transit_segments(
             if skel.num_transfers == 0:
                 skel.score = (0 if has_live else 20000) + skel.total_walk_m * 0.5
             else:
-                skel.score = (0 if has_live else 10000) + (skel.num_transfers * 500) + (skel.total_walk_m * 0.5)
+                skel.score = (0 if has_live else 10000) + (skel.num_transfers * 10000) + (skel.total_walk_m * 0.5)
 
         result.append(skel)
 
     return result
 
 
-def select_best_candidate(candidates):
-    def category(c) -> int:
-        live = c["has_live_bus"]
-        transfers = c["num_transfers"]
-        kind = c["kind"]
+def _dedup_skeletons(skeletons: list) -> list:
+    """Deduplicate skeletons by route signature (same sequence of route_ids).
+    Keeps the skeleton with the lowest score for each unique signature."""
+    seen: dict = {}
+    for skel in skeletons:
+        sig = tuple(seg.route_id for seg in skel.segments)
+        if sig not in seen or skel.score < seen[sig].score:
+            seen[sig] = skel
+    return list(seen.values())
 
-        if live and transfers == 0 and kind == "base_no_transfer":
-            return 1  # live, no transfers
-        if live and kind == "walk_modified":
-            return 2  # live, walk-modified
-        if live and transfers >= 1 and kind == "base_transfer":
-            return 3  # live, transfers
-        if not live and transfers == 0 and kind == "base_no_transfer":
-            return 4  # dead, no transfers
-        if not live and kind == "walk_modified":
-            return 5  # dead, walk-modified
-        if not live and transfers >= 1 and kind == "base_transfer":
-            return 6  # dead, transfers
-        return 999  # fallback
 
-    def tie_breaker(c) -> float:
-        transfers = c["num_transfers"]
-        walk = c["total_walk_m"]
-        # Try to get a representative ETA
-        eta = 0.0
-        for seg in c["segments"]:
-            nb = seg.get("next_bus")
-            if nb and nb.get("eta_to_origin_stop") is not None:
-                eta = nb["eta_to_origin_stop"]
-                break
-        return transfers * 1000.0 + walk * 0.2 + (eta * 0.1)
-
-    return min(candidates, key=lambda c: (category(c), tie_breaker(c)))
 
 
 @app.get("/trip", dependencies=[Depends(OptionalRateLimiter(times=20, seconds=60))])
@@ -2291,7 +2271,7 @@ def api_trip(
     t_fetch = time.perf_counter()
     
     # 0. Check Cache
-    cache_key = f"trip:{system_id}:{round(lat,4)}:{round(lng,4)}:{round(lat2,4)}:{round(lng2,4)}"
+    cache_key = f"trip_v2:{system_id}:{round(lat,4)}:{round(lng,4)}:{round(lat2,4)}:{round(lng2,4)}"
     if redis_client is not None:
         try:
             cached = redis_client.get(cache_key)
@@ -2322,22 +2302,19 @@ def api_trip(
         routes_list, vehicle_indexes, system_id, stops=stops
     )
     all_skeletons.extend(s_nt)
-    
-    # 2. Base Transfer (Try strictly if no direct?)
-    # Reproducing logic: if direct exists, prefer it. But to ensure best Walk-Modified candidates are ranked fairly,
-    # we collect them all?
-    # Actually, legacy logic: "if not cand_nt: try transfer".
-    # So we only add transfer skeletons if NO direct skeletons exist.
+
+    # 2. Base Transfer — only run when no direct single-bus route exists.
+    # On a campus shuttle, walking more is always preferred over transferring.
     if not s_nt:
         s_tx = plan_base_transfer_trip(
             origin_stop, dest_stop, lat, lng, lat2, lng2,
             stops, routes_list, vehicle_indexes, system_id, debug
         )
         all_skeletons.extend(s_tx)
-        
+
     # 3. Walk Modified (Always try)
     s_wm = plan_walk_modified_trip(
-        lat, lng, lat2, lng2, 
+        lat, lng, lat2, lng2,
         stops, routes_list, vehicle_indexes, system_id, debug
     )
     all_skeletons.extend(s_wm)
@@ -2356,21 +2333,21 @@ def api_trip(
     t_search_end = time.perf_counter()
 
     # ---------------------------------------------------------
-    # Phase 2: Rank & Prune
+    # Phase 2: Dedup, Rank & Prune
     # ---------------------------------------------------------
-    # Sort lower score first
+    all_skeletons = _dedup_skeletons(all_skeletons)
     all_skeletons.sort(key=lambda x: x.score)
-    
-    # Pick Top K
-    K = 3
+
+    # Pick Top K (more than before to surface diverse options)
+    K = 6
     top_skeletons = all_skeletons[:K]
-    
+
     # ---------------------------------------------------------
     # Phase 3: Enrichment
     # ---------------------------------------------------------
     t_enrich_start = time.perf_counter()
     enriched_candidates = []
-    
+
     for skel in top_skeletons:
         try:
             enriched = enrich_trip_skeleton(
@@ -2380,30 +2357,64 @@ def api_trip(
             enriched_candidates.append(enriched)
         except Exception as e:
             logger.error("Enrichment failed for skeleton", exc_info=e)
-            
+
     if not enriched_candidates:
         raise HTTPException(404, "No enrichable trips found")
 
     t_enrich_end = time.perf_counter()
 
     # ---------------------------------------------------------
-    # Phase 4: Final Selection
+    # Phase 4: Filter + Sort candidates — live first, transfers always last
     # ---------------------------------------------------------
-    best_candidate = select_best_candidate(enriched_candidates)
-    
+    # If any single-bus option exists (direct or walk-modified), suppress all
+    # transfer routes entirely. On a campus shuttle, walk more > transfer always.
+    has_single_bus = any(c["num_transfers"] == 0 for c in enriched_candidates)
+    if has_single_bus:
+        enriched_candidates = [c for c in enriched_candidates if c["num_transfers"] == 0]
+    def _candidate_sort_key(c: dict) -> tuple:
+        live = c["has_live_bus"]
+        transfers = c["num_transfers"]
+        kind = c["kind"]
+        if live and transfers == 0 and kind == "base_no_transfer":
+            cat = 1
+        elif live and kind == "walk_modified":
+            cat = 2
+        elif live and transfers >= 1 and kind == "base_transfer":
+            cat = 3
+        elif not live and transfers == 0 and kind == "base_no_transfer":
+            cat = 4
+        elif not live and kind == "walk_modified":
+            cat = 5
+        elif not live and transfers >= 1 and kind == "base_transfer":
+            cat = 6
+        else:
+            cat = 999
+        return (cat, c["total_walk_m"])
+
+    enriched_candidates.sort(key=_candidate_sort_key)
+
     t_total = time.perf_counter() - t0
-    
-    if debug_paths:
-        best_candidate["trip"]["debug_selection"] = {
-            "chosen_kind": best_candidate["kind"],
+
+    # Build candidates list: each = trip data + metadata fields
+    result_candidates = []
+    for c in enriched_candidates:
+        candidate = dict(c["trip"])
+        candidate["is_live"] = c["has_live_bus"]
+        candidate["kind"] = c["kind"]
+        candidate["num_transfers"] = c["num_transfers"]
+        candidate["total_walk_m"] = c["total_walk_m"]
+        result_candidates.append(candidate)
+
+    if debug_paths and result_candidates:
+        result_candidates[0]["debug_selection"] = {
             "total_skeletons": len(all_skeletons),
             "enriched_count": len(enriched_candidates),
-            "top_candidates": [
+            "all_candidates": [
                 {
                     "kind": c["kind"],
                     "live": c["has_live_bus"],
                     "transfers": c["num_transfers"],
-                    "walk": c["total_walk_m"]
+                    "walk": c["total_walk_m"],
                 }
                 for c in enriched_candidates
             ],
@@ -2412,20 +2423,21 @@ def api_trip(
                 "index": t_idx - t_fetch,
                 "search": t_search_end - t_search_start,
                 "enrich": t_enrich_end - t_enrich_start,
-                "total": t_total
-            }
+                "total": t_total,
+            },
         }
-    
-    final_result = best_candidate["trip"]
-    
+
+    final_result = {"candidates": result_candidates}
+
     # Log timings
     logger.info(
-        "TRIP timings system=%s total=%.3fs search=%.3fs enrich=%.3fs n_skel=%d n_enriched=%d",
-        system_id, t_total, 
-        t_search_end - t_search_start, 
+        "TRIP timings system=%s total=%.3fs search=%.3fs enrich=%.3fs n_skel=%d n_enriched=%d n_candidates=%d",
+        system_id, t_total,
+        t_search_end - t_search_start,
         t_enrich_end - t_enrich_start,
         len(all_skeletons),
-        len(enriched_candidates)
+        len(enriched_candidates),
+        len(result_candidates),
     )
 
     # Cache response
