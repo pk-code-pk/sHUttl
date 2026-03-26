@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import FastAPI, HTTPException, Query, Depends, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from collections import defaultdict, deque
@@ -121,6 +122,10 @@ def health_head():
 
 @app.on_event("startup")
 async def startup_event():
+    # Start background vehicle position poller (runs regardless of Redis)
+    asyncio.create_task(_vehicle_position_poller())
+    logger.info("Vehicle position poller started")
+
     redis_url = os.getenv("REDIS_URL")
     if not redis_url:
         logger.info("REDIS_URL not set, running without rate limiting")
@@ -148,7 +153,40 @@ class OptionalRateLimiter(RateLimiter):
             return
 
 
-VEHICLE_STATE = {} ##cache to store history of bus positions to deduce accurate etas 
+VEHICLE_STATE = {}  # cache: (system_id, vehicle_id) -> last 4 GPS positions + timestamps
+
+VEHICLE_POLL_INTERVAL_S = 10  # seconds between background position polls
+
+async def _vehicle_position_poller():
+    """
+    Background task: poll all vehicle positions every VEHICLE_POLL_INTERVAL_S seconds
+    and feed them into VEHICLE_STATE so speed history accumulates independently of
+    trip requests. Without this, VEHICLE_STATE is only populated when someone calls
+    /trip, meaning fresh deploys and quiet periods always fall back to FALLBACK_SPEED_MS.
+    """
+    while True:
+        try:
+            # get_vehicles is a blocking network call — run in a thread so we don't
+            # stall the async event loop.
+            vehicles = await asyncio.to_thread(get_vehicles, DEFAULT_SYSTEM_ID)
+            now = datetime.now()
+            for v in vehicles:
+                v_lat = getattr(v, "latitude", None)
+                v_lng = getattr(v, "longitude", None)
+                if v_lat is None or v_lng is None:
+                    continue
+                key = (DEFAULT_SYSTEM_ID, v.id)
+                prev = VEHICLE_STATE.get(key, [])
+                prev.append({"lat": float(v_lat), "lng": float(v_lng), "t": now})
+                if len(prev) > 4:
+                    prev = prev[-4:]
+                VEHICLE_STATE[key] = prev
+            # Apply the same size cap used in enrichment
+            if len(VEHICLE_STATE) > 500:
+                VEHICLE_STATE.clear()
+        except Exception as e:
+            logger.warning("Vehicle position poller error", exc_info=e)
+        await asyncio.sleep(VEHICLE_POLL_INTERVAL_S)
 
 # ---------------------------------------------------------------------------
 # Trip Skeletons (Performance Refactor)
@@ -1080,7 +1118,11 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
                                 s2["lat" if "lat" in s2 else "latitude"], s2["lng" if "lng" in s2 else "longitude"])
                 seg_dist += dm
             
-            ride_eta_s = seg_dist / speed_ms
+            # seg_dist is a sum of straight-line hop distances. speed_ms has already been
+            # inflated by SPEED_TORTUOSITY_CORRECTION to approximate along-route speed.
+            # Dividing straight-line distance by inflated speed made ride ETAs ~20% too short.
+            # Apply the same tortuosity factor to seg_dist so both sides use along-route units.
+            ride_eta_s = (seg_dist * SPEED_TORTUOSITY_CORRECTION) / speed_ms
             if eta_to_boarding_stop_s is not None:
                 segment_eta_s = eta_to_boarding_stop_s + ride_eta_s
 
@@ -2180,63 +2222,59 @@ def plan_walk_modified_trip(
     system_id: int,
     debug: bool = False
 ) -> list[TripSkeleton]:
-    # Get candidates
     origin_candidates = find_nearby_stops(user_origin_lat, user_origin_lng, stops)
     dest_candidates = find_nearby_stops(user_dest_lat, user_dest_lng, stops)
-    
-    # Try nearest first (respects MAX_NEARBY_STOPS from find_nearby_stops)
-    o_cands = origin_candidates
-    d_cands = dest_candidates
-    
+
+    # Pre-generate all (origin, dest) pairs and sort by total walk distance.
+    # Previously the nested loop iterated origin-first, so the 20-pair limit cut off
+    # combinations from farther origin stops even if they had much shorter total walk.
+    # Sorting ensures the best 20 pairs by total walk are always tried.
+    # Also skip same-stop pairs (origin == dest stop) which produce nonsense self-loop trips.
+    all_pairs = [
+        (o_stop, o_dist, d_stop, d_dist)
+        for o_stop, o_dist in origin_candidates
+        for d_stop, d_dist in dest_candidates
+        if str(o_stop.id) != str(d_stop.id)
+    ]
+    all_pairs.sort(key=lambda p: p[1] + p[3])
+
     skeletons = []
     pairs_tried = 0
     t0 = time.perf_counter()
-    
-    for o_stop, o_walk_dist in o_cands:
-        for d_stop, d_walk_dist in d_cands:
-            # Check limits
-            if pairs_tried >= MAX_WALK_PAIRS:
-                return skeletons
-            if (time.perf_counter() - t0) > MAX_WALK_TIME:
-                return skeletons
-            
-            pairs_tried += 1
-            
-            # 1. No Transfer (Cheaper)
-            cands_no_tx = plan_base_no_transfer_trip(
-                o_stop, d_stop, 
-                user_origin_lat, user_origin_lng, 
-                user_dest_lat, user_dest_lng, 
-                routes_list, vehicle_indexes, 
-                system_id, stops=stops
+
+    for o_stop, _o_dist, d_stop, _d_dist in all_pairs:
+        if pairs_tried >= MAX_WALK_PAIRS:
+            break
+        if (time.perf_counter() - t0) > MAX_WALK_TIME:
+            break
+
+        pairs_tried += 1
+
+        # 1. No Transfer — always preferred over transfer for a given stop pair
+        cands_no_tx = plan_base_no_transfer_trip(
+            o_stop, d_stop,
+            user_origin_lat, user_origin_lng,
+            user_dest_lat, user_dest_lng,
+            routes_list, vehicle_indexes,
+            system_id, stops=stops
+        )
+        for c in cands_no_tx:
+            c.kind = "walk_modified"
+            skeletons.append(c)
+
+        # 2. Transfer — only if no direct route exists for this pair
+        if not cands_no_tx:
+            cands_tx = plan_base_transfer_trip(
+                o_stop, d_stop,
+                user_origin_lat, user_origin_lng,
+                user_dest_lat, user_dest_lng,
+                stops, routes_list, vehicle_indexes,
+                system_id, debug
             )
-            for c in cands_no_tx:
+            for c in cands_tx:
                 c.kind = "walk_modified"
                 skeletons.append(c)
-                
-            # 2. Transfer
-            # Only try transfer if we haven't found a direct option? 
-            # Or always try? Original logic tried transfer if no direct found.
-            # "if not cand: ... Try Transfer"
-            # It picked the BEST single candidate per pair.
-            # If No-Transfer worked, it DID NOT try Transfer for that pair?
-            # Re-reading original:
-            # cand = plan_base_no_transfer(...)
-            # if not cand: cand = plan_base_transfer(...)
-            # So yes, PREFER direct. If direct exists for a pair, don't bother with transfer for THAT pair.
-            
-            if not cands_no_tx:
-                 cands_tx = plan_base_transfer_trip(
-                     o_stop, d_stop, 
-                     user_origin_lat, user_origin_lng, 
-                     user_dest_lat, user_dest_lng, 
-                     stops, routes_list, vehicle_indexes, 
-                     system_id, debug
-                 )
-                 for c in cands_tx:
-                     c.kind = "walk_modified"
-                     skeletons.append(c)
-                     
+
     return skeletons
 
 
