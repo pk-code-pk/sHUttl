@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+
+# TODO: Replace with your actual deployed domain
+Sitemap: https://shuttl.app/sitemap.xml
