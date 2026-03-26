@@ -239,12 +239,6 @@ def debug_harvard_mapping(passiogo_stops: Optional[list] = None) -> dict:
     return result
 
 
-    with _mapping_lock:
-        _passio_to_gtfs_cache = None
-        _gtfs_to_passio_cache = None
-        _passio_stops_cache = None
-
-
 # ---------------------------------------------------------------------------
 # Route Mapping Functions
 # ---------------------------------------------------------------------------

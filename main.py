@@ -871,6 +871,7 @@ def build_trip_indexes(stops, routes, vehicles):
         "route_to_vehicles": route_to_vehicles,
         "name_to_vehicles": name_to_vehicles,
         "rid_to_name": rid_to_name,
+        "all_vehicles": vehicles,
         "next_bus_cache": {} # Request-level cache for enrichment
     }
 
@@ -925,6 +926,7 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
     route_to_vehicles = vehicle_indexes["route_to_vehicles"]
     name_to_vehicles = vehicle_indexes["name_to_vehicles"]
     rid_to_name = vehicle_indexes["rid_to_name"]
+    vehicles = vehicle_indexes.get("all_vehicles", [])
 
     result = [] 
     next_bus_cache = vehicle_indexes.get("next_bus_cache", {})
@@ -1022,13 +1024,22 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
         # We have a best_vehicle. Calculate smoothed speed.
         key = (system_id, best_vehicle.id)
         prev_states = VEHICLE_STATE.get(key, [])
-        v_lat = float(getattr(best_vehicle, "latitude", None))
-        v_lng = float(getattr(best_vehicle, "longitude", None))
+        v_lat_raw = getattr(best_vehicle, "latitude", None)
+        v_lng_raw = getattr(best_vehicle, "longitude", None)
+        if v_lat_raw is None or v_lng_raw is None:
+            route["next_bus"] = None
+            result.append(route)
+            continue
+        v_lat = float(v_lat_raw)
+        v_lng = float(v_lng_raw)
 
         prev_states.append({"lat": v_lat, "lng": v_lng, "t": datetime.now()})
         if len(prev_states) > 4:
-            prev_states = prev_states[-4:] 
-        VEHICLE_STATE[key] = prev_states 
+            prev_states = prev_states[-4:]
+        VEHICLE_STATE[key] = prev_states
+        # Evict stale entries to prevent unbounded growth (retired/rotated vehicle IDs)
+        if len(VEHICLE_STATE) > 500:
+            VEHICLE_STATE.clear()
 
         speed_ms = None
         if len(prev_states) >= 2:
@@ -1147,67 +1158,14 @@ def enrich_trip_skeleton(
         if not start_stop or not end_stop:
              continue
 
-        # Reconstruct stop objects for the segment
-        leg_stops = []
-        
-        # FIX: For base_no_transfer, we might only have [start, end] in the skeleton.
-        # We should try to hydrate the full stop list from the route if available,
-        # to ensure accurate ETA and stop counts.
-        if len(seg_skel.stops) <= 2 and seg_skel.route_id:
-             r_obj = vehicle_indexes["routes_by_id"].get(str(seg_skel.route_id))
-             # If we have the route object and it has stops
-             if r_obj and hasattr(r_obj, 'getStops'):
-                  _cache_key_leg = str(seg_skel.route_id)
-                  if route_stops_cache is not None and _cache_key_leg in route_stops_cache:
-                      all_stops = route_stops_cache[_cache_key_leg]
-                  else:
-                      all_stops = r_obj.getStops()
-                      if route_stops_cache is not None:
-                          route_stops_cache[_cache_key_leg] = all_stops
-                  start_id_str = str(seg_skel.start_stop_id)
-                  end_id_str = str(seg_skel.end_stop_id)
-                  
-                  # Find all occurrences of start and end
-                  start_indices = [i for i, s in enumerate(all_stops) if str(s.id) == start_id_str]
-                  end_indices = [i for i, s in enumerate(all_stops) if str(s.id) == end_id_str]
-                  
-                  best_slice = []
-                  min_len = float('inf')
-                  
-                  # Try all pairs of (start, end)
-                  for s_idx in start_indices:
-                      for e_idx in end_indices:
-                          # Forward (linear) case
-                          if s_idx <= e_idx:
-                              sub = all_stops[s_idx : e_idx+1]
-                              if len(sub) < min_len:
-                                  min_len = len(sub)
-                                  best_slice = sub
-                          else:
-                              # Wrap-around case (loop)
-                              # Assuming route is circular: [s_idx:] + [:e_idx+1]
-                              sub = all_stops[s_idx:] + all_stops[:e_idx+1]
-                              if len(sub) < min_len:
-                                  min_len = len(sub)
-                                  best_slice = sub
-                                  
-                  if best_slice:
-                       leg_stops = [stopdict(s) for s in best_slice]
-        
-        # If hydration failed or wasn't needed, use skeleton stops
-        if not leg_stops:
-            for sid in seg_skel.stops:
-                s_obj = get_stop(sid)
-                if s_obj:
-                    leg_stops.append(stopdict(s_obj))
-
-        # Build full sorted route stop list for accurate vehicle projection.
-        # leg_stops only covers boarding→destination, so projecting a vehicle onto
-        # that short arc gives wrong distances for buses elsewhere on the loop.
-        # We need the complete route in travel order.
+        # Build full sorted route stop list first (sorted by routesAndPositions sequence).
+        # This is the source of truth for travel order — used for both vehicle projection
+        # and for slicing the leg stop list below.
         rid_str = str(seg_skel.route_id)
         rr = vehicle_indexes["routes_by_id"].get(rid_str)
-        full_route_stops: list[dict] = leg_stops  # fallback
+        full_route_stops: list[dict] = []
+        sorted_route_stop_objs: list = []
+
         if rr and hasattr(rr, "getStops"):
             _cache_key_full = str(seg_skel.route_id)
             if route_stops_cache is not None and _cache_key_full in route_stops_cache:
@@ -1226,8 +1184,50 @@ def enrich_trip_skeleton(
                         return int(positions)
                     except (TypeError, ValueError):
                         return 9999
-                sorted_route_stops = sorted(all_route_stops, key=_stop_seq)
-                full_route_stops = [stopdict(s) for s in sorted_route_stops]
+                sorted_route_stop_objs = sorted(all_route_stops, key=_stop_seq)
+                full_route_stops = [stopdict(s) for s in sorted_route_stop_objs]
+
+        # Reconstruct leg_stops (boarding→destination slice) from the already-sorted
+        # stop objects. Previously this sliced unsorted PassioGO API order, which caused
+        # wrong stops (e.g. Sever Gate in a Winthrop→SEC trip) and inflated ETAs.
+        leg_stops = []
+        if len(seg_skel.stops) <= 2 and sorted_route_stop_objs:
+            start_id_str = str(seg_skel.start_stop_id)
+            end_id_str = str(seg_skel.end_stop_id)
+
+            start_indices = [i for i, s in enumerate(sorted_route_stop_objs) if str(s.id) == start_id_str]
+            end_indices = [i for i, s in enumerate(sorted_route_stop_objs) if str(s.id) == end_id_str]
+
+            best_slice = []
+            min_len = float('inf')
+
+            for s_idx in start_indices:
+                for e_idx in end_indices:
+                    if s_idx <= e_idx:
+                        sub = sorted_route_stop_objs[s_idx : e_idx + 1]
+                        if len(sub) < min_len:
+                            min_len = len(sub)
+                            best_slice = sub
+                    else:
+                        # Wrap-around case for loop routes
+                        sub = sorted_route_stop_objs[s_idx:] + sorted_route_stop_objs[:e_idx + 1]
+                        if len(sub) < min_len:
+                            min_len = len(sub)
+                            best_slice = sub
+
+            if best_slice:
+                leg_stops = [stopdict(s) for s in best_slice]
+
+        # If hydration failed or wasn't needed, use skeleton stops
+        if not leg_stops:
+            for sid in seg_skel.stops:
+                s_obj = get_stop(sid)
+                if s_obj:
+                    leg_stops.append(stopdict(s_obj))
+
+        # If full_route_stops couldn't be built, fall back to leg_stops
+        if not full_route_stops:
+            full_route_stops = leg_stops
 
         # Build route payload for enrichment
         payload_route = {

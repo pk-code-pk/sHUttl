@@ -7,7 +7,6 @@ import {
     metersToMinutes,
     formatMinutesLabel,
     isWalkReasonable,
-    etaSecondsToMinutes,
 } from "../utils/timeAndDistance";
 import { formatEtaSeconds } from "../utils/time";
 import logo from "../assets/logo.svg";
@@ -541,14 +540,7 @@ export const TripPlannerPanel = ({
 
     const normalizedSegments = useMemo(() => {
         if (!trip || !trip.segments) return [];
-        return trip.segments.map((seg) => {
-            const etaSeconds = seg.next_bus?.eta_to_boarding_stop_s ?? seg.next_bus?.eta_to_origin_stop ?? null;
-            const etaMin = etaSecondsToMinutes(etaSeconds);
-            return {
-                ...seg,
-                _etaMinutes: etaMin,
-            };
-        });
+        return trip.segments;
     }, [trip]);
 
     const hasTrip = !!trip && normalizedSegments.length > 0;
@@ -559,7 +551,7 @@ export const TripPlannerPanel = ({
 
     const destWalkM = trip?.destination.distance_m ?? 0;
     const destWalkMin = metersToMinutes(destWalkM);
-    const shouldShowDestWalk = destWalkM > 5; // Show even for short walks to destination
+    const shouldShowDestWalk = destWalkM > 5 && destWalkM <= 5000; // Show even for short walks, but cap at reasonable distance
 
     const numSegments = normalizedSegments.length;
     const numTransfers = Math.max(0, numSegments - 1);
