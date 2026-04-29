@@ -364,6 +364,8 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                         url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
                         maxZoom={20}
                         subdomains="abcd"
+                        keepBuffer={4}
+                        updateWhenZooming={false}
                     />
 
                     {/* Route polylines (glowing) */}

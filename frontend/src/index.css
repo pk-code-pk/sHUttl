@@ -5,6 +5,21 @@
   background: #0b0f17;
 }
 
+/* Prevent white flash on tiles before image data loads */
+.leaflet-tile {
+  background: #0b0f17;
+}
+
+.leaflet-tile-pane {
+  background: #0b0f17;
+}
+
+/* During zoom animation the layer is scaled via CSS transform;
+   fill uncovered edges with dark instead of white */
+.leaflet-zoom-anim .leaflet-zoom-animated {
+  background: #0b0f17;
+}
+
 /* Stop Marker Hitbox - large clickable area */
 .stop-marker-container {
   position: relative;
