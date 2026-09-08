@@ -6,7 +6,7 @@ import L from 'leaflet';
 import type { LatLngExpression } from 'leaflet';
 import { ShuttleMarker } from './ShuttleMarker';
 import type { Stop, Vehicle, RoutePath, TripResponse, TripSegment } from './types';
-import { API_BASE_URL } from '@/config';
+import { API_BASE_URL, MAP_ATTRIBUTION, MAP_MAX_ZOOM, MAP_SUBDOMAINS, MAP_TILE_URL } from '@/config';
 
 // Fallback color palette for routes without a defined color
 const FALLBACK_ROUTE_COLORS = [
@@ -358,12 +358,13 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                         setMap={setMapInstance}
                     />
 
-                    {/* Carto Dark Matter - no auth required */}
+                    {/* Basemap. Provider is configurable; see config.ts for why
+                        the CARTO URL that used to be hardcoded here had to go. */}
                     <TileLayer
-                        attribution='&copy; <a href="https://carto.com/">CARTO</a>, &copy; <a href="http://openstreetmap.org">OpenStreetMap</a> contributors'
-                        url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-                        maxZoom={20}
-                        subdomains="abcd"
+                        attribution={MAP_ATTRIBUTION}
+                        url={MAP_TILE_URL}
+                        maxZoom={MAP_MAX_ZOOM}
+                        {...(MAP_SUBDOMAINS ? { subdomains: MAP_SUBDOMAINS } : {})}
                     />
 
                     {/* Route polylines (glowing) */}
