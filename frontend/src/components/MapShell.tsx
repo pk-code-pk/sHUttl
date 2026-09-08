@@ -6,7 +6,7 @@ import L from 'leaflet';
 import type { LatLngExpression } from 'leaflet';
 import { ShuttleMarker } from './ShuttleMarker';
 import type { Stop, Vehicle, RoutePath, TripResponse, TripSegment } from './types';
-import { API_BASE_URL, MAP_ATTRIBUTION, MAP_MAX_ZOOM, MAP_SUBDOMAINS, MAP_TILE_URL } from '@/config';
+import { API_BASE_URL, MAP_ATTRIBUTION, MAP_MAX_NATIVE_ZOOM, MAP_MAX_ZOOM, MAP_SUBDOMAINS, MAP_TILE_URL } from '@/config';
 
 // Fallback color palette for routes without a defined color
 const FALLBACK_ROUTE_COLORS = [
@@ -36,6 +36,41 @@ export interface FocusDeparture {
     to_stops: { id: string; name: string; lat: number; lng: number; arrives_at: string }[];
 }
 
+
+/** Index of the polyline vertex nearest a point. Squared degrees is fine for
+ * ordering over a 3 km campus. */
+function nearestVertex(path: { lat: number; lng: number }[], lat: number, lng: number): number {
+    let best = 0;
+    let bestD = Infinity;
+    for (let i = 0; i < path.length; i++) {
+        const d = (path[i].lat - lat) ** 2 + (path[i].lng - lng) ** 2;
+        if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+}
+
+/**
+ * The stretch of route between two points, following travel direction.
+ *
+ * Fitting the whole loop is the wrong framing: Allston Loop runs from Allston
+ * to the Quad, so fitting all of it zooms out until nothing is legible. What
+ * matters is the part you would actually ride, so the path is cut from the
+ * boarding stop to the last onward stop — wrapping past the end of the loop
+ * when the ride does.
+ */
+function slicePath(
+    path: { lat: number; lng: number }[],
+    from: { lat: number; lng: number },
+    to: { lat: number; lng: number },
+): { lat: number; lng: number }[] {
+    if (path.length < 2) return path;
+    const a = nearestVertex(path, from.lat, from.lng);
+    const b = nearestVertex(path, to.lat, to.lng);
+    if (a === b) return path;
+    if (a < b) return path.slice(a, b + 1);
+    // Wraps past the end of the loop.
+    return [...path.slice(a), ...path.slice(0, b + 1)];
+}
 
 function computeTripBounds(trip: TripResponse | null): L.LatLngBounds | null {
     if (!trip) return null;
@@ -93,12 +128,17 @@ function MapController({
     // or half of every fitted route is hidden behind the UI.
     const fitOptions = useCallback((): L.FitBoundsOptions => {
         const isNarrow = window.innerWidth < 768;
+        // maxZoom keeps a fit on a short ride from slamming into the deepest
+        // zoom, where the upscaled basemap is blurriest and the surroundings
+        // are lost. A two-stop hop frames at neighbourhood scale, not doorstep.
+        const common = { maxZoom: Math.min(MAP_MAX_NATIVE_ZOOM, 16) };
         return isNarrow
             ? {
+                  ...common,
                   paddingTopLeft: [30, 40],
                   paddingBottomRight: [30, Math.round(window.innerHeight * 0.48)],
               }
-            : { paddingTopLeft: [430, 60], paddingBottomRight: [60, 60] };
+            : { ...common, paddingTopLeft: [430, 60], paddingBottomRight: [60, 60] };
     }, []);
 
     // Fit the whole network on launch, so the opening view shows every route
@@ -180,16 +220,40 @@ export const MapShell = ({ systemId, trip, userLocation, focusDeparture }: MapSh
 
     const tripBounds = useMemo(() => computeTripBounds(trip), [trip]);
 
-    // Fit to the selected departure when there is one: the boarding stop plus
-    // everywhere that bus goes, which is the answer to "where would I end up".
+    // Geometry of the selected route, and the portion of it the rider would
+    // travel. Route paths are fetched on selection, so both are null for the
+    // first render or two.
+    const focusFullPath = useMemo(() => {
+        if (!focusDeparture) return null;
+        const r = routes.find((x) => x.route_id === focusDeparture.route_id);
+        return r?.path?.length ? r.path : null;
+    }, [focusDeparture, routes]);
+
+    const focusRoutePath = useMemo(() => {
+        if (!focusDeparture || !focusFullPath) return null;
+        const last = focusDeparture.to_stops[focusDeparture.to_stops.length - 1];
+        if (!last) return focusFullPath;
+        return slicePath(focusFullPath, focusDeparture.stop, last);
+    }, [focusDeparture, focusFullPath]);
+
+    // Fit to the stretch being ridden, so the whole drawn path is on screen
+    // without zooming out to a loop the rider is not taking. Falls back to the
+    // stops until geometry arrives, so the map frames something immediately.
     const focusBounds = useMemo(() => {
         if (!focusDeparture) return null;
+
+        if (focusRoutePath) {
+            return L.latLngBounds(
+                focusRoutePath.map((p) => [p.lat, p.lng] as [number, number]),
+            );
+        }
+
         const pts: [number, number][] = [
             [focusDeparture.stop.lat, focusDeparture.stop.lng],
             ...focusDeparture.to_stops.map((t) => [t.lat, t.lng] as [number, number]),
         ];
         return pts.length ? L.latLngBounds(pts) : null;
-    }, [focusDeparture]);
+    }, [focusDeparture, focusRoutePath]);
 
     const activeTripBounds = focusBounds ?? tripBounds;
     const [mapInstance, setMapInstance] = useState<L.Map | null>(null);
@@ -378,10 +442,14 @@ export const MapShell = ({ systemId, trip, userLocation, focusDeparture }: MapSh
         // different departure re-fits the map instead of being treated as the
         // same view.
         if (focusDeparture) {
-            return `focus:${focusDeparture.route_id}:${focusDeparture.stop.id}`;
+            // The path suffix matters: route geometry loads after the
+            // selection, and without it the fit would stay on the provisional
+            // stops-only bounds and never widen to the full route.
+            const stage = focusRoutePath ? 'path' : 'stops';
+            return `focus:${focusDeparture.route_id}:${focusDeparture.stop.id}:${stage}`;
         }
         return computeTripKey(trip);
-    }, [trip, focusDeparture]);
+    }, [trip, focusDeparture, focusRoutePath]);
 
     // Auto-off "Show Routes" on first trip only
     const previousTripRef = useRef<TripResponse | null>(null);
@@ -429,6 +497,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusDeparture }: MapSh
                     key={systemId}
                     center={center}
                     zoom={15}
+                    maxZoom={MAP_MAX_ZOOM}
                     className="h-full w-full bg-neutral-900"
                     scrollWheelZoom={true}
                     zoomControl={false}
@@ -447,6 +516,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusDeparture }: MapSh
                         attribution={MAP_ATTRIBUTION}
                         url={MAP_TILE_URL}
                         maxZoom={MAP_MAX_ZOOM}
+                        maxNativeZoom={MAP_MAX_NATIVE_ZOOM}
                         {...(MAP_SUBDOMAINS ? { subdomains: MAP_SUBDOMAINS } : {})}
                     />
 
@@ -487,27 +557,21 @@ export const MapShell = ({ systemId, trip, userLocation, focusDeparture }: MapSh
                             // Other routes recede while a departure is selected.
                             const dimmed = Boolean(focusDeparture);
 
+                            // One solid line per route. The translucent glow
+                            // underlay that used to sit beneath every route
+                            // muddied adjacent routes into a haze and made the
+                            // colours read washed out; brightness now comes
+                            // from the colour itself.
                             return (
-                                <React.Fragment key={r.route_id}>
-                                    {/* Glow layer (thicker, translucent) */}
-                                    <Polyline
-                                        positions={positions}
-                                        pathOptions={{
-                                            color,
-                                            weight: 10,
-                                            opacity: dimmed ? 0.06 : 0.28,
-                                        }}
-                                    />
-                                    {/* Core line (thinner, bright) */}
-                                    <Polyline
-                                        positions={positions}
-                                        pathOptions={{
-                                            color,
-                                            weight: 4,
-                                            opacity: dimmed ? 0.18 : 0.95,
-                                        }}
-                                    />
-                                </React.Fragment>
+                                <Polyline
+                                    key={r.route_id}
+                                    positions={positions}
+                                    pathOptions={{
+                                        color,
+                                        weight: 4,
+                                        opacity: dimmed ? 0.25 : 1,
+                                    }}
+                                />
                             );
                         })}
 

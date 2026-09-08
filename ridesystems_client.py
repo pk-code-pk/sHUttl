@@ -615,6 +615,29 @@ def _pick_project(payload: dict) -> dict:
     return projects[0]
 
 
+# Route colours, overriding the operator's.
+#
+# Theirs are unusable on a dark map: Allston Loop is #730000, a maroon that
+# reads as black, and Quad Express and Quad Yard Express are both #136D1C —
+# the same dark green for two different routes, which no legend can fix.
+#
+# These are nine distinct hues at high saturation, spaced so that no two are
+# confusable at the width of a map line, and bright enough to hold up against
+# a grey basemap. Hue is kept near the operator's where theirs was already
+# meaningful, so riders who know "the purple one" still recognise it.
+ROUTE_COLOR_OVERRIDES = {
+    "AL": "#EA4335",    # red — Allston Loop, was an unreadable maroon
+    "XSEC": "#FA7B17",  # orange
+    "OVNT": "#FBBC04",  # amber
+    "QYE": "#A8E000",   # lime — was identical to QE
+    "QSTA": "#34A853",  # green
+    "QE": "#12B5CB",    # teal — was identical to QYE
+    "ME": "#4285F4",    # blue
+    "QSEC": "#A142F4",  # purple, as theirs was
+    "AC": "#F439A0",    # pink, close to their magenta
+}
+
+
 def _normalize_color(color: Optional[str]) -> Optional[str]:
     if not color:
         return None
@@ -622,6 +645,16 @@ def _normalize_color(color: Optional[str]) -> Optional[str]:
     if not color:
         return None
     return color if color.startswith("#") else f"#{color}"
+
+
+def route_color(route_id: str, upstream: Optional[str]) -> Optional[str]:
+    """Our colour for a route, falling back to the operator's.
+
+    A route Harvard adds later still gets a colour — theirs — rather than no
+    colour at all, and the override table is the only thing to edit.
+    """
+    override = ROUTE_COLOR_OVERRIDES.get(str(route_id).upper())
+    return override or _normalize_color(upstream)
 
 
 def _build_mapdata() -> _MapData:
@@ -745,7 +778,7 @@ def _build_mapdata() -> _MapData:
                 extra={"route": rid, "stops": unserved},
             )
 
-        color = _normalize_color(r.get("Color"))
+        color = route_color(rid, r.get("Color"))
         routes.append(
             RSRoute(
                 id=rid,
