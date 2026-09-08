@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import { Marker } from "react-leaflet";
 import type L from "leaflet";
-import { bearingDeg, lerp, makeVehicleChevronIcon } from "./mapUtils";
+import { bearingDeg, lerp, makeVehicleIcon } from "./mapUtils";
 import type { Vehicle } from "./types";
 
 export function ShuttleMarker({
@@ -17,7 +17,7 @@ export function ShuttleMarker({
     const rotRef = useRef<number>(0);
 
     // initial icon
-    const icon = useMemo(() => makeVehicleChevronIcon(0, v.color), [v.color]);
+    const icon = useMemo(() => makeVehicleIcon(0, v.color), [v.color]);
 
     useEffect(() => {
         const marker = markerRef.current;
@@ -33,7 +33,7 @@ export function ShuttleMarker({
         // compute rotation
         const rotation = v.heading != null ? v.heading : bearingDeg(prev, next);
         rotRef.current = rotation;
-        marker.setIcon(makeVehicleChevronIcon(rotation, v.color));
+        marker.setIcon(makeVehicleIcon(rotation, v.color));
 
         const start = performance.now();
         const tick = (now: number) => {

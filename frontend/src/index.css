@@ -124,26 +124,20 @@
   }
 }
 
-/* Shuttle vehicles: solid, no glow. The coloured halo this used to cast was
-   the brightest thing on the map, bled across adjacent routes, and made the
-   route colours read as washed out rather than bright. Route identity now
-   comes from a hard ring in the route colour. */
+/* Shuttle vehicles: a bare arrowhead, no disc behind it and no glow. The disc
+   this used to sit in cost most of the marker's area to chrome and made the
+   arrow too small to read a heading from; the arrow now carries its own dark
+   outline instead. Colour and shading are set per marker in mapUtils. */
 .vehicle-marker-inner {
-  background: #0a0a0a;
-  border-radius: 999px;
-  padding: 4px;
-  border: 2px solid var(--vehicle-color, #ffffff);
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-/* Ensure SVG itself uses currentColor so we can tint it */
 .vehicle-marker-inner svg {
   display: block;
-  width: 18px;
-  height: 18px;
-  color: var(--vehicle-color, #ffffff);
+  width: 100%;
+  height: 100%;
 }
 
 :root {
