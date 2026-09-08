@@ -238,24 +238,6 @@ body {
 }
 
 /* Trip segment polyline pulsing animation */
-@keyframes tripSegmentPulse {
-  0% {
-    opacity: 0.6;
-  }
-
-  50% {
-    opacity: 1;
-  }
-
-  100% {
-    opacity: 0.6;
-  }
-}
-
-.trip-segment-active {
-  animation: tripSegmentPulse 1.8s ease-in-out infinite;
-}
-
 /* Trip endpoint markers (bright white with radar glow) */
 .trip-endpoint-container {
   position: relative;

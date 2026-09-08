@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MapContainer, TileLayer, Popup, Polyline, useMap, Marker, CircleMarker } from 'react-leaflet';
 import { Navigation as NavigationIcon, Settings } from 'lucide-react';
 import clsx from 'clsx';
@@ -522,24 +522,27 @@ export const MapShell = ({ systemId, trip, userLocation, focusDeparture }: MapSh
 
                     {/* Route polylines (glowing). With a departure selected,
                         its route stays bright and the others drop back so the
-                        one you are being told about is legible. */}
-                    {/* The selected departure's route always draws, even with
-                        "Show Routes" off — being told a bus is coming is not
-                        useful without seeing where it goes. */}
-                    {focusDeparture && (() => {
+                        one you are being told about is legible.
+
+                        It draws even with "Show Routes" off: being told a bus
+                        is coming is not useful without seeing where it goes.
+                        The stretch being ridden is solid; the rest of the loop
+                        is a thin line for context, not a glow. */}
+                    {focusDeparture && focusFullPath && (() => {
                         const r = routes.find((x) => x.route_id === focusDeparture.route_id);
-                        if (!r?.path?.length) return null;
-                        const positions: LatLngExpression[] = r.path.map((p) => [p.lat, p.lng]);
-                        const color = r.color || focusDeparture.color || '#a51c30';
+                        const color = r?.color || focusDeparture.color || '#a51c30';
+                        const rest: LatLngExpression[] = focusFullPath.map((p) => [p.lat, p.lng]);
+                        const ridden: LatLngExpression[] = (focusRoutePath ?? focusFullPath)
+                            .map((p) => [p.lat, p.lng]);
                         return (
                             <>
                                 <Polyline
-                                    positions={positions}
-                                    pathOptions={{ color, weight: 14, opacity: 0.30 }}
+                                    positions={rest}
+                                    pathOptions={{ color, weight: 2, opacity: 0.3 }}
                                 />
                                 <Polyline
-                                    positions={positions}
-                                    pathOptions={{ color, weight: 5, opacity: 0.95 }}
+                                    positions={ridden}
+                                    pathOptions={{ color, weight: 5, opacity: 1 }}
                                 />
                             </>
                         );
@@ -616,30 +619,20 @@ export const MapShell = ({ systemId, trip, userLocation, focusDeparture }: MapSh
                         </CircleMarker>
                     )}
 
-                    {/* Planned trip path (if any) - Route-colored with pulsing glow */}
+                    {/* Planned trip path, solid in the route colour. This drew
+                        a 14px translucent layer under a 5px core, both running
+                        an opacity animation — the pulse read as a glow and made
+                        the colour look washed out at every point in the cycle. */}
                     {tripPolylines.map((line) => (
-                        <React.Fragment key={`trip-${line.idx}`}>
-                            {/* Outer glow layer */}
-                            <Polyline
-                                positions={line.positions}
-                                pathOptions={{
-                                    color: line.color,
-                                    weight: 14,
-                                    opacity: 0.35,
-                                    className: 'trip-segment-active'
-                                }}
-                            />
-                            {/* Core line */}
-                            <Polyline
-                                positions={line.positions}
-                                pathOptions={{
-                                    color: line.color,
-                                    weight: 5,
-                                    opacity: 0.95,
-                                    className: 'trip-segment-active'
-                                }}
-                            />
-                        </React.Fragment>
+                        <Polyline
+                            key={`trip-${line.idx}`}
+                            positions={line.positions}
+                            pathOptions={{
+                                color: line.color,
+                                weight: 6,
+                                opacity: 1,
+                            }}
+                        />
                     ))}
 
                     {/* Stops: Glowing Dots with larger hitboxes */}
