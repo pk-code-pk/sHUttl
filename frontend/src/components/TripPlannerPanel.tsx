@@ -101,7 +101,7 @@ function CandidateCard({ candidate, isSelected, onSelect }: CandidateCardProps) 
             className={clsx(
                 "w-full rounded-xl p-2.5 text-left border transition-all",
                 isSelected
-                    ? "bg-crimson/10 border-crimson/40"
+                    ? "bg-neutral-100/10 border-neutral-100/40"
                     : "bg-neutral-900/70 border-white/5 hover:bg-white/5 hover:border-white/10"
             )}
         >
@@ -729,7 +729,7 @@ export const TripPlannerPanel = ({
             >
                 <div className={clsx(
                     "w-12 h-1.5 rounded-full bg-neutral-600/50 transition-colors",
-                    sheetState === 'expanded' && "bg-crimson/50",
+                    sheetState === 'expanded' && "bg-neutral-400/60",
                     sheetState === 'minimized' && "bg-blue-500/30"
                 )} />
             </motion.div>
@@ -755,7 +755,7 @@ export const TripPlannerPanel = ({
                             className={clsx(
                                 "flex-1 rounded-lg py-1.5 text-[11px] font-bold transition-colors",
                                 mode === m.id
-                                    ? "bg-crimson text-white"
+                                    ? "bg-neutral-100 text-neutral-950"
                                     : "text-neutral-400 hover:text-white"
                             )}
                         >
@@ -811,7 +811,7 @@ export const TripPlannerPanel = ({
                                         setTimeout(() => setOriginOpen(false), 120);
                                     }}
                                     placeholder="Search for a stop..."
-                                    className="w-full bg-neutral-800/70 border border-white/5 focus:border-crimson/50 rounded-lg px-3 py-2 text-[16px] md:text-xs text-white outline-none transition-all placeholder:text-neutral-600"
+                                    className="w-full bg-neutral-800/70 border border-white/5 focus:border-neutral-400/60 rounded-lg px-3 py-2 text-[16px] md:text-xs text-white outline-none transition-all placeholder:text-neutral-600"
                                 />
 
                                 <button
@@ -820,7 +820,7 @@ export const TripPlannerPanel = ({
                                     className={clsx(
                                         "absolute right-2 top-1.5 px-2 py-1 rounded-md text-[9px] font-bold transition-all border",
                                         originUseCurrentLocation
-                                            ? "bg-crimson/20 border-crimson/40 text-crimson"
+                                            ? "bg-neutral-100 border-neutral-100 text-neutral-950"
                                             : "bg-neutral-900 border-white/5 text-neutral-400 hover:text-white"
                                     )}
                                 >
@@ -872,7 +872,7 @@ export const TripPlannerPanel = ({
                                     setOriginQuery(stop ? stop.name : '');
                                     resetLiveState();
                                 }}
-                                className="w-full bg-neutral-800/70 border border-white/5 focus:border-crimson/50 rounded-lg px-3 py-2 text-[16px] md:text-xs text-white outline-none transition-all appearance-none"
+                                className="w-full bg-neutral-800/70 border border-white/5 focus:border-neutral-400/60 rounded-lg px-3 py-2 text-[16px] md:text-xs text-white outline-none transition-all appearance-none"
                                 disabled={loadingStops || !system}
                             >
                                 <option value="">{loadingStops ? 'Loading stops...' : 'Select origin...'}</option>
@@ -888,7 +888,7 @@ export const TripPlannerPanel = ({
                     <div className="space-y-1.5 relative">
                         <div className="flex items-center justify-between">
                             <div className="flex items-center gap-1.5 px-0.5">
-                                <MapPin size={12} className="text-crimson" />
+                                <MapPin size={12} className="text-neutral-400" />
                                 <span className="text-[10px] font-bold text-neutral-500 uppercase tracking-wider">To</span>
                             </div>
                             <button
@@ -918,7 +918,7 @@ export const TripPlannerPanel = ({
                                         setTimeout(() => setDestOpen(false), 120);
                                     }}
                                     placeholder="Search for a stop..."
-                                    className="w-full bg-neutral-800/70 border border-white/5 focus:border-crimson/50 rounded-lg px-3 py-2 text-[16px] md:text-xs text-white outline-none transition-all placeholder:text-neutral-600"
+                                    className="w-full bg-neutral-800/70 border border-white/5 focus:border-neutral-400/60 rounded-lg px-3 py-2 text-[16px] md:text-xs text-white outline-none transition-all placeholder:text-neutral-600"
                                 />
 
                                 {/* Suggestions */}
@@ -964,7 +964,7 @@ export const TripPlannerPanel = ({
                                     setDestQuery(stop ? stop.name : '');
                                     resetLiveState();
                                 }}
-                                className="w-full bg-neutral-800 border border-white/5 focus:border-crimson/50 rounded-lg px-3 py-2 text-[16px] md:text-xs text-white outline-none transition-all appearance-none"
+                                className="w-full bg-neutral-800 border border-white/5 focus:border-neutral-400/60 rounded-lg px-3 py-2 text-[16px] md:text-xs text-white outline-none transition-all appearance-none"
                                 disabled={loadingStops || !system}
                             >
                                 <option value="">{loadingStops ? 'Loading stops...' : 'Select destination...'}</option>

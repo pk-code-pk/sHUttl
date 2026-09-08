@@ -1,8 +1,60 @@
 @import "tailwindcss";
 
+/* ---------------------------------------------------------------------------
+   Palette
+
+   Principle: hue is data. Nine route colours have to stay distinguishable on
+   the map, so the interface itself spends none — every surface and label is a
+   step on one cool slate ramp, and saturated colour means "this is a route".
+
+   The ramp overrides Tailwind's own `neutral`, which is achromatic. That reads
+   as a grey box sitting on top of the basemap rather than part of it; a blue
+   cast puts the panel in the same family as the map beneath it, and every
+   existing neutral-* class picks the new values up without being rewritten.
+--------------------------------------------------------------------------- */
+@theme {
+  --color-neutral-50: #f5f8fb;
+  --color-neutral-100: #e9eef5;
+  --color-neutral-200: #d7dfe9;
+  --color-neutral-300: #b9c5d5;
+  --color-neutral-400: #94a4b7;
+  --color-neutral-500: #6c7d93;
+  --color-neutral-600: #3b4a5c;
+  --color-neutral-700: #26313f;
+  --color-neutral-800: #18212d;
+  --color-neutral-900: #0d141e;
+  --color-neutral-950: #070b12;
+
+  /* Harvard crimson, at its official value rather than the muddy #A20202 that
+     was here. Reserved for identity — the logo and trip endpoints. It is
+     deliberately not used for chrome: the Allston Loop owns red on this map,
+     and a red interface competing with a red route is the whole problem.
+
+     Note these previously lived in :root, where Tailwind v4 does not look, so
+     every bg-crimson / text-crimson / border-crimson class in the app was a
+     silent no-op. They render now. */
+  --color-crimson: #a51c30;
+  --color-crimson-dark: #7f1526;
+  --color-crimson-light: #c8324a;
+}
+
 /* Map Styles */
 .leaflet-container {
-  background: #0b0f17;
+  background: #070b12;
+}
+
+/* The basemap arrives as mid-grey, several stops lighter than the panel above
+   it. Bringing it down into the same value range is what stops the two
+   reading as separate applications, and the darker ground is what lets the
+   route colours carry. Desaturating first keeps its warm cast from fighting
+   the slate. */
+.leaflet-tile-pane {
+  /* Tuned against screenshots rather than by eye. At brightness 0.52 the map
+     went legible-dark to void: street names disappeared and the ground lost
+     its geography, which costs orientation — the reason to show a map at all.
+     0.72 keeps the streets readable while sitting a step above the panel, so
+     map and sheet still read as figure and ground rather than one flat mass. */
+  filter: brightness(0.72) saturate(0.6) contrast(1.06);
 }
 
 /* Stop Marker Hitbox - large clickable area */
@@ -36,7 +88,7 @@
 .stop-marker-dot--crimson {
   width: 10px;
   height: 10px;
-  background: #ef4444;
+  background: var(--color-crimson-light);
   border: 1.5px solid rgba(0, 0, 0, 0.5);
 }
 
@@ -50,7 +102,7 @@
   height: 10px;
   transform: translate(-50%, -50%);
   border-radius: 9999px;
-  border: 2px solid rgba(239, 68, 68, 0.8);
+  border: 2px solid rgba(200, 50, 74, 0.8);
   animation: radar-pulse 1.8s ease-out infinite;
 }
 
@@ -64,7 +116,7 @@
   height: 10px;
   transform: translate(-50%, -50%);
   border-radius: 9999px;
-  border: 2px solid rgba(239, 68, 68, 0.8);
+  border: 2px solid rgba(200, 50, 74, 0.8);
   animation: radar-pulse 1.8s ease-out infinite 0.9s;
 }
 
@@ -143,12 +195,6 @@
   display: block;
   width: 100%;
   height: 100%;
-}
-
-:root {
-  --color-crimson: #A20202;
-  --color-crimson-dark: #8a0101;
-  --color-crimson-light: #c41e1e;
 }
 
 /* Custom slim scrollbar */

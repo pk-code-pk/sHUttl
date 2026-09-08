@@ -218,7 +218,7 @@ export const NextBusPanel = ({ systemId, onFocusDeparture }: NextBusPanelProps) 
             {/* Where we think you are */}
             <div className="flex items-center justify-between shrink-0 pb-2">
                 <div className="flex items-center gap-1.5 min-w-0">
-                    <LocateFixed size={12} className="text-crimson shrink-0" />
+                    <LocateFixed size={12} className="text-neutral-300 shrink-0" />
                     <span className="text-[11px] text-neutral-300 truncate">
                         {locating
                             ? 'Finding you…'
@@ -269,7 +269,7 @@ export const NextBusPanel = ({ systemId, onFocusDeparture }: NextBusPanelProps) 
                     <select
                         value={manualStopId}
                         onChange={(e) => chooseStop(e.target.value)}
-                        className="w-full rounded-lg border border-white/5 bg-neutral-800/60 px-2.5 py-2 text-[11px] text-white outline-none focus:border-crimson/50"
+                        className="w-full rounded-lg border border-white/5 bg-neutral-800/60 px-2.5 py-2 text-[11px] text-white outline-none focus:border-neutral-400/60"
                     >
                         <option value="">Choose a stop…</option>
                         {stops.map((s) => (
@@ -300,7 +300,7 @@ export const NextBusPanel = ({ systemId, onFocusDeparture }: NextBusPanelProps) 
                         <button
                             type="button"
                             onClick={() => setShowStopPicker(true)}
-                            className="mt-2 text-[10px] font-bold uppercase tracking-wider text-crimson hover:text-white"
+                            className="mt-2 text-[10px] font-bold uppercase tracking-wider text-neutral-300 hover:text-white"
                         >
                             Or pick a stop
                         </button>
@@ -369,7 +369,7 @@ const DepartureRow = ({
         transition={{ duration: 0.18 }}
         className={clsx(
             'overflow-hidden rounded-xl transition-colors',
-            open ? 'bg-neutral-800/80 ring-1 ring-crimson/40' : 'bg-neutral-800/40',
+            open ? 'bg-neutral-800/80 ring-1 ring-neutral-100/30' : 'bg-neutral-800/40',
         )}
     >
         <button
