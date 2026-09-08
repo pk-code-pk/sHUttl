@@ -121,28 +121,33 @@ export function makeVehicleChevronIcon(rotationDeg: number, color: string | null
 
 // A top-down bus, pointing up, in the same 64-unit frame as the arrow.
 //
-// Deliberately simplified from a detailed illustration: at 30px on a phone,
-// wheels, mirrors, gradients and a drop shadow collapse into noise. What
-// survives at that size is the silhouette, the windscreen that says which end
-// is the front, and the colour. Everything else is cost.
-const BUS_BODY = "M23 9 h18 a7 7 0 0 1 7 7 v32 a7 7 0 0 1 -7 7 h-18 a7 7 0 0 1 -7 -7 v-32 a7 7 0 0 1 7 -7 z";
-const BUS_WINDSCREEN = "M24 13 h16 a4 4 0 0 1 4 4 v4 h-24 v-4 a4 4 0 0 1 4 -4 z";
-const BUS_REAR = "M20 47 h24 v4 a4 4 0 0 1 -4 4 h-16 a4 4 0 0 1 -4 -4 z";
+// Simplified from a detailed illustration on purpose: at map size, wheels,
+// mirrors, gradients and a drop shadow collapse into noise. Four features
+// survive and carry the whole read — silhouette, a windscreen wide enough to
+// mark the front, a roof panel that separates body from glass, and colour.
+const BUS_BODY =
+  "M24 8 h16 a6 6 0 0 1 6 6 v36 a6 6 0 0 1 -6 6 h-16 a6 6 0 0 1 -6 -6 v-36 a6 6 0 0 1 6 -6 z";
+// Trapezoid, wider at the base: reads as a raked windscreen rather than a
+// second roof panel, which is what tells you which end is the front.
+const BUS_WINDSCREEN = "M26 11 h12 l4 8 h-20 z";
+const BUS_ROOF = "M22 22 h20 v22 h-20 z";
+const BUS_ROOF_RIBS = "M22 28 h20 M22 34 h20 M22 40 h20";
+const BUS_REAR = "M22 47 h20 v5 a4 4 0 0 1 -4 4 h-12 a4 4 0 0 1 -4 -4 z";
 
 /**
- * A bus-shaped vehicle marker, route-coloured with the same lit/shaded split
- * as the arrow.
+ * A bus-shaped vehicle marker, route-coloured, with the same lit and shaded
+ * facets as the arrow so a bus and its route line are obviously related.
  *
- * Reads as a vehicle rather than a cursor, at the cost of heading legibility:
- * an arrow's direction is unmistakable at a glance, a rectangle's is not, and
- * the windscreen is the only cue about which way it faces. Selected with
- * VITE_VEHICLE_ICON=bus.
+ * Heading is the weak point of any rectangle: the windscreen and the roof
+ * ribs are the only cues, where an arrow's direction is unmistakable. Slightly
+ * larger than the arrow to compensate.
  */
 export function makeVehicleBusIcon(rotationDeg: number, color: string | null | undefined) {
   const safeColor = color || "#ffffff";
-  const lit = shade(safeColor, 1.28);
-  const shaded = shade(safeColor, 0.62);
-  const size = 32;
+  const lit = shade(safeColor, 1.3);
+  const shaded = shade(safeColor, 0.58);
+  const roof = shade(safeColor, 0.85);
+  const size = 34;
   const half = size / 2;
 
   return L.divIcon({
@@ -160,6 +165,9 @@ export function makeVehicleBusIcon(rotationDeg: number, color: string | null | u
           <defs>
             <clipPath id="shuttlBusLit"><rect x="0" y="0" width="32" height="64" /></clipPath>
             <clipPath id="shuttlBusShade"><rect x="32" y="0" width="32" height="64" /></clipPath>
+            <!-- Everything inside the body is clipped to it, so the roof and
+                 windscreen cannot spill over the rounded corners. -->
+            <clipPath id="shuttlBusBody"><path d="${BUS_BODY}" /></clipPath>
           </defs>
 
           <path d="${BUS_BODY}" fill="none" stroke="#0b0b0c" stroke-width="6"
@@ -172,20 +180,24 @@ export function makeVehicleBusIcon(rotationDeg: number, color: string | null | u
             <path d="${BUS_BODY}" fill="${shaded}" />
           </g>
 
-          <path d="${BUS_WINDSCREEN}" fill="#e8f6ff" opacity="0.92" />
-          <path d="${BUS_REAR}" fill="#0b0b0c" opacity="0.45" />
+          <g clip-path="url(#shuttlBusBody)">
+            <path d="${BUS_ROOF}" fill="${roof}" />
+            <path d="${BUS_ROOF_RIBS}" stroke="#0b0b0c" stroke-width="1.4"
+                  opacity="0.35" fill="none" />
+            <path d="${BUS_REAR}" fill="#0b0b0c" opacity="0.5" />
+            <path d="${BUS_WINDSCREEN}" fill="#eaf7ff" opacity="0.95" />
+          </g>
         </svg>
       </div>
     `,
   });
 }
 
-/** The marker builder in use. Arrow by default: heading is the single most
- * useful thing a moving vehicle can convey on a map, and an arrow says it
- * unambiguously at any size. */
+/** The marker builder in use. Buses by default; set VITE_VEHICLE_ICON=arrow
+ * for the arrowhead, which conveys heading more clearly at small sizes. */
 export function makeVehicleIcon(rotationDeg: number, color: string | null | undefined) {
   const style = import.meta.env.VITE_VEHICLE_ICON;
-  return style === "bus"
-    ? makeVehicleBusIcon(rotationDeg, color)
-    : makeVehicleChevronIcon(rotationDeg, color);
+  return style === "arrow"
+    ? makeVehicleChevronIcon(rotationDeg, color)
+    : makeVehicleBusIcon(rotationDeg, color);
 }
