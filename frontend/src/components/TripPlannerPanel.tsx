@@ -11,6 +11,7 @@ import {
 import { formatEtaSeconds } from "../utils/time";
 import logo from "../assets/logo.svg";
 import { API_BASE_URL } from "@/config";
+import { NextBusPanel } from "./NextBusPanel";
 import {
     buildTripUrl,
     copyToClipboard,
@@ -241,6 +242,15 @@ export const TripPlannerPanel = ({
     const POLL_INTERVAL_MS = 8000; // ~8 seconds
 
     // Multi-candidate state
+    // Two modes. "Next bus out" is the common case — standing somewhere,
+    // wanting to know what is leaving — and it needs no input at all, so it
+    // does not belong behind the from/to form.
+    type PanelMode = 'next' | 'plan';
+    // A shared link is a request for a specific trip, so it opens the planner.
+    const [mode, setMode] = useState<PanelMode>(
+        hasTripLink(window.location.search) ? 'plan' : 'next',
+    );
+
     // Shareable-link state. `sharedEndpoints` remembers what the current
     // result was planned from, because the trip response only carries the
     // matched stops — not whether the user asked for a stop or dropped a pin,
@@ -340,10 +350,25 @@ export const TripPlannerPanel = ({
                     ? parseTripLink(window.location.search, loaded)
                     : { origin: null, destination: null };
 
-                if (linked.origin?.stopId) setOriginStopId(linked.origin.stopId);
-                else setOriginStopId('');
-                if (linked.destination?.stopId) setDestStopId(linked.destination.stopId);
-                else setDestStopId('');
+                // Set the visible query text alongside the id. Without this the
+                // trip plans correctly from the link but the From/To boxes
+                // render empty, so the form looks blank and pressing Plan Trip
+                // again fails validation.
+                const nameFor = (id: string) =>
+                    loaded.find((s) => s.id.toString() === id.toString())?.name ?? '';
+
+                if (linked.origin?.stopId) {
+                    setOriginStopId(linked.origin.stopId);
+                    setOriginQuery(nameFor(linked.origin.stopId));
+                } else {
+                    setOriginStopId('');
+                }
+                if (linked.destination?.stopId) {
+                    setDestStopId(linked.destination.stopId);
+                    setDestQuery(nameFor(linked.destination.stopId));
+                } else {
+                    setDestStopId('');
+                }
 
                 if (linked.origin?.coords) {
                     // Reuse the current-location path: it already routes a raw
@@ -727,6 +752,34 @@ export const TripPlannerPanel = ({
                     </button>
                 </div>
 
+                {/* Mode switch */}
+                <div className="mb-3 flex shrink-0 gap-1 rounded-xl bg-neutral-800/40 p-1">
+                    {([
+                        { id: 'next' as PanelMode, label: 'Next Bus Out' },
+                        { id: 'plan' as PanelMode, label: 'Plan Trip' },
+                    ]).map((m) => (
+                        <button
+                            key={m.id}
+                            type="button"
+                            onClick={() => setMode(m.id)}
+                            aria-pressed={mode === m.id}
+                            className={clsx(
+                                "flex-1 rounded-lg py-1.5 text-[11px] font-bold transition-colors",
+                                mode === m.id
+                                    ? "bg-crimson text-white"
+                                    : "text-neutral-400 hover:text-white"
+                            )}
+                        >
+                            {m.label}
+                        </button>
+                    ))}
+                </div>
+
+                {mode === 'next' && (
+                    <NextBusPanel systemId={system?.id} />
+                )}
+
+                {mode === 'plan' && (<>
                 {/* Inputs */}
                 <div className="space-y-4 pt-1 shrink-0 relative">
                     {/* Origin Field */}
@@ -1420,6 +1473,7 @@ export const TripPlannerPanel = ({
                         )}
                     </AnimatePresence>
                 </div>
+                </>)}
             </div>
         </motion.div>
     );

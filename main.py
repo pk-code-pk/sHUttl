@@ -2616,3 +2616,149 @@ def api_eta_model():
         "fallback_speed_ms": FALLBACK_SPEED_MS,
         "dwell_s_per_stop": DWELL_S_PER_STOP,
     }
+
+
+# ---------------------------------------------------------------------------
+# Next Bus Out
+#
+# The other half of the app answers "how do I get from A to B". This answers
+# the question people actually ask most often on campus: "I am standing here,
+# what is leaving and when". No inputs, no planning — location in, departures
+# out.
+#
+# It covers stops within a short walk rather than only the single nearest one,
+# because the nearest stop is frequently the wrong answer: a bus in 2 minutes
+# from a stop 200 m away beats a bus in 14 minutes from the one you are
+# standing at. Each departure carries the walk to its stop so that trade-off
+# is visible instead of hidden.
+# ---------------------------------------------------------------------------
+
+# Beyond this, walking to a different stop stops being a reasonable suggestion
+# for someone who just wants the next bus.
+DEPARTURES_WALK_RADIUS_M = 500.0
+DEPARTURES_MAX_STOPS = 4
+
+# Typical walking pace, for deciding whether a departure is actually catchable.
+WALK_SPEED_MS = 1.35
+
+
+@app.get("/departures", dependencies=[Depends(OptionalRateLimiter(times=60, seconds=60))])
+def api_departures(
+    lat: float = Query(..., ge=-90, le=90),
+    lng: float = Query(..., ge=-180, le=180),
+    radius_m: float = Query(DEPARTURES_WALK_RADIUS_M, gt=0, le=2000),
+    system_id: int = DEFAULT_SYSTEM_ID,
+):
+    """Departures from the stops within walking distance of a point.
+
+    Sorted soonest first across all nearby stops. `catchable` is false when the
+    walk to that stop takes longer than the bus will take to arrive — still
+    listed, because a rider may prefer to know, but not presented as an option
+    they can take.
+    """
+    stops = get_stops(system_id)
+    if not stops:
+        raise HTTPException(status_code=503, detail="No stops available")
+
+    nearby = [
+        (s, distance_m(lat, lng, s.latitude, s.longitude)) for s in stops
+    ]
+    nearby = [(s, d) for s, d in nearby if d <= radius_m]
+    nearby.sort(key=lambda pair: pair[1])
+    nearby = nearby[:DEPARTURES_MAX_STOPS]
+
+    if not nearby:
+        # Someone off campus. Report the closest stop anyway so the client can
+        # say how far away it is rather than showing an empty screen.
+        closest, dist = min(
+            ((s, distance_m(lat, lng, s.latitude, s.longitude)) for s in stops),
+            key=lambda pair: pair[1],
+        )
+        return {
+            "location": {"lat": lat, "lng": lng},
+            "nearest_stop": stopdict(closest),
+            "nearest_stop_distance_m": dist,
+            "out_of_range": True,
+            "departures": [],
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+    # The operator's per-stop predictions carry a destination headsign, which
+    # our own projection has no equivalent for and which is what tells a rider
+    # where a bus is actually going.
+    departures = []
+    for stop, walk_m in nearby:
+        walk_s = walk_m / WALK_SPEED_MS
+
+        vendor_by_route: dict[str, list] = defaultdict(list)
+        try:
+            for e in get_platform_etas(stop.id):
+                vendor_by_route[e.route_id].append(e)
+        except HTTPException:
+            logger.warning("Operator ETAs unavailable for stop",
+                           extra={"stop_id": stop.id})
+
+        ours_by_route = {}
+        try:
+            for o in estimate_arrivals_for_stop(stop.id, system_id):
+                ours_by_route[o["route_id"]] = o
+        except HTTPException:
+            pass
+
+        for route_id in set(vendor_by_route) | set(ours_by_route):
+            mine = ours_by_route.get(route_id)
+            vendor_list = sorted(
+                vendor_by_route.get(route_id, []), key=lambda e: e.eta_minutes
+            )
+            vendor = vendor_list[0] if vendor_list else None
+
+            # Prefer our own estimate — it is the product — and fall back to
+            # the operator's when we have no vehicle for that route.
+            if mine is not None:
+                eta_min = mine["eta_minutes"]
+                source = mine.get("eta_source") or "ours"
+            elif vendor is not None:
+                eta_min = float(vendor.eta_minutes)
+                source = "operator"
+            else:
+                continue
+
+            route = next(
+                (r for r in get_routes_cached(system_id) if str(r.myid) == str(route_id)),
+                None,
+            )
+            color = None
+            route_name = vendor.route_name if vendor else None
+            if route is not None:
+                color = getattr(route, "groupColor", None) or getattr(route, "color", None)
+                route_name = route.name
+
+            departures.append({
+                "route_id": route_id,
+                "route_name": route_name,
+                "short_name": getattr(route, "shortName", None) if route else route_id,
+                "color": color,
+                "headsign": vendor.destination if vendor else None,
+                "eta_minutes": eta_min,
+                "eta_source": source,
+                "stop": stopdict(stop),
+                "walk_m": walk_m,
+                "walk_minutes": walk_s / 60.0,
+                # False when the bus will be gone before you could get there.
+                "catchable": eta_min * 60.0 >= walk_s,
+                # Later buses on the same route, so the list can show a second
+                # option without another request.
+                "following_minutes": [float(e.eta_minutes) for e in vendor_list[1:3]],
+            })
+
+    departures.sort(key=lambda d: (not d["catchable"], d["eta_minutes"]))
+
+    return {
+        "location": {"lat": lat, "lng": lng},
+        "nearest_stop": stopdict(nearby[0][0]),
+        "nearest_stop_distance_m": nearby[0][1],
+        "out_of_range": False,
+        "stops_considered": len(nearby),
+        "departures": departures,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    }
