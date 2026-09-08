@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { motion, AnimatePresence, type PanInfo } from "framer-motion";
-import { MapPin, Navigation as NavigationIcon, ArrowUpDown, Clock, Info, ChevronDown, ChevronLeft, X } from "lucide-react";
+import { MapPin, Navigation as NavigationIcon, ArrowUpDown, Clock, Info, ChevronDown, ChevronLeft, X, Share2, Check } from "lucide-react";
 import clsx from "clsx";
 import type { TripResponse, TripCandidate, TripCandidatesResponse } from "./types";
 import {
@@ -11,6 +11,13 @@ import {
 import { formatEtaSeconds } from "../utils/time";
 import logo from "../assets/logo.svg";
 import { API_BASE_URL } from "@/config";
+import {
+    buildTripUrl,
+    copyToClipboard,
+    hasTripLink,
+    parseTripLink,
+    type TripEndpointRef,
+} from "@/lib/tripLink";
 
 interface System {
     id: number;
@@ -234,6 +241,20 @@ export const TripPlannerPanel = ({
     const POLL_INTERVAL_MS = 8000; // ~8 seconds
 
     // Multi-candidate state
+    // Shareable-link state. `sharedEndpoints` remembers what the current
+    // result was planned from, because the trip response only carries the
+    // matched stops — not whether the user asked for a stop or dropped a pin,
+    // which is what the link has to preserve.
+    const [sharedEndpoints, setSharedEndpoints] = useState<{
+        origin: TripEndpointRef;
+        destination: TripEndpointRef;
+    } | null>(null);
+    const [shareState, setShareState] = useState<'idle' | 'copied' | 'failed'>('idle');
+    const [shareUrl, setShareUrl] = useState<string>('');
+    // Guards the auto-plan so a shared link is planned once, not on every
+    // stops refresh.
+    const linkPlannedRef = useRef(false);
+
     const [candidates, setCandidates] = useState<TripCandidate[]>([]);
     const [selectedIndex, setSelectedIndex] = useState(0);
     type TripView = 'candidates' | 'itinerary';
@@ -309,9 +330,28 @@ export const TripPlannerPanel = ({
                 return res.json();
             })
             .then((data: StopOption[]) => {
-                setStops(data || []);
-                setOriginStopId('');
-                setDestStopId('');
+                const loaded = data || [];
+                setStops(loaded);
+
+                // A shared link names its endpoints in the URL; resolve them
+                // against the stop list now that we have one, instead of
+                // clearing the selection as we would on a normal load.
+                const linked = hasTripLink(window.location.search)
+                    ? parseTripLink(window.location.search, loaded)
+                    : { origin: null, destination: null };
+
+                if (linked.origin?.stopId) setOriginStopId(linked.origin.stopId);
+                else setOriginStopId('');
+                if (linked.destination?.stopId) setDestStopId(linked.destination.stopId);
+                else setDestStopId('');
+
+                if (linked.origin?.coords) {
+                    // Reuse the current-location path: it already routes a raw
+                    // coordinate pair through planning without a stop id.
+                    setOriginCoords(linked.origin.coords);
+                    setOriginUseCurrentLocation(true);
+                }
+
                 resetLiveState();
             })
             .catch((err) => {
@@ -444,6 +484,22 @@ export const TripPlannerPanel = ({
             setIsLiveUpdating(true);
             setShowSuccess(true);
             setTimeout(() => setShowSuccess(false), 800);
+
+            // Make the result addressable. replaceState rather than pushState:
+            // planning a trip is not a navigation, and stacking history
+            // entries would make Back walk through every plan attempt.
+            const endpoints = {
+                origin: originStopId
+                    ? { stopId: originStopId }
+                    : { coords: { lat: originLat, lng: originLng } },
+                destination: destStopId
+                    ? { stopId: destStopId }
+                    : { coords: { lat: destLat, lng: destLng } },
+            };
+            setSharedEndpoints(endpoints);
+            setShareState('idle');
+            const url = buildTripUrl(endpoints.origin, endpoints.destination, stops);
+            if (url) window.history.replaceState(null, '', url);
         } catch (e) {
             console.error(e);
             const message = e instanceof Error ? e.message : "Unknown error";
@@ -454,8 +510,50 @@ export const TripPlannerPanel = ({
         }
     };
 
+    const handleShare = async () => {
+        if (!sharedEndpoints) return;
+        const url = buildTripUrl(sharedEndpoints.origin, sharedEndpoints.destination, stops);
+        if (!url) return;
+        setShareUrl(url);
+        const ok = await copyToClipboard(url);
+        // On failure the URL is shown for manual copying rather than claiming
+        // it was copied — in-app browsers routinely block clipboard access,
+        // and that is exactly where shared links get opened.
+        setShareState(ok ? 'copied' : 'failed');
+        if (ok) setTimeout(() => setShareState('idle'), 2000);
+    };
+
+    // Plan the trip named in the URL, once, after stops resolve.
+    useEffect(() => {
+        if (linkPlannedRef.current) return;
+        if (!system?.id || stops.length === 0) return;
+        if (!hasTripLink(window.location.search)) return;
+
+        const linked = parseTripLink(window.location.search, stops);
+        if (!linked.origin || !linked.destination) return;
+
+        // Coordinate origins land in originCoords via the stops effect; wait
+        // for that so planning does not run against a half-applied selection.
+        const originReady = linked.origin.stopId
+            ? originStopId === linked.origin.stopId
+            : Boolean(originCoords);
+        const destReady = linked.destination.stopId
+            ? destStopId === linked.destination.stopId
+            : true;
+        if (!originReady || !destReady) return;
+
+        linkPlannedRef.current = true;
+        void handlePlanTrip();
+        // handlePlanTrip is intentionally omitted: it is redefined on every
+        // render, and depending on it would re-run this effect continuously.
+        // The ref guard is what makes the auto-plan fire exactly once.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [system?.id, stops, originStopId, destStopId, originCoords]);
+
     // Helper: Reset live updates and candidates when inputs change significantly
     const resetLiveState = () => {
+        setSharedEndpoints(null);
+        setShareState('idle');
         setActiveTripParams(null);
         setIsLiveUpdating(false);
         setLastUpdatedAt(null);
@@ -972,6 +1070,27 @@ export const TripPlannerPanel = ({
                                 {hasTrip ? 'Routes' : 'Itinerary'}
                             </span>
                         )}
+                        <div className="flex items-center gap-1.5">
+                        {sharedEndpoints && (
+                            <button
+                                type="button"
+                                onClick={handleShare}
+                                aria-label="Copy a link to this trip"
+                                className={clsx(
+                                    "flex items-center gap-1 rounded-full px-2.5 py-1.5 transition-colors",
+                                    shareState === 'copied'
+                                        ? "bg-emerald-500/15 text-emerald-300"
+                                        : "bg-neutral-800/50 text-neutral-400 hover:bg-neutral-800 hover:text-white"
+                                )}
+                            >
+                                {shareState === 'copied'
+                                    ? <Check size={12} />
+                                    : <Share2 size={12} />}
+                                <span className="text-[10px] font-bold uppercase tracking-wider">
+                                    {shareState === 'copied' ? 'Copied' : 'Share'}
+                                </span>
+                            </button>
+                        )}
                         <button
                             type="button"
                             onClick={() => setItineraryOpen((o) => !o)}
@@ -986,7 +1105,24 @@ export const TripPlannerPanel = ({
                                 )}
                             />
                         </button>
+                        </div>
                     </div>
+
+                    {/* Clipboard blocked (common in in-app browsers): show the
+                        link so it can still be copied by hand. */}
+                    {shareState === 'failed' && shareUrl && (
+                        <div className="mb-2 rounded-lg bg-neutral-800/60 px-2.5 py-2">
+                            <p className="text-[10px] text-neutral-400 mb-1">
+                                Copy this link:
+                            </p>
+                            <input
+                                readOnly
+                                value={shareUrl}
+                                onFocus={(e) => e.currentTarget.select()}
+                                className="w-full bg-transparent text-[10px] text-white outline-none"
+                            />
+                        </div>
+                    )}
 
                     <AnimatePresence initial={false}>
                         {itineraryOpen && (
