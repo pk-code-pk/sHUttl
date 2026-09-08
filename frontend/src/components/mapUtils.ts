@@ -119,35 +119,55 @@ export function makeVehicleChevronIcon(rotationDeg: number, color: string | null
   });
 }
 
-// A top-down bus, pointing up, in the same 64-unit frame as the arrow.
+/** Stable short hash of a colour, for building unique SVG element ids.
+ * Gradients are referenced by document id, so two markers sharing an id would
+ * both paint with whichever definition the browser saw first — every bus would
+ * come out the same colour. */
+function colorKey(hex: string): string {
+  let h = 0;
+  for (let i = 0; i < hex.length; i++) h = (h * 31 + hex.charCodeAt(i)) & 0xffff;
+  return h.toString(36);
+}
+
+// A top-down car, nose up, in the same 64-unit frame as the arrow.
 //
-// Simplified from a detailed illustration on purpose: at map size, wheels,
-// mirrors, gradients and a drop shadow collapse into noise. Four features
-// survive and carry the whole read — silhouette, a windscreen wide enough to
-// mark the front, a roof panel that separates body from glass, and colour.
-const BUS_BODY =
-  "M24 8 h16 a6 6 0 0 1 6 6 v36 a6 6 0 0 1 -6 6 h-16 a6 6 0 0 1 -6 -6 v-36 a6 6 0 0 1 6 -6 z";
-// Trapezoid, wider at the base: reads as a raked windscreen rather than a
-// second roof panel, which is what tells you which end is the front.
-const BUS_WINDSCREEN = "M26 11 h12 l4 8 h-20 z";
-const BUS_ROOF = "M22 22 h20 v22 h-20 z";
-const BUS_ROOF_RIBS = "M22 28 h20 M22 34 h20 M22 40 h20";
-const BUS_REAR = "M22 47 h20 v5 a4 4 0 0 1 -4 4 h-12 a4 4 0 0 1 -4 -4 z";
+// Traced to match a top-down vehicle illustration: rounded nose, widest at the
+// cabin, tapered tail, with wheels standing slightly proud of the body. What
+// makes it read as a vehicle at map size is the glass — a pale windscreen and
+// rear window either side of a near-black roof — because that is the only cue
+// that separates front from back.
+// Proportions matter more than detail here. A first pass at 24 units wide by
+// 55 long read as a phone rather than a car at map size; a top-down hatchback
+// is closer to 1.7:1. The flanks are straight rather than curved, because a
+// fully curved outline reads as a bean, and the wheels stand proud of them.
+const CAR_BODY =
+  "M32 6 C36.5 6 40 7.6 42 11 C44 14.5 45 20 45 26 L45 40 " +
+  "C45 47 44 52 42 55 C40 57.6 36.5 59 32 59 " +
+  "C27.5 59 24 57.6 22 55 C20 52 19 47 19 40 L19 26 " +
+  "C19 20 20 14.5 22 11 C24 7.6 27.5 6 32 6 Z";
+// Pale windscreen, dark cabin, smaller rear glass. This contrast is the only
+// thing that says which end is the front once the icon is small, which is why
+// the headlights and tail lights that were here came out — at 36px they were
+// two pixels of noise each, invisible on a red car and confusing on a yellow.
+const CAR_WINDSCREEN = "M25.5 17 L38.5 17 C40 17 40.6 18 41 20 L41.8 27 L22.2 27 L23 20 C23.4 18 24 17 25.5 17 Z";
+const CAR_REAR_GLASS = "M24 45.5 L40 45.5 L38.5 53 L25.5 53 Z";
 
 /**
- * A bus-shaped vehicle marker, route-coloured, with the same lit and shaded
- * facets as the arrow so a bus and its route line are obviously related.
+ * A car-shaped vehicle marker in the route colour.
  *
- * Heading is the weak point of any rectangle: the windscreen and the roof
- * ribs are the only cues, where an arrow's direction is unmistakable. Slightly
- * larger than the arrow to compensate.
+ * The body carries a gradient across its axis rather than a hard two-tone
+ * split: the split read as two flat halves at this size, where a gradient
+ * reads as a curved surface. Gradient ids are keyed by colour so markers on
+ * different routes cannot inherit each other's paint.
  */
-export function makeVehicleBusIcon(rotationDeg: number, color: string | null | undefined) {
+export function makeVehicleCarIcon(rotationDeg: number, color: string | null | undefined) {
   const safeColor = color || "#ffffff";
-  const lit = shade(safeColor, 1.3);
-  const shaded = shade(safeColor, 0.58);
-  const roof = shade(safeColor, 0.85);
-  const size = 34;
+  const lit = shade(safeColor, 1.32);
+  const mid = safeColor;
+  const shaded = shade(safeColor, 0.55);
+  const id = `shuttlCar${colorKey(safeColor)}`;
+  // Larger than the arrow: a car needs the pixels to stay legible.
+  const size = 40;
   const half = size / 2;
 
   return L.divIcon({
@@ -163,29 +183,35 @@ export function makeVehicleBusIcon(rotationDeg: number, color: string | null | u
       ">
         <svg width="${size}" height="${size}" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
           <defs>
-            <clipPath id="shuttlBusLit"><rect x="0" y="0" width="32" height="64" /></clipPath>
-            <clipPath id="shuttlBusShade"><rect x="32" y="0" width="32" height="64" /></clipPath>
-            <!-- Everything inside the body is clipped to it, so the roof and
-                 windscreen cannot spill over the rounded corners. -->
-            <clipPath id="shuttlBusBody"><path d="${BUS_BODY}" /></clipPath>
+            <linearGradient id="${id}" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0" stop-color="${lit}" />
+              <stop offset="0.45" stop-color="${mid}" />
+              <stop offset="1" stop-color="${shaded}" />
+            </linearGradient>
+            <clipPath id="${id}clip"><path d="${CAR_BODY}" /></clipPath>
           </defs>
 
-          <path d="${BUS_BODY}" fill="none" stroke="#0b0b0c" stroke-width="6"
-                stroke-linejoin="round" />
-
-          <g clip-path="url(#shuttlBusLit)">
-            <path d="${BUS_BODY}" fill="${lit}" />
-          </g>
-          <g clip-path="url(#shuttlBusShade)">
-            <path d="${BUS_BODY}" fill="${shaded}" />
+          <!-- Wheels sit under the body so only their outer edge shows. -->
+          <g fill="#101012">
+            <rect x="14.8" y="17" width="5.4" height="10" rx="2.6" />
+            <rect x="43.8" y="17" width="5.4" height="10" rx="2.6" />
+            <rect x="14.8" y="40" width="5.4" height="10" rx="2.6" />
+            <rect x="43.8" y="40" width="5.4" height="10" rx="2.6" />
           </g>
 
-          <g clip-path="url(#shuttlBusBody)">
-            <path d="${BUS_ROOF}" fill="${roof}" />
-            <path d="${BUS_ROOF_RIBS}" stroke="#0b0b0c" stroke-width="1.4"
-                  opacity="0.35" fill="none" />
-            <path d="${BUS_REAR}" fill="#0b0b0c" opacity="0.5" />
-            <path d="${BUS_WINDSCREEN}" fill="#eaf7ff" opacity="0.95" />
+          <path d="${CAR_BODY}" fill="none" stroke="#0b0b0c" stroke-width="3.6" />
+          <path d="${CAR_BODY}" fill="url(#${id})" />
+
+          <g clip-path="url(#${id}clip)">
+            <rect x="23" y="28.5" width="18" height="15.5" rx="2.5" fill="#17181c" />
+            <path d="${CAR_WINDSCREEN}" fill="#cfe7f5" />
+            <path d="${CAR_REAR_GLASS}" fill="#9fbccd" />
+            <!-- Headlights and tail lights: two pixels each at final size, but
+                 they are what stop the shape reading as symmetrical. -->
+            <!-- Roof ridge: a single highlight along the axis, which survives
+                 downscaling where small features do not. -->
+            <path d="M32 29.5 L32 43" stroke="#ffffff" stroke-width="1.2"
+                  opacity="0.16" />
           </g>
         </svg>
       </div>
@@ -193,11 +219,11 @@ export function makeVehicleBusIcon(rotationDeg: number, color: string | null | u
   });
 }
 
-/** The marker builder in use. Buses by default; set VITE_VEHICLE_ICON=arrow
- * for the arrowhead, which conveys heading more clearly at small sizes. */
+/** The marker builder in use. Cars by default; VITE_VEHICLE_ICON=arrow gives
+ * the arrowhead, which conveys heading more clearly at small sizes. */
 export function makeVehicleIcon(rotationDeg: number, color: string | null | undefined) {
   const style = import.meta.env.VITE_VEHICLE_ICON;
   return style === "arrow"
     ? makeVehicleChevronIcon(rotationDeg, color)
-    : makeVehicleBusIcon(rotationDeg, color);
+    : makeVehicleCarIcon(rotationDeg, color);
 }

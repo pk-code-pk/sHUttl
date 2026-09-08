@@ -676,7 +676,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusDeparture }: MapSh
                     {vehicles
                         .filter((v): v is Vehicle & { lat: number; lng: number } => v.lat !== null && v.lng !== null)
                         .map((v) => (
-                            <ShuttleMarker key={v.id} v={v} durationMs={1200} />
+                            <ShuttleMarker key={v.id} v={v} durationMs={3000} />
                         ))}
                 </MapContainer>
             ) : (
