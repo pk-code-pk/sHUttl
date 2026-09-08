@@ -66,7 +66,6 @@ function App() {
 
       <Layout
         system={system}
-        onChangeSystem={() => setShowSystemModal(true)}
         trip={trip}
         onTripChange={setTrip}
       />

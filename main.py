@@ -31,7 +31,7 @@ from ridesystems_client import (
 # harvard_gtfs.py and harvard_mapping.py are no longer imported: Harvard left
 # PassioGO on 2026-07-01, so there is no second feed to reconcile against and no
 # GTFS export with live service in it. See ridesystems_client.py.
-from ridesystems_client import distance_along_route_m
+from ridesystems_client import distance_along_route_m, get_route_stop_ids
 import arrivals as arrivals_module
 from arrivals import (
     STORE as ARRIVAL_STORE,
@@ -2642,6 +2642,69 @@ DEPARTURES_MAX_STOPS = 4
 WALK_SPEED_MS = 1.35
 
 
+# How many downstream stops to report per departure. Enough to answer "does
+# this bus go where I need", not the whole loop.
+DEPARTURE_TO_STOPS = 8
+
+
+def downstream_stops(route_id: str, boarding_stop_id: str, depart_in_min: float) -> list[dict]:
+    """Where a bus goes after this stop, with a clock time for each.
+
+    Answers the question a departure board leaves open: the route code and a
+    headsign tell you nothing if you do not already know the route. Times are
+    cumulative from the departure, using the learned segment times where they
+    exist and the distance model where they do not — the same estimates the ETA
+    itself is built from, so the numbers cannot disagree with each other.
+    """
+    chain = get_route_stop_ids(route_id)
+    if not chain:
+        return []
+
+    try:
+        start = chain.index(str(boarding_stop_id))
+    except ValueError:
+        return []
+
+    stops_by_id = {str(s.id): s for s in get_stops(DEFAULT_SYSTEM_ID)}
+    out: list[dict] = []
+    cumulative_s = depart_in_min * 60.0
+    prev_id = str(boarding_stop_id)
+
+    # Wrap around the loop, stopping before we arrive back at the boarding stop.
+    for step in range(1, min(len(chain), DEPARTURE_TO_STOPS + 1)):
+        sid = chain[(start + step) % len(chain)]
+        if sid == str(boarding_stop_id):
+            break
+        stop = stops_by_id.get(sid)
+        if stop is None:
+            continue
+
+        learned = ARRIVAL_STORE.segment_estimate(route_id, prev_id, sid)
+        if learned is not None:
+            hop_s = learned[0]
+            source = "learned"
+        else:
+            prev_stop = stops_by_id.get(prev_id)
+            hop_m = (
+                distance_m(prev_stop.latitude, prev_stop.longitude,
+                           stop.latitude, stop.longitude)
+                if prev_stop else 0.0
+            )
+            hop_s = hop_m / FALLBACK_SPEED_MS + DWELL_S_PER_STOP
+            source = "estimated"
+
+        cumulative_s += hop_s
+        out.append({
+            **stopdict(stop),
+            "minutes": cumulative_s / 60.0,
+            "arrives_at": (datetime.now() + timedelta(seconds=cumulative_s)).strftime("%-I:%M"),
+            "source": source,
+        })
+        prev_id = sid
+
+    return out
+
+
 @app.get("/departures", dependencies=[Depends(OptionalRateLimiter(times=60, seconds=60))])
 def api_departures(
     lat: float = Query(..., ge=-90, le=90),
@@ -2746,6 +2809,9 @@ def api_departures(
                 "walk_minutes": walk_s / 60.0,
                 # False when the bus will be gone before you could get there.
                 "catchable": eta_min * 60.0 >= walk_s,
+                # Where this bus takes you, so the row can answer "does it go
+                # where I need" without a second request.
+                "to_stops": downstream_stops(route_id, stop.id, eta_min),
                 # Later buses on the same route, so the list can show a second
                 # option without another request.
                 "following_minutes": [float(e.eta_minutes) for e in vendor_list[1:3]],

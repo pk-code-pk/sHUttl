@@ -11,7 +11,7 @@ import {
 import { formatEtaSeconds } from "../utils/time";
 import logo from "../assets/logo.svg";
 import { API_BASE_URL } from "@/config";
-import { NextBusPanel } from "./NextBusPanel";
+import { NextBusPanel, type Departure } from "./NextBusPanel";
 import {
     buildTripUrl,
     copyToClipboard,
@@ -29,10 +29,11 @@ interface TripPlannerPanelProps {
     className?: string;
 
     system: System | null;
-    onChangeSystem: () => void;
     trip: TripResponse | null;
     onTripChange: (trip: TripResponse | null) => void;
     onUserLocationChange?: (location: { lat: number; lng: number } | null) => void;
+    /** Forwarded from Next Bus Out so the map can draw the chosen departure. */
+    onFocusDeparture?: (departure: Departure | null) => void;
 }
 
 interface StopOption {
@@ -144,10 +145,10 @@ function CandidateCard({ candidate, isSelected, onSelect }: CandidateCardProps) 
 export const TripPlannerPanel = ({
     className,
     system,
-    onChangeSystem,
     trip,
     onTripChange,
-    onUserLocationChange
+    onUserLocationChange,
+    onFocusDeparture
 }: TripPlannerPanelProps) => {
     const [stops, setStops] = useState<StopOption[]>([]);
     const [loadingStops, setLoadingStops] = useState(false);
@@ -165,21 +166,26 @@ export const TripPlannerPanel = ({
 
     // Mobile Bottom Sheet State
     // 'minimized': ~15% height (header only)
-    // 'default': ~70% height (inputs + map)
+    // 'default': sheet takes the bottom ~45%, so the map keeps the majority
     // 'expanded': ~92% height (full screen list)
     type SheetState = 'minimized' | 'default' | 'expanded';
     const [sheetState, setSheetState] = useState<SheetState>('default');
 
     // ... (rest of component internal logic)
 
-    // Compute slide offset (translateY)
-    // Panel is fixed at bottom with 100dvh height.
-    // y=0 means fully expanded (covering screen).
-    // y=30dvh means pushed down by 30dvh (top at 30dvh).
+    // Compute slide offset (translateY).
+    // The panel is fixed to the bottom at 100dvh tall, so the offset is how far
+    // it is pushed down: a larger number means more map is visible.
+    //
+    // 'default' deliberately keeps the majority of the screen as map. This is a
+    // map app, and the resting state should show where the buses are; the
+    // sheet at rest needs to hold the header, the mode switch and the first
+    // few rows, not the whole list. Swiping up is what asks for the list.
     const yOffset = useMemo(() => {
-        if (sheetState === 'minimized') return '85dvh';
-        if (!itineraryOpen) return '50dvh';
-        return sheetState === 'expanded' ? '8dvh' : '30dvh';
+        if (sheetState === 'minimized') return '88dvh';
+        // Itinerary collapsed means less content to show, so sit lower still.
+        if (!itineraryOpen) return '68dvh';
+        return sheetState === 'expanded' ? '8dvh' : '55dvh';
     }, [sheetState, itineraryOpen]);
 
     // Handle drag/swipe on the grab handle
@@ -729,31 +735,14 @@ export const TripPlannerPanel = ({
             </motion.div>
 
             <div className="px-4 pb-[env(safe-area-inset-bottom,16px)] pt-1 md:pt-4 md:pb-4 flex flex-col h-full min-h-0">
-                {/* Header with System Selector */}
-                <div className="flex items-center justify-between shrink-0 mb-3">
-                    <div className="flex items-center gap-2">
-                        <img src={logo} alt="Crimson Shuttle" className="h-6 w-auto opacity-90" />
-                        <div className="flex flex-col">
-                            <span className="text-sm font-bold text-white leading-tight">
-                                Crimson Shuttle
-                            </span>
-                            <span className="text-[10px] text-neutral-400 font-medium leading-tight">
-                                {system ? system.name : 'Select system'}
-                            </span>
-                        </div>
-                    </div>
-
-                    <button
-                        type="button"
-                        onClick={onChangeSystem}
-                        className="inline-flex items-center rounded-full border border-neutral-700/50 bg-neutral-800/50 px-2.5 py-1 text-[10px] font-medium text-neutral-300 hover:border-crimson/50 hover:text-white transition-all"
-                    >
-                        Change
-                    </button>
-                </div>
-
-                {/* Mode switch */}
-                <div className="mb-3 flex shrink-0 gap-1 rounded-xl bg-neutral-800/40 p-1">
+                {/* Header and mode switch share one row. The old header spent a
+                    whole row on a logo, the app's former name, the system name
+                    and a "Change" button — on a sheet where vertical space is
+                    the scarcest thing there is, and with only one system left
+                    to change to. The logo already says what the app is. */}
+                <div className="mb-2 flex shrink-0 items-center gap-2">
+                    <img src={logo} alt="sHUttl" className="h-5 w-auto shrink-0 opacity-90" />
+                    <div className="flex flex-1 gap-1 rounded-xl bg-neutral-800/40 p-1">
                     {([
                         { id: 'next' as PanelMode, label: 'Next Bus Out' },
                         { id: 'plan' as PanelMode, label: 'Plan Trip' },
@@ -773,10 +762,14 @@ export const TripPlannerPanel = ({
                             {m.label}
                         </button>
                     ))}
+                    </div>
                 </div>
 
                 {mode === 'next' && (
-                    <NextBusPanel systemId={system?.id} />
+                    <NextBusPanel
+                        systemId={system?.id}
+                        onFocusDeparture={onFocusDeparture}
+                    />
                 )}
 
                 {mode === 'plan' && (<>

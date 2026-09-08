@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { MapContainer, TileLayer, Popup, Polyline, useMap, Marker } from 'react-leaflet';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { MapContainer, TileLayer, Popup, Polyline, useMap, Marker, CircleMarker } from 'react-leaflet';
 import { Navigation as NavigationIcon, Settings } from 'lucide-react';
 import clsx from 'clsx';
 import L from 'leaflet';
@@ -24,6 +24,16 @@ interface MapShellProps {
     systemId: number | null;
     trip: TripResponse | null;
     userLocation?: { lat: number; lng: number } | null;
+    /** A departure selected in Next Bus Out: its route is emphasised, the
+     * other routes dimmed, and the map fitted to where that bus goes. */
+    focusDeparture?: FocusDeparture | null;
+}
+
+export interface FocusDeparture {
+    route_id: string;
+    color: string | null;
+    stop: { id: string; name: string; lat: number; lng: number };
+    to_stops: { id: string; name: string; lat: number; lng: number; arrives_at: string }[];
 }
 
 
@@ -59,11 +69,13 @@ function computeTripKey(trip: TripResponse | null): string | null {
 
 // Separate component to safely use useMap()
 function MapController({
+    systemId,
     systemBounds,
     activeTripBounds,
     tripKey,
     setMap,
 }: {
+    systemId: number | null;
     systemBounds: L.LatLngBounds | null;
     activeTripBounds: L.LatLngBounds | null;
     tripKey: string | null;
@@ -75,40 +87,68 @@ function MapController({
         if (map) setMap(map);
     }, [map, setMap]);
 
-    // Fit to system bounds when it first becomes available
+    // The bottom sheet covers roughly the lower 45% of the screen on mobile,
+    // and Leaflet fits to the whole container — so a symmetric fit puts the
+    // bottom of the bounds underneath the panel. Reserve that space instead,
+    // or half of every fitted route is hidden behind the UI.
+    const fitOptions = useCallback((): L.FitBoundsOptions => {
+        const isNarrow = window.innerWidth < 768;
+        return isNarrow
+            ? {
+                  paddingTopLeft: [30, 40],
+                  paddingBottomRight: [30, Math.round(window.innerHeight * 0.48)],
+              }
+            : { paddingTopLeft: [430, 60], paddingBottomRight: [60, 60] };
+    }, []);
+
+    // Fit the whole network on launch, so the opening view shows every route
+    // and every bus in service rather than an arbitrary crop.
     const hasInitialSystemFit = useRef(false);
     useEffect(() => {
         if (map && systemBounds && !hasInitialSystemFit.current) {
-            map.fitBounds(systemBounds, { padding: [80, 80] });
+            map.fitBounds(systemBounds, fitOptions());
             hasInitialSystemFit.current = true;
         }
-    }, [map, systemBounds]);
+    }, [map, systemBounds, fitOptions]);
 
-    // Reset initial fit if system changes
+    // Reset the initial fit on a system change only. Keying this on the bounds
+    // object would refit the map every time the bounds are recomputed, which
+    // now happens on each vehicle poll — the map would snap back while
+    // someone was panning it.
     useEffect(() => {
         hasInitialSystemFit.current = false;
-    }, [systemBounds]);
+    }, [systemId]);
 
-    // Smart trip centering: only fit bounds when trip key changes (new trip)
+    // Trip / departure centering, and the return trip back to the overview.
     const lastCenteredTripKey = useRef<string | null>(null);
     useEffect(() => {
-        if (map && activeTripBounds && tripKey) {
-            // Only center if this is a different trip than last time
+        if (!map) return;
+
+        if (activeTripBounds && tripKey) {
+            // Only recentre when this is a different trip or departure than
+            // last time, so live updates do not fight the user's panning.
             if (tripKey !== lastCenteredTripKey.current) {
-                map.fitBounds(activeTripBounds, { padding: [80, 80] });
+                map.fitBounds(activeTripBounds, fitOptions());
                 lastCenteredTripKey.current = tripKey;
             }
+            return;
         }
-        // Reset when trip is cancelled
-        if (!tripKey) {
+
+        // Nothing selected any more. If something was, deselecting is a request
+        // to see the whole network again — otherwise the map stays zoomed into
+        // wherever the last route happened to go.
+        if (lastCenteredTripKey.current !== null) {
             lastCenteredTripKey.current = null;
+            if (systemBounds) {
+                map.fitBounds(systemBounds, fitOptions());
+            }
         }
-    }, [map, activeTripBounds, tripKey]);
+    }, [map, activeTripBounds, tripKey, systemBounds, fitOptions]);
 
     return null;
 }
 
-export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
+export const MapShell = ({ systemId, trip, userLocation, focusDeparture }: MapShellProps) => {
     const [stops, setStops] = useState<Stop[]>([]);
     const [vehicles, setVehicles] = useState<Vehicle[]>([]);
     const [routes, setRoutes] = useState<RoutePath[]>([]);
@@ -122,7 +162,36 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
     const routeSettingsRef = useRef<HTMLDivElement>(null);
 
     const [systemBounds, setSystemBounds] = useState<L.LatLngBounds | null>(null);
-    const activeTripBounds = useMemo(() => computeTripBounds(trip), [trip]);
+    // The launch/overview view. Stops define the network, but a bus can sit
+    // just outside their envelope — north of the Quad, or out past Barry's
+    // Corner — so vehicles are folded in to guarantee every bus in service is
+    // on screen.
+    const overviewBounds = useMemo(() => {
+        if (!systemBounds) return null;
+        if (vehicles.length === 0) return systemBounds;
+        const b = L.latLngBounds(systemBounds.getSouthWest(), systemBounds.getNorthEast());
+        for (const v of vehicles) {
+            if (typeof v.lat === 'number' && typeof v.lng === 'number') {
+                b.extend([v.lat, v.lng]);
+            }
+        }
+        return b;
+    }, [systemBounds, vehicles]);
+
+    const tripBounds = useMemo(() => computeTripBounds(trip), [trip]);
+
+    // Fit to the selected departure when there is one: the boarding stop plus
+    // everywhere that bus goes, which is the answer to "where would I end up".
+    const focusBounds = useMemo(() => {
+        if (!focusDeparture) return null;
+        const pts: [number, number][] = [
+            [focusDeparture.stop.lat, focusDeparture.stop.lng],
+            ...focusDeparture.to_stops.map((t) => [t.lat, t.lng] as [number, number]),
+        ];
+        return pts.length ? L.latLngBounds(pts) : null;
+    }, [focusDeparture]);
+
+    const activeTripBounds = focusBounds ?? tripBounds;
     const [mapInstance, setMapInstance] = useState<L.Map | null>(null);
 
     // Stop Icon with larger hitbox (white default)
@@ -218,9 +287,14 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
         };
     }, [systemId]);
 
-    // Fetch routes when showRoutes is toggled
+    // Route geometry is needed either when the user asks for all routes, or
+    // when a single departure is selected and we need to draw just that one.
+    // A boolean rather than the departure object, so selecting a different
+    // departure does not refetch every route.
+    const needRoutes = showRoutes || Boolean(focusDeparture);
+
     useEffect(() => {
-        if (!systemId || !showRoutes) {
+        if (!systemId || !needRoutes) {
             // eslint-disable-next-line react-hooks/set-state-in-effect
             setRoutes([]);
             return;
@@ -238,7 +312,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                 setRoutesError(true);
             })
             .finally(() => setLoadingRoutes(false));
-    }, [systemId, showRoutes]);
+    }, [systemId, needRoutes]);
 
     // Initialize route visibility when routes load
     useEffect(() => {
@@ -299,7 +373,15 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
     }, [stops]);
 
     // Compute trip key for smart centering
-    const tripKey = useMemo(() => computeTripKey(trip), [trip]);
+    const tripKey = useMemo(() => {
+        // Keyed on the focused departure when one is selected, so choosing a
+        // different departure re-fits the map instead of being treated as the
+        // same view.
+        if (focusDeparture) {
+            return `focus:${focusDeparture.route_id}:${focusDeparture.stop.id}`;
+        }
+        return computeTripKey(trip);
+    }, [trip, focusDeparture]);
 
     // Auto-off "Show Routes" on first trip only
     const previousTripRef = useRef<TripResponse | null>(null);
@@ -352,7 +434,8 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                     zoomControl={false}
                 >
                     <MapController
-                        systemBounds={systemBounds}
+                        systemId={systemId}
+                        systemBounds={overviewBounds}
                         activeTripBounds={activeTripBounds}
                         tripKey={tripKey}
                         setMap={setMapInstance}
@@ -367,13 +450,42 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                         {...(MAP_SUBDOMAINS ? { subdomains: MAP_SUBDOMAINS } : {})}
                     />
 
-                    {/* Route polylines (glowing) */}
+                    {/* Route polylines (glowing). With a departure selected,
+                        its route stays bright and the others drop back so the
+                        one you are being told about is legible. */}
+                    {/* The selected departure's route always draws, even with
+                        "Show Routes" off — being told a bus is coming is not
+                        useful without seeing where it goes. */}
+                    {focusDeparture && (() => {
+                        const r = routes.find((x) => x.route_id === focusDeparture.route_id);
+                        if (!r?.path?.length) return null;
+                        const positions: LatLngExpression[] = r.path.map((p) => [p.lat, p.lng]);
+                        const color = r.color || focusDeparture.color || '#a51c30';
+                        return (
+                            <>
+                                <Polyline
+                                    positions={positions}
+                                    pathOptions={{ color, weight: 14, opacity: 0.30 }}
+                                />
+                                <Polyline
+                                    positions={positions}
+                                    pathOptions={{ color, weight: 5, opacity: 0.95 }}
+                                />
+                            </>
+                        );
+                    })()}
+
                     {showRoutes &&
                         routes.filter((r) => routeVisibility[r.route_id] !== false).map((r) => {
                             if (!r.path || r.path.length === 0) return null;
+                            // Already drawn above, at full emphasis.
+                            if (focusDeparture?.route_id === r.route_id) return null;
 
                             const positions: LatLngExpression[] = r.path.map((p) => [p.lat, p.lng]);
                             const color = r.color || '#a51c30'; // fallback to harvard crimson if missing
+
+                            // Other routes recede while a departure is selected.
+                            const dimmed = Boolean(focusDeparture);
 
                             return (
                                 <React.Fragment key={r.route_id}>
@@ -383,7 +495,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                                         pathOptions={{
                                             color,
                                             weight: 10,
-                                            opacity: 0.28,
+                                            opacity: dimmed ? 0.06 : 0.28,
                                         }}
                                     />
                                     {/* Core line (thinner, bright) */}
@@ -392,12 +504,53 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                                         pathOptions={{
                                             color,
                                             weight: 4,
-                                            opacity: 0.95,
+                                            opacity: dimmed ? 0.18 : 0.95,
                                         }}
                                     />
                                 </React.Fragment>
                             );
                         })}
+
+                    {/* Downstream stops of the selected departure, labelled with
+                        the time the bus is expected to reach each one. */}
+                    {focusDeparture && focusDeparture.to_stops.map((t, i) => (
+                        <CircleMarker
+                            key={`focus-${t.id}-${i}`}
+                            center={[t.lat, t.lng]}
+                            radius={5}
+                            pathOptions={{
+                                color: focusDeparture.color ?? '#a51c30',
+                                fillColor: '#0a0a0a',
+                                fillOpacity: 1,
+                                weight: 2.5,
+                            }}
+                        >
+                            <Popup>
+                                <div className="text-[11px] font-semibold">{t.name}</div>
+                                <div className="text-[10px] opacity-70">arrives ~{t.arrives_at}</div>
+                            </Popup>
+                        </CircleMarker>
+                    ))}
+
+                    {/* Where you would board. */}
+                    {focusDeparture && (
+                        <CircleMarker
+                            center={[focusDeparture.stop.lat, focusDeparture.stop.lng]}
+                            radius={8}
+                            pathOptions={{
+                                color: '#ffffff',
+                                fillColor: focusDeparture.color ?? '#a51c30',
+                                fillOpacity: 1,
+                                weight: 3,
+                            }}
+                        >
+                            <Popup>
+                                <div className="text-[11px] font-semibold">
+                                    Board at {focusDeparture.stop.name}
+                                </div>
+                            </Popup>
+                        </CircleMarker>
+                    )}
 
                     {/* Planned trip path (if any) - Route-colored with pulsing glow */}
                     {tripPolylines.map((line) => (
@@ -513,8 +666,8 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                                 if (!mapInstance) return;
                                 if (activeTripBounds) {
                                     mapInstance.fitBounds(activeTripBounds, { padding: [80, 80] });
-                                } else if (systemBounds) {
-                                    mapInstance.fitBounds(systemBounds, { padding: [80, 80] });
+                                } else if (overviewBounds) {
+                                    mapInstance.fitBounds(overviewBounds, { padding: [50, 50] });
                                 }
                             }}
                             className="rounded-full bg-neutral-900/90 w-9 h-9 flex items-center justify-center text-white shadow-xl backdrop-blur-md border border-white/10 hover:bg-neutral-800 active:scale-95 transition-all"
@@ -629,8 +782,8 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                         if (!mapInstance) return;
                         if (activeTripBounds) {
                             mapInstance.fitBounds(activeTripBounds, { padding: [80, 80] });
-                        } else if (systemBounds) {
-                            mapInstance.fitBounds(systemBounds, { padding: [80, 80] });
+                        } else if (overviewBounds) {
+                            mapInstance.fitBounds(overviewBounds, { padding: [50, 50] });
                         }
                     }}
                     className="hidden md:block pointer-events-auto absolute right-6 bottom-32 z-[1000] rounded-full bg-neutral-900/90 px-4 py-2 text-xs font-bold text-white shadow-xl backdrop-blur-md border border-white/10 hover:bg-neutral-800 transition-all active:scale-95"

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { TripPlannerPanel } from "./TripPlannerPanel";
-import { MapShell } from "./MapShell";
+import { MapShell, type FocusDeparture } from "./MapShell";
 import type { TripResponse } from "./types";
 
 interface System {
@@ -10,19 +10,26 @@ interface System {
 
 interface LayoutProps {
     system: System | null;
-    onChangeSystem: () => void;
     trip: TripResponse | null;
     onTripChange: (trip: TripResponse | null) => void;
 }
 
-export const Layout = ({ system, onChangeSystem, trip, onTripChange }: LayoutProps) => {
+export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
     const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
+    // A departure selected in Next Bus Out, lifted to this level so the map
+    // can draw it while the panel owns the selection.
+    const [focusDeparture, setFocusDeparture] = useState<FocusDeparture | null>(null);
 
     return (
         <div className="fixed inset-0 md:relative md:w-full md:h-[100dvh] overflow-hidden bg-neutral-950 overscroll-none">
             {/* Background Map - fills entire screen */}
             <div className="absolute inset-0 z-0">
-                <MapShell systemId={system?.id ?? null} trip={trip} userLocation={userLocation} />
+                <MapShell
+                    systemId={system?.id ?? null}
+                    trip={trip}
+                    userLocation={userLocation}
+                    focusDeparture={focusDeparture}
+                />
             </div>
 
             {/* 
@@ -53,10 +60,10 @@ export const Layout = ({ system, onChangeSystem, trip, onTripChange }: LayoutPro
                     <TripPlannerPanel
                         className="w-full"
                         system={system}
-                        onChangeSystem={onChangeSystem}
                         trip={trip}
                         onTripChange={onTripChange}
                         onUserLocationChange={setUserLocation}
+                        onFocusDeparture={setFocusDeparture}
                     />
                 </div>
 
