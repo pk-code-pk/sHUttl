@@ -35,7 +35,16 @@
    readable while sitting a step above the sheet, so map and panel still read
    as figure and ground. */
 .leaflet-tile-pane {
-  filter: brightness(0.72) saturate(0.6) contrast(1.06);
+  /* Darker, so the route colours and the buses carry the map rather than
+     competing with the ground under them.
+
+     Brightness is the load-bearing value and has a floor: at 0.52 the map
+     became a void with illegible street names, which costs the orientation a
+     map exists to give. 0.60 is as far down as it goes while streets stay
+     readable, and the contrast bump buys some of that legibility back — it
+     separates the roads from the blocks around them, so the ground reads as
+     darker without turning flat. */
+  filter: brightness(0.6) saturate(0.5) contrast(1.16);
 }
 
 /* Stop Marker Hitbox - large clickable area */

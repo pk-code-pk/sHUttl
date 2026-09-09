@@ -571,7 +571,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                             className={clsx(
                                 'rounded-full w-9 h-9 flex items-center justify-center shadow-xl backdrop-blur-md border active:scale-95 transition-all',
                                 showRouteSettings
-                                    ? 'bg-crimson/20 border-crimson/40 text-crimson'
+                                    ? 'bg-crimson/25 border-crimson/60 text-white'
                                     : 'bg-neutral-900/90 border-white/10 text-neutral-300 hover:bg-neutral-800'
                             )}
                             aria-label="Route settings"
@@ -589,7 +589,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                         'justify-self-end pointer-events-auto min-w-[32px]',
                         buttonVariants({ variant: showRoutes ? 'selected' : 'overlay', size: 'md' }),
                         showRoutes
-                            ? 'border-crimson bg-crimson/20 text-crimson'
+                            ? 'border-crimson/60 bg-crimson/25 text-white'
                             : 'border-white/10 bg-black/60 text-neutral-300 hover:border-white/20'
                     )}
                 >
@@ -608,7 +608,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                         className={[
                             'rounded-full border px-4 py-2 text-xs font-medium transition-all backdrop-blur-md shadow-lg',
                             showRoutes
-                                ? 'border-crimson bg-crimson/20 text-crimson'
+                                ? 'border-crimson/60 bg-crimson/25 text-white'
                                 : 'border-white/10 bg-black/60 text-neutral-300 hover:border-white/20',
                         ].join(' ')}
                     >
@@ -631,7 +631,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                         className={clsx(
                             'rounded-full border px-3 py-2 text-xs font-medium transition-all backdrop-blur-md shadow-lg',
                             showRouteSettings
-                                ? 'border-crimson bg-crimson/20 text-crimson'
+                                ? 'border-crimson/60 bg-crimson/25 text-white'
                                 : 'border-white/10 bg-black/60 text-neutral-300 hover:border-white/20'
                         )}
                     >

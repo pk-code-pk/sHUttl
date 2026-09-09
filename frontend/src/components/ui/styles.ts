@@ -57,9 +57,12 @@ export const buttonVariants = cva(
                     "hover:bg-neutral-800/90 hover:text-white hover:border-white/20",
                 ],
                 // A chosen option — the other thing crimson means here.
+                // White label, not crimson-on-crimson: a tinted label on a
+                // tinted fill is the lowest-contrast text in the app, and this
+                // variant marks the thing currently switched on.
                 selected: [
-                    "bg-crimson/20 text-crimson-light backdrop-blur-md",
-                    "border border-crimson/50 hover:bg-crimson/25",
+                    "bg-crimson/25 text-white backdrop-blur-md",
+                    "border border-crimson/60 hover:bg-crimson/30",
                 ],
             },
             size: {

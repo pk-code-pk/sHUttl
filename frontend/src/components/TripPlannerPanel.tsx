@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { motion, AnimatePresence, type PanInfo } from "motion/react";
+import { motion, AnimatePresence } from "motion/react";
 import { MapPin, Navigation as NavigationIcon, ArrowUpDown, Clock, Info, ChevronDown, ChevronLeft, X, Share2, Check } from "lucide-react";
 import clsx from "clsx";
 import type { TripResponse, TripCandidate, TripCandidatesResponse } from "./types";
@@ -8,7 +8,7 @@ import {
     formatMinutesLabel,
     isWalkReasonable,
 } from "../utils/timeAndDistance";
-import { formatEtaSeconds } from "../utils/time";
+import { formatEtaSeconds, splitEtaLabel } from "../utils/time";
 import logo from "../assets/logo.svg";
 import { API_BASE_URL } from "@/config";
 import { describeFailure, getLocation } from "@/lib/geolocation";
@@ -16,6 +16,8 @@ import { NextBusPanel } from "./NextBusPanel";
 import { Button } from "./ui/Button";
 import { cn } from "./ui/styles";
 import { SegmentedControl } from "./ui/SegmentedControl";
+import { PanelSheet } from "./ui/PanelSheet";
+import { SNAP_DEFAULT, SNAP_MINIMISED } from "./ui/sheetSnaps";
 import {
     buildTripUrl,
     copyToClipboard,
@@ -91,7 +93,7 @@ function CandidateCard({ candidate, isSelected, onSelect }: CandidateCardProps) 
         firstSeg?.next_bus?.eta_to_boarding_stop_s ??
         firstSeg?.next_bus?.eta_to_origin_stop ??
         null;
-    const etaLabel = formatEtaSeconds(waitSeconds);
+    const eta = splitEtaLabel(formatEtaSeconds(waitSeconds));
     const routeLabel = candidate.segments
         .map((s) => s.short_name || s.route_name || 'Route')
         .join(' → ');
@@ -126,12 +128,24 @@ function CandidateCard({ candidate, isSelected, onSelect }: CandidateCardProps) 
                             {candidate.num_transfers}× transfer
                         </span>
                     )}
-                    {etaLabel ? (
-                        <span className="text-[9px] font-bold text-green-400 bg-green-500/10 px-1.5 py-0.5 rounded border border-green-500/20">
-                            {etaLabel}
+                    {eta ? (
+                        // The figure carries the row. It was a 9px green pill,
+                        // the same size as the metadata around it and in a
+                        // colour that means nothing here — green is not one of
+                        // the route colours and the app's accent is crimson.
+                        // White, large, with the unit set small beside it.
+                        <span className="flex items-baseline gap-0.5 tabular-nums">
+                            <span className="text-[17px] font-bold leading-none text-white">
+                                {eta.value}
+                            </span>
+                            {eta.unit && (
+                                <span className="text-[10px] font-semibold leading-none text-neutral-400">
+                                    {eta.unit}
+                                </span>
+                            )}
                         </span>
                     ) : (
-                        <span className="text-[9px] text-neutral-600 bg-neutral-800/30 px-1.5 py-0.5 rounded border border-white/5">
+                        <span className="text-[10px] font-semibold text-neutral-600">
                             No ETA
                         </span>
                     )}
@@ -165,64 +179,11 @@ export const TripPlannerPanel = ({
     const [originOpen, setOriginOpen] = useState(false);
     const [destOpen, setDestOpen] = useState(false);
 
-    // Mobile Bottom Sheet State
-    // 'minimized': ~15% height (header only)
-    // 'default': sheet takes the bottom ~45%, so the map keeps the majority
-    // 'expanded': ~92% height (full screen list)
-    type SheetState = 'minimized' | 'default' | 'expanded';
-    const [sheetState, setSheetState] = useState<SheetState>('default');
+    // Which snap point the sheet is resting at. The gesture itself — tracking
+    // the finger, velocity, snapping — belongs to react-modal-sheet now; see
+    // ui/PanelSheet for what that replaced.
+    const [snap, setSnap] = useState(SNAP_DEFAULT);
 
-    // ... (rest of component internal logic)
-
-    // Compute slide offset (translateY).
-    // The panel is fixed to the bottom at 100dvh tall, so the offset is how far
-    // it is pushed down: a larger number means more map is visible.
-    //
-    // 'default' deliberately keeps the majority of the screen as map. This is a
-    // map app, and the resting state should show where the buses are; the
-    // sheet at rest needs to hold the header, the mode switch and the first
-    // few rows, not the whole list. Swiping up is what asks for the list.
-    const yOffset = useMemo(() => {
-        if (sheetState === 'minimized') return '88dvh';
-        // Itinerary collapsed means less content to show, so sit lower still.
-        if (!itineraryOpen) return '68dvh';
-        return sheetState === 'expanded' ? '8dvh' : '55dvh';
-    }, [sheetState, itineraryOpen]);
-
-    // Handle drag/swipe on the grab handle
-    const handleDragEnd = (_: unknown, info: PanInfo) => {
-        const { y } = info.offset;
-        const SWIPE_THRESHOLD = 30;
-
-        if (y < -SWIPE_THRESHOLD) {
-            // Swipe Up
-            if (sheetState === 'minimized') {
-                setSheetState('default');
-            } else {
-                setSheetState('expanded');
-                setItineraryOpen(true); // Auto-open itinerary when fully expanding
-            }
-        } else if (y > SWIPE_THRESHOLD) {
-            // Swipe Down
-            if (sheetState === 'expanded') {
-                setSheetState('default');
-            } else {
-                setSheetState('minimized');
-            }
-        } else {
-            // Tap / Small movement -> Toggle
-            if (sheetState === 'minimized' || sheetState === 'expanded') {
-                setSheetState('default');
-            } else {
-                setSheetState('expanded');
-                setItineraryOpen(true); // Auto-open when toggling to expanded
-            }
-        }
-    };
-
-
-
-    // New state for autocomplete and location
     type InputMode = 'search' | 'dropdown';
     const [originMode, setOriginMode] = useState<InputMode>('search');
     const [destMode, setDestMode] = useState<InputMode>('search');
@@ -511,7 +472,8 @@ export const TripPlannerPanel = ({
             onTripChange(newCandidates[0]);
             // If only one option, go straight to itinerary; otherwise show candidate list
             setView(newCandidates.length === 1 ? 'itinerary' : 'candidates');
-            if (isMobile && sheetState === 'minimized') setSheetState('default');
+            // Surface the result if the sheet was tucked away.
+            if (isMobile && snap === SNAP_MINIMISED) setSnap(SNAP_DEFAULT);
 
             // Start live updates on success
             setActiveTripParams({
@@ -763,47 +725,9 @@ export const TripPlannerPanel = ({
     const { label: tripEtaLabel, partial: isTripEtaPartial } = useMemo(() => computeTripEtaLabel(normalizedSegments), [normalizedSegments]);
 
     return (
-        <motion.div
-            className={clsx(
-                // Interactive element
-                "pointer-events-auto",
-                // Mobile: fixed to viewport bottom
-                "fixed left-0 right-0 bottom-0 md:static md:bottom-auto",
-                "rounded-t-3xl md:rounded-xl",
-                "bg-neutral-900/95 backdrop-blur-xl md:backdrop-blur-md",
-                "border-t md:border border-white/10 md:border-white/5",
-                "shadow-[0_-8px_30px_rgba(0,0,0,0.5)] md:shadow-xl",
-                "flex flex-col",
-                // Mobile: 100dvh tall. We slide it down to hide parts.
-                "h-[100dvh] md:h-auto md:max-h-[85vh]",
-                className
-            )}
-            style={{
-                bottom: isMobile ? 0 : undefined,
-            }}
-            initial={{ y: "100%", opacity: 0 }}
-            animate={{
-                y: isMobile ? yOffset : 0,
-                // Reset top in case it was set previously
-                top: "auto",
-                opacity: 1
-            }}
-            transition={{ type: "spring", damping: 28, stiffness: 240, mass: 0.8 }}
-        >
-            {/* Mobile Grab Handle - Swipeable (large hitbox for easy swiping) */}
-            <motion.div
-                className="md:hidden w-full flex justify-center py-5 shrink-0 cursor-grab active:cursor-grabbing touch-none z-50"
-                onPanEnd={handleDragEnd}
-                title="Swipe up/down to resize"
-            >
-                <div className={clsx(
-                    "w-12 h-1.5 rounded-full bg-neutral-600/50 transition-colors",
-                    sheetState === 'expanded' && "bg-crimson/50",
-                    sheetState === 'minimized' && "bg-blue-500/30"
-                )} />
-            </motion.div>
+        <PanelSheet isMobile={isMobile} snap={snap} onSnap={setSnap} className={className}>
+            <>
 
-            <div className="px-4 pb-[env(safe-area-inset-bottom,16px)] pt-1 md:pt-4 md:pb-4 flex flex-col h-full min-h-0">
                 {/* Header and mode switch share one row. The old header spent a
                     whole row on a logo, the app's former name, the system name
                     and a "Change" button — on a sheet where vertical space is
@@ -894,7 +818,7 @@ export const TripPlannerPanel = ({
                                     className={clsx(
                                         "absolute right-2 top-1.5 px-2 py-1 rounded-md text-[9px] font-bold transition-all border",
                                         originUseCurrentLocation
-                                            ? "bg-crimson/20 border-crimson/40 text-crimson"
+                                            ? "bg-crimson/25 border-crimson/60 text-white"
                                             : "bg-neutral-900 border-white/5 text-neutral-400 hover:text-white"
                                     )}
                                 >
@@ -1206,7 +1130,7 @@ export const TripPlannerPanel = ({
                                 className={clsx(
                                     "flex items-center gap-1 rounded-full px-2.5 py-1.5 transition-colors",
                                     shareState === 'copied'
-                                        ? "bg-emerald-500/15 text-emerald-300"
+                                        ? "bg-crimson/20 text-crimson-light"
                                         : "bg-neutral-800/50 text-neutral-400 hover:bg-neutral-800 hover:text-white"
                                 )}
                             >
@@ -1283,8 +1207,8 @@ export const TripPlannerPanel = ({
                                                 <>
                                                     {candidates.some((c) => c.is_live) && (
                                                         <div className="flex items-center gap-1.5 pb-0.5">
-                                                            <div className="w-1 h-1 rounded-full bg-green-500 animate-pulse" />
-                                                            <span className="text-[9px] text-green-400 font-medium">Live tracking available</span>
+                                                            <div className="h-1 w-1 rounded-full bg-crimson-light" />
+                                                            <span className="text-[9px] font-medium text-neutral-400">Live tracking</span>
                                                         </div>
                                                     )}
                                                     {candidates
@@ -1350,7 +1274,7 @@ export const TripPlannerPanel = ({
                                                         <div className="flex items-center justify-between">
                                                             <div className="flex flex-col flex-1 min-w-0">
                                                                 <div className="flex items-center gap-2 mb-1">
-                                                                    <div className="w-1.5 h-1.5 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]" />
+                                                                    <div className="h-1.5 w-1.5 rounded-full bg-crimson-light" />
                                                                     <span className="text-[11px] font-bold text-white uppercase tracking-tight">Route Overview</span>
                                                                 </div>
                                                                 <div className="text-[10px] text-neutral-300 truncate">
@@ -1527,7 +1451,7 @@ export const TripPlannerPanel = ({
                                                             <div className="flex flex-col gap-0.5">
                                                                 <div className="flex items-center justify-center gap-1.5">
                                                                     {isLiveUpdating && (
-                                                                        <div className="w-1 h-1 rounded-full bg-green-500 animate-pulse" />
+                                                                        <div className="h-1 w-1 rounded-full bg-crimson-light" />
                                                                     )}
                                                                     <span>{updatedLabel}</span>
                                                                 </div>
@@ -1548,7 +1472,7 @@ export const TripPlannerPanel = ({
                     </AnimatePresence>
                 </div>
                 </>)}
-            </div>
-        </motion.div>
+            </>
+        </PanelSheet>
     );
 };

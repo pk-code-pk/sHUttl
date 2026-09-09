@@ -80,13 +80,6 @@ interface NextBusPanelProps {
 
 const REFRESH_MS = 15000;
 
-/** "3 min" reads better than "3.4 min", and sub-minute is "now" — a rider
- * cannot act on 40 seconds of precision. */
-function formatEta(minutes: number): string {
-    if (minutes < 1) return 'now';
-    return `${Math.round(minutes)} min`;
-}
-
 function formatWalk(minutes: number, meters: number): string {
     if (meters < 40) return 'here';
     const m = Math.max(1, Math.round(minutes));
@@ -408,13 +401,16 @@ const DepartureRow = ({
                 </div>
 
                 <div className="shrink-0 text-right">
-                    <p
-                        className={clsx(
-                            'text-[13px] font-bold leading-tight',
-                            d.eta_minutes < 1 ? 'text-emerald-400' : 'text-white',
+                    {/* Same reading as the planner's rows, so the same
+                        typography: the figure large and white, the unit small
+                        beside it. */}
+                    <p className="flex items-baseline justify-end gap-0.5 leading-none tabular-nums">
+                        <span className="text-[17px] font-bold text-white">
+                            {d.eta_minutes < 1 ? 'now' : Math.round(d.eta_minutes)}
+                        </span>
+                        {d.eta_minutes >= 1 && (
+                            <span className="text-[10px] font-semibold text-neutral-400">min</span>
                         )}
-                    >
-                        {formatEta(d.eta_minutes)}
                     </p>
                     {d.following_minutes.length > 0 && (
                         <p className="text-[9px] text-neutral-500">
