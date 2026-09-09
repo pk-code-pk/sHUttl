@@ -23,7 +23,7 @@ export const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
  */
 export function makeVehicleIcon(rotationDeg: number, color: string | null | undefined) {
   const safeColor = color || "#ffffff";
-  const size = 28;
+  const size = 34;
   const half = size / 2;
 
   return L.divIcon({
