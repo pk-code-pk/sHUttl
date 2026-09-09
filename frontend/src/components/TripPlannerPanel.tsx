@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { motion, AnimatePresence, type PanInfo } from "framer-motion";
-import { MapPin, Navigation as NavigationIcon, ArrowUpDown, Clock, Info, ChevronDown, ChevronLeft, X } from "lucide-react";
+import { motion, AnimatePresence } from "motion/react";
+import { createPortal } from "react-dom";
+import { MapPin, Navigation as NavigationIcon, ArrowUpDown, Clock, Info, ChevronDown, ChevronLeft, X, Share2, Check, TriangleAlert } from "lucide-react";
 import clsx from "clsx";
 import type { TripResponse, TripCandidate, TripCandidatesResponse } from "./types";
 import {
@@ -8,9 +9,24 @@ import {
     formatMinutesLabel,
     isWalkReasonable,
 } from "../utils/timeAndDistance";
-import { formatEtaSeconds } from "../utils/time";
+import { formatEtaSeconds, splitEtaLabel } from "../utils/time";
 import logo from "../assets/logo.svg";
 import { API_BASE_URL } from "@/config";
+import { describeFailure, getLocation } from "@/lib/geolocation";
+import { NextBusPanel } from "./NextBusPanel";
+import { Button } from "./ui/Button";
+import { Alert, AlertActions, AlertContent, AlertDescription, AlertIcon, AlertTitle } from "./ui/Alert";
+import { cn } from "./ui/styles";
+import { SegmentedControl } from "./ui/SegmentedControl";
+import { PanelSheet } from "./ui/PanelSheet";
+import { SNAP_DEFAULT, SNAP_MINIMISED } from "./ui/sheetSnaps";
+import {
+    buildTripUrl,
+    copyToClipboard,
+    hasTripLink,
+    parseTripLink,
+    type TripEndpointRef,
+} from "@/lib/tripLink";
 
 interface System {
     id: number;
@@ -21,7 +37,6 @@ interface TripPlannerPanelProps {
     className?: string;
 
     system: System | null;
-    onChangeSystem: () => void;
     trip: TripResponse | null;
     onTripChange: (trip: TripResponse | null) => void;
     onUserLocationChange?: (location: { lat: number; lng: number } | null) => void;
@@ -80,7 +95,7 @@ function CandidateCard({ candidate, isSelected, onSelect }: CandidateCardProps) 
         firstSeg?.next_bus?.eta_to_boarding_stop_s ??
         firstSeg?.next_bus?.eta_to_origin_stop ??
         null;
-    const etaLabel = formatEtaSeconds(waitSeconds);
+    const eta = splitEtaLabel(formatEtaSeconds(waitSeconds));
     const routeLabel = candidate.segments
         .map((s) => s.short_name || s.route_name || 'Route')
         .join(' → ');
@@ -115,12 +130,24 @@ function CandidateCard({ candidate, isSelected, onSelect }: CandidateCardProps) 
                             {candidate.num_transfers}× transfer
                         </span>
                     )}
-                    {etaLabel ? (
-                        <span className="text-[9px] font-bold text-green-400 bg-green-500/10 px-1.5 py-0.5 rounded border border-green-500/20">
-                            {etaLabel}
+                    {eta ? (
+                        // The figure carries the row. It was a 9px green pill,
+                        // the same size as the metadata around it and in a
+                        // colour that means nothing here — green is not one of
+                        // the route colours and the app's accent is crimson.
+                        // White, large, with the unit set small beside it.
+                        <span className="flex items-baseline gap-0.5 tabular-nums">
+                            <span className="text-[17px] font-bold leading-none text-white">
+                                {eta.value}
+                            </span>
+                            {eta.unit && (
+                                <span className="text-[10px] font-semibold leading-none text-neutral-400">
+                                    {eta.unit}
+                                </span>
+                            )}
                         </span>
                     ) : (
-                        <span className="text-[9px] text-neutral-600 bg-neutral-800/30 px-1.5 py-0.5 rounded border border-white/5">
+                        <span className="text-[10px] font-semibold text-neutral-600">
                             No ETA
                         </span>
                     )}
@@ -136,7 +163,6 @@ function CandidateCard({ candidate, isSelected, onSelect }: CandidateCardProps) 
 export const TripPlannerPanel = ({
     className,
     system,
-    onChangeSystem,
     trip,
     onTripChange,
     onUserLocationChange
@@ -155,59 +181,11 @@ export const TripPlannerPanel = ({
     const [originOpen, setOriginOpen] = useState(false);
     const [destOpen, setDestOpen] = useState(false);
 
-    // Mobile Bottom Sheet State
-    // 'minimized': ~15% height (header only)
-    // 'default': ~70% height (inputs + map)
-    // 'expanded': ~92% height (full screen list)
-    type SheetState = 'minimized' | 'default' | 'expanded';
-    const [sheetState, setSheetState] = useState<SheetState>('default');
+    // Which snap point the sheet is resting at. The gesture itself — tracking
+    // the finger, velocity, snapping — belongs to react-modal-sheet now; see
+    // ui/PanelSheet for what that replaced.
+    const [snap, setSnap] = useState(SNAP_DEFAULT);
 
-    // ... (rest of component internal logic)
-
-    // Compute slide offset (translateY)
-    // Panel is fixed at bottom with 100dvh height.
-    // y=0 means fully expanded (covering screen).
-    // y=30dvh means pushed down by 30dvh (top at 30dvh).
-    const yOffset = useMemo(() => {
-        if (sheetState === 'minimized') return '85dvh';
-        if (!itineraryOpen) return '50dvh';
-        return sheetState === 'expanded' ? '8dvh' : '30dvh';
-    }, [sheetState, itineraryOpen]);
-
-    // Handle drag/swipe on the grab handle
-    const handleDragEnd = (_: unknown, info: PanInfo) => {
-        const { y } = info.offset;
-        const SWIPE_THRESHOLD = 30;
-
-        if (y < -SWIPE_THRESHOLD) {
-            // Swipe Up
-            if (sheetState === 'minimized') {
-                setSheetState('default');
-            } else {
-                setSheetState('expanded');
-                setItineraryOpen(true); // Auto-open itinerary when fully expanding
-            }
-        } else if (y > SWIPE_THRESHOLD) {
-            // Swipe Down
-            if (sheetState === 'expanded') {
-                setSheetState('default');
-            } else {
-                setSheetState('minimized');
-            }
-        } else {
-            // Tap / Small movement -> Toggle
-            if (sheetState === 'minimized' || sheetState === 'expanded') {
-                setSheetState('default');
-            } else {
-                setSheetState('expanded');
-                setItineraryOpen(true); // Auto-open when toggling to expanded
-            }
-        }
-    };
-
-
-
-    // New state for autocomplete and location
     type InputMode = 'search' | 'dropdown';
     const [originMode, setOriginMode] = useState<InputMode>('search');
     const [destMode, setDestMode] = useState<InputMode>('search');
@@ -234,6 +212,35 @@ export const TripPlannerPanel = ({
     const POLL_INTERVAL_MS = 8000; // ~8 seconds
 
     // Multi-candidate state
+    // Two modes. "Next bus out" is the common case — standing somewhere,
+    // wanting to know what is leaving — and it needs no input at all, so it
+    // does not belong behind the from/to form.
+    type PanelMode = 'next' | 'plan';
+    // A shared link is a request for a specific trip, so it opens the planner.
+    const [mode, setMode] = useState<PanelMode>(
+        hasTripLink(window.location.search) ? 'plan' : 'next',
+    );
+
+    // A mode switch that would discard a planned trip waits for confirmation.
+    // Switching to Next Bus Out has to clear the trip — the panel below it is
+    // a departures list, so leaving a planned route drawn on the map would
+    // show a trip nothing on screen refers to.
+    const [pendingMode, setPendingMode] = useState<PanelMode | null>(null);
+
+    // Shareable-link state. `sharedEndpoints` remembers what the current
+    // result was planned from, because the trip response only carries the
+    // matched stops — not whether the user asked for a stop or dropped a pin,
+    // which is what the link has to preserve.
+    const [sharedEndpoints, setSharedEndpoints] = useState<{
+        origin: TripEndpointRef;
+        destination: TripEndpointRef;
+    } | null>(null);
+    const [shareState, setShareState] = useState<'idle' | 'copied' | 'failed'>('idle');
+    const [shareUrl, setShareUrl] = useState<string>('');
+    // Guards the auto-plan so a shared link is planned once, not on every
+    // stops refresh.
+    const linkPlannedRef = useRef(false);
+
     const [candidates, setCandidates] = useState<TripCandidate[]>([]);
     const [selectedIndex, setSelectedIndex] = useState(0);
     type TripView = 'candidates' | 'itinerary';
@@ -309,9 +316,43 @@ export const TripPlannerPanel = ({
                 return res.json();
             })
             .then((data: StopOption[]) => {
-                setStops(data || []);
-                setOriginStopId('');
-                setDestStopId('');
+                const loaded = data || [];
+                setStops(loaded);
+
+                // A shared link names its endpoints in the URL; resolve them
+                // against the stop list now that we have one, instead of
+                // clearing the selection as we would on a normal load.
+                const linked = hasTripLink(window.location.search)
+                    ? parseTripLink(window.location.search, loaded)
+                    : { origin: null, destination: null };
+
+                // Set the visible query text alongside the id. Without this the
+                // trip plans correctly from the link but the From/To boxes
+                // render empty, so the form looks blank and pressing Plan Trip
+                // again fails validation.
+                const nameFor = (id: string) =>
+                    loaded.find((s) => s.id.toString() === id.toString())?.name ?? '';
+
+                if (linked.origin?.stopId) {
+                    setOriginStopId(linked.origin.stopId);
+                    setOriginQuery(nameFor(linked.origin.stopId));
+                } else {
+                    setOriginStopId('');
+                }
+                if (linked.destination?.stopId) {
+                    setDestStopId(linked.destination.stopId);
+                    setDestQuery(nameFor(linked.destination.stopId));
+                } else {
+                    setDestStopId('');
+                }
+
+                if (linked.origin?.coords) {
+                    // Reuse the current-location path: it already routes a raw
+                    // coordinate pair through planning without a stop id.
+                    setOriginCoords(linked.origin.coords);
+                    setOriginUseCurrentLocation(true);
+                }
+
                 resetLiveState();
             })
             .catch((err) => {
@@ -325,40 +366,39 @@ export const TripPlannerPanel = ({
         stops.find((s) => s.id.toString() === id.toString());
 
     const handleUseCurrentLocation = () => {
-        if (!navigator.geolocation) {
-            setLocationError('Geolocation is not supported by this browser.');
-            return;
-        }
-
         setLocationError(null);
         setLocating(true);
 
-        navigator.geolocation.getCurrentPosition(
-            (pos) => {
-                const { latitude, longitude } = pos.coords;
-                const coords = { lat: latitude, lng: longitude };
-                setOriginCoords(coords);
+        // force: this is an explicit tap, so it should override the cache and
+        // the failure cooldown — the user may have just enabled Location
+        // Services. Shares one request with Next Bus Out either way.
+        void getLocation(true).then((result) => {
+            setLocating(false);
+            if (result.coords) {
+                setOriginCoords(result.coords);
                 setOriginUseCurrentLocation(true);
                 setOriginQuery('Current location');
                 setOriginStopId('');
-                setLocating(false);
-                onUserLocationChange?.(coords);
+                onUserLocationChange?.(result.coords);
                 resetLiveState();
-            },
-            (err) => {
-                console.error(err);
-                setLocationError('Could not get your location.');
-                setLocating(false);
-            },
-            {
-                enableHighAccuracy: true,
-                timeout: 10000,
-                maximumAge: 10000,
+                return;
             }
-        );
+            if (result.failure) {
+                // Same wording as Next Bus Out: one cause, one explanation.
+                setLocationError(describeFailure(result.failure));
+            }
+        });
     };
 
-    const handlePlanTrip = async () => {
+    // `pair` lets a caller plan a specific origin/destination straight away.
+    // Next Bus Out uses it: setting the state and then calling would read the
+    // previous values, since state updates are not applied synchronously.
+    const handlePlanTrip = async (pair?: {
+        originStopId: string;
+        destStopId: string;
+        /** Constrain the answer to one route — see /trip's route_id. */
+        routeId?: string;
+    }) => {
         setError(null);
 
         if (!system?.id) {
@@ -366,15 +406,18 @@ export const TripPlannerPanel = ({
             return;
         }
 
+        const effectiveOriginStopId = pair?.originStopId ?? originStopId;
+        const effectiveDestStopId = pair?.destStopId ?? destStopId;
+
         // Determine origin coordinates
         let originLat: number | null = null;
         let originLng: number | null = null;
 
-        if (originUseCurrentLocation && originCoords) {
+        if (!pair && originUseCurrentLocation && originCoords) {
             originLat = originCoords.lat;
             originLng = originCoords.lng;
-        } else if (originStopId) {
-            const stop = findStopById(originStopId);
+        } else if (effectiveOriginStopId) {
+            const stop = findStopById(effectiveOriginStopId);
             if (stop) {
                 originLat = stop.lat;
                 originLng = stop.lng;
@@ -385,8 +428,8 @@ export const TripPlannerPanel = ({
         let destLat: number | null = null;
         let destLng: number | null = null;
 
-        if (destStopId) {
-            const stop = findStopById(destStopId);
+        if (effectiveDestStopId) {
+            const stop = findStopById(effectiveDestStopId);
             if (stop) {
                 destLat = stop.lat;
                 destLng = stop.lng;
@@ -407,6 +450,7 @@ export const TripPlannerPanel = ({
                 lng2: destLng.toString(),
                 system_id: system.id.toString(),
             });
+            if (pair?.routeId) params.set('route_id', pair.routeId);
 
             const res = await fetch(`${API_BASE_URL}/trip?${params.toString()}`);
             if (!res.ok) {
@@ -430,7 +474,8 @@ export const TripPlannerPanel = ({
             onTripChange(newCandidates[0]);
             // If only one option, go straight to itinerary; otherwise show candidate list
             setView(newCandidates.length === 1 ? 'itinerary' : 'candidates');
-            if (isMobile && sheetState === 'minimized') setSheetState('default');
+            // Surface the result if the sheet was tucked away.
+            if (isMobile && snap === SNAP_MINIMISED) setSnap(SNAP_DEFAULT);
 
             // Start live updates on success
             setActiveTripParams({
@@ -444,6 +489,22 @@ export const TripPlannerPanel = ({
             setIsLiveUpdating(true);
             setShowSuccess(true);
             setTimeout(() => setShowSuccess(false), 800);
+
+            // Make the result addressable. replaceState rather than pushState:
+            // planning a trip is not a navigation, and stacking history
+            // entries would make Back walk through every plan attempt.
+            const endpoints = {
+                origin: effectiveOriginStopId
+                    ? { stopId: effectiveOriginStopId }
+                    : { coords: { lat: originLat, lng: originLng } },
+                destination: effectiveDestStopId
+                    ? { stopId: effectiveDestStopId }
+                    : { coords: { lat: destLat, lng: destLng } },
+            };
+            setSharedEndpoints(endpoints);
+            setShareState('idle');
+            const url = buildTripUrl(endpoints.origin, endpoints.destination, stops);
+            if (url) window.history.replaceState(null, '', url);
         } catch (e) {
             console.error(e);
             const message = e instanceof Error ? e.message : "Unknown error";
@@ -454,8 +515,109 @@ export const TripPlannerPanel = ({
         }
     };
 
+    const handleShare = async () => {
+        if (!sharedEndpoints) return;
+        const url = buildTripUrl(sharedEndpoints.origin, sharedEndpoints.destination, stops);
+        if (!url) return;
+        setShareUrl(url);
+        const ok = await copyToClipboard(url);
+        // On failure the URL is shown for manual copying rather than claiming
+        // it was copied — in-app browsers routinely block clipboard access,
+        // and that is exactly where shared links get opened.
+        setShareState(ok ? 'copied' : 'failed');
+        if (ok) setTimeout(() => setShareState('idle'), 2000);
+    };
+
+    // Plan the trip named in the URL, once, after stops resolve.
+    useEffect(() => {
+        if (linkPlannedRef.current) return;
+        if (!system?.id || stops.length === 0) return;
+        if (!hasTripLink(window.location.search)) return;
+
+        const linked = parseTripLink(window.location.search, stops);
+        if (!linked.origin || !linked.destination) return;
+
+        // Coordinate origins land in originCoords via the stops effect; wait
+        // for that so planning does not run against a half-applied selection.
+        const originReady = linked.origin.stopId
+            ? originStopId === linked.origin.stopId
+            : Boolean(originCoords);
+        const destReady = linked.destination.stopId
+            ? destStopId === linked.destination.stopId
+            : true;
+        if (!originReady || !destReady) return;
+
+        linkPlannedRef.current = true;
+        void handlePlanTrip();
+        // handlePlanTrip is intentionally omitted: it is redefined on every
+        // render, and depending on it would re-run this effect continuously.
+        // The ref guard is what makes the auto-plan fire exactly once.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [system?.id, stops, originStopId, destStopId, originCoords]);
+
+    /**
+     * Draw a departure on the map, without leaving Next Bus Out.
+     *
+     * The panel keeps its own list UI; only the map behaviour is shared. That
+     * sharing is the point: this runs the same /trip request and pushes the
+     * result through the same `trip` prop the planner uses, so the panning,
+     * the route highlight, the drawn path, the endpoint markers and the live
+     * refresh are the Plan Trip implementation rather than a second one that
+     * drifts from it.
+     *
+     * The planner's own fields are filled too, so switching to Plan Trip
+     * afterwards shows the trip you were just looking at instead of an empty
+     * form. What it deliberately does not do is switch modes.
+     */
+    const showDepartureOnMap = (
+        originStopId: string,
+        destStopId: string | null,
+        routeId?: string,
+    ) => {
+        if (!destStopId) {
+            onTripChange(null);
+            resetLiveState();
+            return;
+        }
+
+        const origin = findStopById(originStopId);
+        const dest = findStopById(destStopId);
+        if (!origin || !dest) return;
+
+        setOriginUseCurrentLocation(false);
+        setOriginCoords(null);
+        setOriginStopId(originStopId);
+        setOriginQuery(origin.name);
+        setDestStopId(destStopId);
+        setDestQuery(dest.name);
+        void handlePlanTrip({ originStopId, destStopId, routeId });
+    };
+
+    const requestMode = (next: PanelMode) => {
+        if (next === mode) return;
+        // Only worth interrupting when there is something to lose: a trip on
+        // the map, or candidates the user is still choosing between.
+        const wouldDiscardTrip = next === 'next' && (Boolean(trip) || candidates.length > 0);
+        if (wouldDiscardTrip) {
+            setPendingMode(next);
+            return;
+        }
+        setPendingMode(null);
+        setMode(next);
+    };
+
+    const confirmModeSwitch = () => {
+        if (!pendingMode) return;
+        onTripChange(null);
+        resetLiveState();
+        setMode(pendingMode);
+        setPendingMode(null);
+    };
+
     // Helper: Reset live updates and candidates when inputs change significantly
     const resetLiveState = () => {
+        setSharedEndpoints(null);
+        setShareState('idle');
         setActiveTripParams(null);
         setIsLiveUpdating(false);
         setLastUpdatedAt(null);
@@ -565,70 +727,89 @@ export const TripPlannerPanel = ({
     const { label: tripEtaLabel, partial: isTripEtaPartial } = useMemo(() => computeTripEtaLabel(normalizedSegments), [normalizedSegments]);
 
     return (
-        <motion.div
-            className={clsx(
-                // Interactive element
-                "pointer-events-auto",
-                // Mobile: fixed to viewport bottom
-                "fixed left-0 right-0 bottom-0 md:static md:bottom-auto",
-                "rounded-t-3xl md:rounded-xl",
-                "bg-neutral-900/95 backdrop-blur-xl md:backdrop-blur-md",
-                "border-t md:border border-white/10 md:border-white/5",
-                "shadow-[0_-8px_30px_rgba(0,0,0,0.5)] md:shadow-xl",
-                "flex flex-col",
-                // Mobile: 100dvh tall. We slide it down to hide parts.
-                "h-[100dvh] md:h-auto md:max-h-[85vh]",
-                className
-            )}
-            style={{
-                bottom: isMobile ? 0 : undefined,
-            }}
-            initial={{ y: "100%", opacity: 0 }}
-            animate={{
-                y: isMobile ? yOffset : 0,
-                // Reset top in case it was set previously
-                top: "auto",
-                opacity: 1
-            }}
-            transition={{ type: "spring", damping: 28, stiffness: 240, mass: 0.8 }}
-        >
-            {/* Mobile Grab Handle - Swipeable (large hitbox for easy swiping) */}
-            <motion.div
-                className="md:hidden w-full flex justify-center py-5 shrink-0 cursor-grab active:cursor-grabbing touch-none z-50"
-                onPanEnd={handleDragEnd}
-                title="Swipe up/down to resize"
-            >
-                <div className={clsx(
-                    "w-12 h-1.5 rounded-full bg-neutral-600/50 transition-colors",
-                    sheetState === 'expanded' && "bg-crimson/50",
-                    sheetState === 'minimized' && "bg-blue-500/30"
-                )} />
-            </motion.div>
+        <PanelSheet isMobile={isMobile} snap={snap} onSnap={setSnap} className={className}>
+            <>
 
-            <div className="px-4 pb-[env(safe-area-inset-bottom,16px)] pt-1 md:pt-4 md:pb-4 flex flex-col h-full min-h-0">
-                {/* Header with System Selector */}
-                <div className="flex items-center justify-between shrink-0 mb-3">
-                    <div className="flex items-center gap-2">
-                        <img src={logo} alt="Crimson Shuttle" className="h-6 w-auto opacity-90" />
-                        <div className="flex flex-col">
-                            <span className="text-sm font-bold text-white leading-tight">
-                                Crimson Shuttle
-                            </span>
-                            <span className="text-[10px] text-neutral-400 font-medium leading-tight">
-                                {system ? system.name : 'Select system'}
-                            </span>
-                        </div>
-                    </div>
-
-                    <button
-                        type="button"
-                        onClick={onChangeSystem}
-                        className="inline-flex items-center rounded-full border border-neutral-700/50 bg-neutral-800/50 px-2.5 py-1 text-[10px] font-medium text-neutral-300 hover:border-crimson/50 hover:text-white transition-all"
-                    >
-                        Change
-                    </button>
+                {/* Header and mode switch share one row. The old header spent a
+                    whole row on a logo, the app's former name, the system name
+                    and a "Change" button — on a sheet where vertical space is
+                    the scarcest thing there is, and with only one system left
+                    to change to. The logo already says what the app is. */}
+                <div className="mb-2 flex shrink-0 items-center gap-2">
+                    <img src={logo} alt="sHUttl" className="h-5 w-auto shrink-0 opacity-90" />
+                    <SegmentedControl
+                        className="flex-1"
+                        layoutGroup="panel-mode"
+                        value={mode}
+                        onChange={requestMode}
+                        segments={[
+                            { id: 'next' as PanelMode, label: 'Next Bus Out' },
+                            { id: 'plan' as PanelMode, label: 'Plan Trip' },
+                        ]}
+                    />
                 </div>
 
+                {/* Centred over the whole screen, not inline in the sheet.
+                    A confirmation that appears in the flow of a panel is easy
+                    to miss and easy to mis-tap; this is a decision that
+                    discards work, so it takes the screen until it is answered. */}
+                {/* Portalled to the body: the sheet is transformed, and a
+                    transformed ancestor makes position:fixed resolve against
+                    it rather than the viewport — so the overlay was trapped
+                    inside the sheet and landed at its bottom edge. */}
+                {createPortal(
+                    <AnimatePresence>
+                        {pendingMode && (
+                        <>
+                            <motion.div
+                                className="fixed inset-0 z-[70] bg-black/60 backdrop-blur-sm"
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                exit={{ opacity: 0 }}
+                                onClick={() => setPendingMode(null)}
+                            />
+                            <motion.div
+                                className="fixed inset-x-4 top-1/2 z-[71] -translate-y-1/2"
+                                initial={{ opacity: 0, scale: 0.96, y: '-46%' }}
+                                animate={{ opacity: 1, scale: 1, y: '-50%' }}
+                                exit={{ opacity: 0, scale: 0.97, y: '-48%' }}
+                                transition={{ type: 'spring', stiffness: 420, damping: 34 }}
+                            >
+                                <Alert variant="warning" className="mx-auto max-w-sm shadow-2xl">
+                                    <AlertIcon>
+                                        <TriangleAlert size={16} />
+                                    </AlertIcon>
+                                    <AlertContent>
+                                        <AlertTitle>Clear your planned trip?</AlertTitle>
+                                        <AlertDescription>
+                                            Next Bus Out shows departures near you, so the
+                                            route you planned will come off the map.
+                                        </AlertDescription>
+                                        <AlertActions>
+                                            <Button variant="primary" size="sm" block onClick={confirmModeSwitch}>
+                                                Clear and switch
+                                            </Button>
+                                            <Button variant="secondary" size="sm" block onClick={() => setPendingMode(null)}>
+                                                Keep trip
+                                            </Button>
+                                        </AlertActions>
+                                    </AlertContent>
+                                </Alert>
+                            </motion.div>
+                        </>
+                        )}
+                    </AnimatePresence>,
+                    document.body,
+                )}
+
+                {mode === 'next' && (
+                    <NextBusPanel
+                        systemId={system?.id}
+                        onShowOnMap={showDepartureOnMap}
+                    />
+                )}
+
+                {mode === 'plan' && (<>
                 {/* Inputs */}
                 <div className="space-y-4 pt-1 shrink-0 relative">
                     {/* Origin Field */}
@@ -676,7 +857,7 @@ export const TripPlannerPanel = ({
                                     className={clsx(
                                         "absolute right-2 top-1.5 px-2 py-1 rounded-md text-[9px] font-bold transition-all border",
                                         originUseCurrentLocation
-                                            ? "bg-crimson/20 border-crimson/40 text-crimson"
+                                            ? "bg-crimson/25 border-crimson/60 text-white"
                                             : "bg-neutral-900 border-white/5 text-neutral-400 hover:text-white"
                                     )}
                                 >
@@ -880,14 +1061,19 @@ export const TripPlannerPanel = ({
                             setOriginCoords(null);
                             resetLiveState();
                         }}
-                        className="h-10 px-3 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-400 hover:text-white transition-colors flex items-center justify-center"
+                        className={cn(
+                            "flex h-10 items-center justify-center rounded-xl px-3",
+                            "bg-neutral-800 text-neutral-400 transition-all duration-150",
+                            "hover:bg-neutral-700 hover:text-white active:scale-[0.97]",
+                            "shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]",
+                        )}
                         aria-label="Swap origin and destination"
                     >
                         <ArrowUpDown size={16} />
                     </button>
 
                     <motion.button
-                        onClick={handlePlanTrip}
+                        onClick={() => void handlePlanTrip()}
                         disabled={planning || !system || (!originStopId && !originUseCurrentLocation) || !destStopId}
                         whileTap={{ scale: 0.98 }}
                         animate={error ? { x: [0, -4, 4, -4, 4, 0] } : {}}
@@ -895,7 +1081,9 @@ export const TripPlannerPanel = ({
                         className={clsx(
                             "h-10 flex-1 text-sm font-bold rounded-lg transition-all relative overflow-hidden",
                             (system && (originStopId || originUseCurrentLocation) && destStopId)
-                                ? (planning ? "bg-[#6a0101] text-white/50" : "bg-[#A20202] hover:bg-[#8a0101] text-white shadow-lg shadow-red-900/30")
+                                ? (planning
+                                    ? "bg-crimson-dark text-white/50"
+                                    : "bg-crimson hover:bg-crimson-light text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.18)]")
                                 : "bg-neutral-800 text-neutral-500 cursor-not-allowed"
                         )}
                         aria-busy={planning}
@@ -972,6 +1160,27 @@ export const TripPlannerPanel = ({
                                 {hasTrip ? 'Routes' : 'Itinerary'}
                             </span>
                         )}
+                        <div className="flex items-center gap-1.5">
+                        {sharedEndpoints && (
+                            <button
+                                type="button"
+                                onClick={handleShare}
+                                aria-label="Copy a link to this trip"
+                                className={clsx(
+                                    "flex items-center gap-1 rounded-full px-2.5 py-1.5 transition-colors",
+                                    shareState === 'copied'
+                                        ? "bg-crimson/20 text-crimson-light"
+                                        : "bg-neutral-800/50 text-neutral-400 hover:bg-neutral-800 hover:text-white"
+                                )}
+                            >
+                                {shareState === 'copied'
+                                    ? <Check size={12} />
+                                    : <Share2 size={12} />}
+                                <span className="text-[10px] font-bold uppercase tracking-wider">
+                                    {shareState === 'copied' ? 'Copied' : 'Share'}
+                                </span>
+                            </button>
+                        )}
                         <button
                             type="button"
                             onClick={() => setItineraryOpen((o) => !o)}
@@ -986,7 +1195,24 @@ export const TripPlannerPanel = ({
                                 )}
                             />
                         </button>
+                        </div>
                     </div>
+
+                    {/* Clipboard blocked (common in in-app browsers): show the
+                        link so it can still be copied by hand. */}
+                    {shareState === 'failed' && shareUrl && (
+                        <div className="mb-2 rounded-lg bg-neutral-800/60 px-2.5 py-2">
+                            <p className="text-[10px] text-neutral-400 mb-1">
+                                Copy this link:
+                            </p>
+                            <input
+                                readOnly
+                                value={shareUrl}
+                                onFocus={(e) => e.currentTarget.select()}
+                                className="w-full bg-transparent text-[10px] text-white outline-none"
+                            />
+                        </div>
+                    )}
 
                     <AnimatePresence initial={false}>
                         {itineraryOpen && (
@@ -1020,8 +1246,8 @@ export const TripPlannerPanel = ({
                                                 <>
                                                     {candidates.some((c) => c.is_live) && (
                                                         <div className="flex items-center gap-1.5 pb-0.5">
-                                                            <div className="w-1 h-1 rounded-full bg-green-500 animate-pulse" />
-                                                            <span className="text-[9px] text-green-400 font-medium">Live tracking available</span>
+                                                            <div className="h-1 w-1 rounded-full bg-crimson-light" />
+                                                            <span className="text-[9px] font-medium text-neutral-400">Live tracking</span>
                                                         </div>
                                                     )}
                                                     {candidates
@@ -1087,7 +1313,7 @@ export const TripPlannerPanel = ({
                                                         <div className="flex items-center justify-between">
                                                             <div className="flex flex-col flex-1 min-w-0">
                                                                 <div className="flex items-center gap-2 mb-1">
-                                                                    <div className="w-1.5 h-1.5 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]" />
+                                                                    <div className="h-1.5 w-1.5 rounded-full bg-crimson-light" />
                                                                     <span className="text-[11px] font-bold text-white uppercase tracking-tight">Route Overview</span>
                                                                 </div>
                                                                 <div className="text-[10px] text-neutral-300 truncate">
@@ -1264,7 +1490,7 @@ export const TripPlannerPanel = ({
                                                             <div className="flex flex-col gap-0.5">
                                                                 <div className="flex items-center justify-center gap-1.5">
                                                                     {isLiveUpdating && (
-                                                                        <div className="w-1 h-1 rounded-full bg-green-500 animate-pulse" />
+                                                                        <div className="h-1 w-1 rounded-full bg-crimson-light" />
                                                                     )}
                                                                     <span>{updatedLabel}</span>
                                                                 </div>
@@ -1284,7 +1510,8 @@ export const TripPlannerPanel = ({
                         )}
                     </AnimatePresence>
                 </div>
-            </div>
-        </motion.div>
+                </>)}
+            </>
+        </PanelSheet>
     );
 };

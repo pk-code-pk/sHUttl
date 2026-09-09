@@ -14,9 +14,16 @@ export function bearingDeg(from: [number, number], to: [number, number]) {
 
 export const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 
-export function makeVehicleChevronIcon(rotationDeg: number, color: string | null | undefined) {
-  const safeColor = color || '#ffffff';
-  const size = 28;
+/**
+ * A vehicle marker: a plain arrow in the route colour with a dark outline.
+ *
+ * The outline is the only non-obvious part, and it is not decoration — a bus
+ * sits on a route line of its own colour, so without it the arrow disappears
+ * into the line it is travelling along.
+ */
+export function makeVehicleIcon(rotationDeg: number, color: string | null | undefined) {
+  const safeColor = color || "#ffffff";
+  const size = 34;
   const half = size / 2;
 
   return L.divIcon({
@@ -28,12 +35,11 @@ export function makeVehicleChevronIcon(rotationDeg: number, color: string | null
         width:${size}px;height:${size}px;
         transform: rotate(${rotationDeg}deg);
         transform-origin: 50% 50%;
-        --vehicle-color: ${safeColor};
       ">
         <svg width="${size}" height="${size}" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
-          <!-- chevron arrow with notch, use currentColor for tinting -->
-          <path d="M32 6 L58 46 L40 38 L32 58 L24 38 L6 46 Z"
-                fill="currentColor" />
+          <path d="M32 8 L54 52 L32 41 L10 52 Z"
+                fill="${safeColor}" stroke="#0b0b0c" stroke-width="5"
+                stroke-linejoin="round" paint-order="stroke" />
         </svg>
       </div>
     `,

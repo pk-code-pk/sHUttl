@@ -1,8 +1,81 @@
 @import "tailwindcss";
 
+/* ---------------------------------------------------------------------------
+   Palette: grey surfaces, crimson accent — the app's original style.
+
+   The neutral ramp is Tailwind's own, deliberately not overridden. An earlier
+   pass replaced it with a cool slate and then a navy; both fought the app's
+   identity rather than supporting it.
+
+   Only the crimson tokens are defined here, and only because they have to be:
+   they previously lived in :root, where Tailwind v4 does not look, so every
+   bg-crimson / text-crimson / border-crimson class in the app generated no
+   rule at all and the accent never rendered. Value is Harvard's official
+   crimson rather than the muddy #A20202 that was here.
+--------------------------------------------------------------------------- */
+@theme {
+  /* Two neighbouring values rather than one bright red. The deep tone carries
+     surfaces — pills, active states, the primary action — and the lighter one
+     is reserved for text and hairlines sitting on top of it. They are ~14
+     degrees apart in hue and close in chroma, so a filled pill and its label
+     read as one material instead of two colours meeting.
+
+     The pills were previously filled with #a51c30 at full strength, which on a
+     dark map is the brightest thing on screen and pulled the eye off the
+     routes. `deep` is where fills live now; the old value survives as the
+     mid-tone for borders. */
+  --color-crimson: #8e1c2b;
+  --color-crimson-deep: #6d1522;
+  --color-crimson-mid: #a5233a;
+  --color-crimson-light: #d4737f;
+  /* Kept: existing rules reference it. */
+  --color-crimson-dark: #6d1522;
+}
+
 /* Map Styles */
 .leaflet-container {
   background: #0b0f17;
+}
+
+/* The basemap arrives mid-grey, several stops lighter than the panel above it,
+   which made the two read as separate applications stacked on each other.
+   Darkening it into the same range is the fix; no hue is added, so the map
+   stays grey.
+
+   Brightness is the load-bearing value here and was tuned against
+   screenshots: at 0.52 the map became a void with illegible street names,
+   which costs the orientation a map exists to give. This keeps streets
+   readable while sitting a step above the sheet, so map and panel still read
+   as figure and ground. */
+/* Anything not yet painted shows this rather than the page beneath, so a tile
+   still in flight is a dark square instead of a white one. Leaflet leaves
+   tiles transparent, which is where the bursts of white came from: the browser
+   showed whatever was behind the pane. */
+.leaflet-tile-pane img,
+.leaflet-tile {
+  background: #0b0f17;
+}
+
+/* Kill the fade-in. Leaflet ramps opacity 0 to 1 per tile, which is precisely
+   what makes loading visible; with the dark ground above, a tile can simply
+   appear. */
+.shuttl-tile,
+.leaflet-tile {
+  opacity: 1 !important;
+  transition: none !important;
+}
+
+.leaflet-tile-pane {
+  /* Darker, so the route colours and the buses carry the map rather than
+     competing with the ground under them.
+
+     Brightness is the load-bearing value and has a floor: at 0.52 the map
+     became a void with illegible street names, which costs the orientation a
+     map exists to give. 0.60 is as far down as it goes while streets stay
+     readable, and the contrast bump buys some of that legibility back — it
+     separates the roads from the blocks around them, so the ground reads as
+     darker without turning flat. */
+  filter: brightness(0.6) saturate(0.5) contrast(1.16);
 }
 
 /* Stop Marker Hitbox - large clickable area */
@@ -13,7 +86,8 @@
   cursor: pointer;
 }
 
-/* Visible glowing dot - centered in hitbox (default white) */
+/* Stop dot - solid, centred in hitbox. A thin dark outline keeps it readable
+   against both the light and dark parts of the basemap without a glow. */
 .stop-marker-dot {
   position: absolute;
   top: 50%;
@@ -23,21 +97,20 @@
   transform: translate(-50%, -50%);
   border-radius: 9999px;
   background: #f9fafb;
-  box-shadow: 0 0 12px rgba(248, 250, 252, 0.85);
-  transition: transform 0.15s ease-out, box-shadow 0.15s ease-out;
+  border: 1.5px solid rgba(0, 0, 0, 0.55);
+  transition: transform 0.15s ease-out;
 }
 
 .stop-marker-container:hover .stop-marker-dot {
   transform: translate(-50%, -50%) scale(1.3);
-  box-shadow: 0 0 16px rgba(248, 250, 252, 1);
 }
 
 /* Crimson variant for origin/destination stops - with radar pulse effect */
 .stop-marker-dot--crimson {
   width: 10px;
   height: 10px;
-  background: #ef4444;
-  box-shadow: 0 0 8px rgba(239, 68, 68, 0.9), 0 0 16px rgba(239, 68, 68, 0.5);
+  background: var(--color-crimson-light);
+  border: 1.5px solid rgba(0, 0, 0, 0.5);
 }
 
 /* Expanding ring pulse effect - first ring */
@@ -50,7 +123,7 @@
   height: 10px;
   transform: translate(-50%, -50%);
   border-radius: 9999px;
-  border: 2px solid rgba(239, 68, 68, 0.8);
+  border: 2px solid rgba(200, 50, 74, 0.8);
   animation: radar-pulse 1.8s ease-out infinite;
 }
 
@@ -64,7 +137,7 @@
   height: 10px;
   transform: translate(-50%, -50%);
   border-radius: 9999px;
-  border: 2px solid rgba(239, 68, 68, 0.8);
+  border: 2px solid rgba(200, 50, 74, 0.8);
   animation: radar-pulse 1.8s ease-out infinite 0.9s;
 }
 
@@ -86,7 +159,6 @@
 
 .stop-marker-container:hover .stop-marker-dot--crimson {
   transform: translate(-50%, -50%) scale(1.3);
-  box-shadow: 0 0 12px rgba(239, 68, 68, 1), 0 0 24px rgba(239, 68, 68, 0.7);
 }
 
 /* User location marker (blue pulsing dot) */
@@ -125,29 +197,25 @@
   }
 }
 
-/* Hover / glow styling for shuttle vehicles */
+/* Shuttle vehicles: a bare arrowhead, no disc behind it and no glow. The disc
+   this used to sit in cost most of the marker's area to chrome and made the
+   arrow too small to read a heading from; the arrow now carries its own dark
+   outline instead. Colour and shading are set per marker in mapUtils. */
 .vehicle-marker-inner {
-  background: rgba(5, 5, 5, 0.9);
-  border-radius: 999px;
-  padding: 4px;
-  box-shadow: 0 0 14px var(--vehicle-color, #ffffff);
   display: flex;
   align-items: center;
   justify-content: center;
+  /* The turn is interpolated here rather than in JS: rebuilding the icon each
+     frame would reparse an SVG per vehicle per frame. Duration is set from
+     ShuttleMarker so it matches the position animation. */
+  transition: transform 3000ms cubic-bezier(0.33, 0, 0.25, 1);
+  will-change: transform;
 }
 
-/* Ensure SVG itself uses currentColor so we can tint it */
 .vehicle-marker-inner svg {
   display: block;
-  width: 18px;
-  height: 18px;
-  color: var(--vehicle-color, #ffffff);
-}
-
-:root {
-  --color-crimson: #A20202;
-  --color-crimson-dark: #8a0101;
-  --color-crimson-light: #c41e1e;
+  width: 100%;
+  height: 100%;
 }
 
 /* Custom slim scrollbar */
@@ -236,24 +304,6 @@ body {
 }
 
 /* Trip segment polyline pulsing animation */
-@keyframes tripSegmentPulse {
-  0% {
-    opacity: 0.6;
-  }
-
-  50% {
-    opacity: 1;
-  }
-
-  100% {
-    opacity: 0.6;
-  }
-}
-
-.trip-segment-active {
-  animation: tripSegmentPulse 1.8s ease-in-out infinite;
-}
-
 /* Trip endpoint markers (bright white with radar glow) */
 .trip-endpoint-container {
   position: relative;
@@ -271,7 +321,7 @@ body {
   transform: translate(-50%, -50%);
   border-radius: 9999px;
   background: #ffffff;
-  box-shadow: 0 0 12px rgba(255, 255, 255, 0.9), 0 0 24px rgba(255, 255, 255, 0.5);
+  border: 2px solid rgba(0, 0, 0, 0.6);
 }
 
 /* Radar pulse ring - first ring */
@@ -320,5 +370,4 @@ body {
 
 .trip-endpoint-container:hover .trip-endpoint-dot {
   transform: translate(-50%, -50%) scale(1.2);
-  box-shadow: 0 0 16px rgba(255, 255, 255, 1), 0 0 32px rgba(255, 255, 255, 0.7);
 }

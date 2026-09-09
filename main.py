@@ -18,21 +18,31 @@ from redis.exceptions import RedisError
 import redis.asyncio as redis_async
 from fastapi_limiter import FastAPILimiter
 from fastapi_limiter.depends import RateLimiter
-from passio_client import get_stops, get_vehicles, get_routes, DEFAULT_SYSTEM_ID, get_all_systems
-
-# Harvard GTFS integration (for system_id = 831)
-from harvard_gtfs import (
-    get_harvard_gtfs,
-    get_harvard_graph,
-    harvard_neighbors,
-    HarvardEdge,
-    get_harvard_shape_for_route_direction,
-    debug_print_harvard_gtfs_summary,
+from ridesystems_client import (
+    get_stops,
+    get_vehicles,
+    get_routes,
+    DEFAULT_SYSTEM_ID,
+    get_all_systems,
+    get_platform_etas,
 )
-from harvard_mapping import (
-    get_harvard_passio_to_gtfs_map,
-    get_gtfs_to_passio_map,
-    get_passio_stop_by_id,
+
+# Route geometry, now sourced from Ride Systems rather than GTFS shapes.txt.
+# harvard_gtfs.py and harvard_mapping.py are no longer imported: Harvard left
+# PassioGO on 2026-07-01, so there is no second feed to reconcile against and no
+# GTFS export with live service in it. See ridesystems_client.py.
+from ridesystems_client import distance_along_route_m, get_route_stop_ids
+import arrivals as arrivals_module
+from arrivals import (
+    STORE as ARRIVAL_STORE,
+    learned_eta_to_stop,
+    observe_vehicles,
+)
+from harvard_shapes import (
+    get_shape_for_route,
+    get_shape_for_segment,
+    get_stop_coords_for_route,
+    get_route_id_by_name,
 )
 
 logger = logging.getLogger("trip")
@@ -122,6 +132,14 @@ def health_head():
 
 @app.on_event("startup")
 async def startup_event():
+    # Replay observed arrivals so a restart keeps the learned travel times.
+    # Segment history takes days of service to accumulate; losing it on every
+    # deploy would mean the model never leaves its fallback.
+    try:
+        await asyncio.to_thread(ARRIVAL_STORE.load)
+    except Exception as e:
+        logger.warning("Could not replay arrival log", exc_info=e)
+
     # Start background vehicle position poller (runs regardless of Redis)
     asyncio.create_task(_vehicle_position_poller())
     logger.info("Vehicle position poller started")
@@ -163,6 +181,12 @@ async def _vehicle_position_poller():
     and feed them into VEHICLE_STATE so speed history accumulates independently of
     trip requests. Without this, VEHICLE_STATE is only populated when someone calls
     /trip, meaning fresh deploys and quiet periods always fall back to FALLBACK_SPEED_MS.
+
+    The same position stream is the only source of ground truth we have: a bus
+    crossing a stop between two fixes is an observed arrival. arrivals.py turns
+    those into per-segment travel times, which is what lets the ETA model learn
+    a route instead of assuming a constant speed. Keep this poller running —
+    without it there is no training data and no way to score any predictor.
     """
     while True:
         try:
@@ -170,6 +194,19 @@ async def _vehicle_position_poller():
             # stall the async event loop.
             vehicles = await asyncio.to_thread(get_vehicles, DEFAULT_SYSTEM_ID)
             now = datetime.now()
+
+            # Detect arrivals before updating VEHICLE_STATE: detection needs the
+            # previous fix, and it keeps its own track of that.
+            try:
+                detected = await asyncio.to_thread(observe_vehicles, vehicles)
+                if detected:
+                    logger.info("Observed arrivals", extra={
+                        "count": len(detected),
+                        "stops": [(a.route_id, a.stop_id) for a in detected[:8]],
+                    })
+            except Exception as e:
+                logger.warning("Arrival detection error", exc_info=e)
+
             for v in vehicles:
                 v_lat = getattr(v, "latitude", None)
                 v_lng = getattr(v, "longitude", None)
@@ -225,12 +262,39 @@ class TripSkeleton:
 ROUTE_GRAPH_CACHE = {}
 
 
-# Constants for ETA fallbacks
-FALLBACK_SPEED_MS = 6.5      # ~14.5 mph (realistic campus shuttle average)
+# ---------------------------------------------------------------------------
+# ETA model constants
+#
+# Both values below were fitted against the operator's own arrival predictions
+# using `python eta_compare.py fit`, over 76 paired samples on a single weekday
+# afternoon. That is enough to correct a large bias and not enough to trust the
+# second decimal place — rerun the fit across a full service day before relying
+# on it, and expect the numbers to move.
+#
+# The fit cannot separate these two parameters cleanly: on Harvard's network
+# there is roughly 800 m between consecutive stops, so "slower bus" and "more
+# time stopped" explain the same data. Mean absolute error stays within
+# 3.98-4.48 min across the whole plausible range of the pair. Dwell is
+# therefore pinned at a defensible 20 s and only the speed is fitted, rather
+# than letting the optimiser pick the 85 s dwell and 20 mph bus that sit at the
+# edge of the search space.
+# ---------------------------------------------------------------------------
+
+# Fitted: 4.8 m/s is 10.7 mph, a stop-to-stop average through Cambridge traffic
+# and lights. The previous 6.5 m/s (14.5 mph) was closer to a free-flowing
+# cruising speed and made every fallback ETA optimistic.
+FALLBACK_SPEED_MS = 4.8
 MIN_SPEED_MS_FOR_ETA = 1.0   # below this, treat as unusable for ETA
+
 # Speed measured from straight-line GPS displacement underestimates along-route speed
 # on curved routes. This factor corrects for typical campus route tortuosity (~1.3x).
 SPEED_TORTUOSITY_CORRECTION = 1.25
+
+# Seconds a bus spends stopped at each stop it serves before reaching ours.
+# Charged separately from travel time, which is only sound because the speed
+# measurement discards hops below 1 m/s: measured speed is therefore a moving
+# speed, and dwell is not counted twice.
+DWELL_S_PER_STOP = 20.0
 
 
 def norm_id(x) -> str | None:
@@ -492,10 +556,12 @@ def distance_to_boarding_stop_along_chain_m(
     vehicle_lng: float,
     stops: list[dict],  # ordered route stops in travel order
     boarding_stop_id: str | int | None = None,
-) -> float | None:
+) -> tuple[float, int] | None:
     """
-    Returns distance along the stop-chain from the vehicle's snapped position
-    forward to the boarding stop, assuming the route is a loop (cyclic).
+    Returns (distance_m, stops_ahead) along the stop-chain from the vehicle's
+    snapped position forward to the boarding stop, assuming the route is a loop
+    (cyclic). stops_ahead counts the stops the bus must serve on the way, which
+    the ETA needs in order to charge dwell time.
     Falls back to None if insufficient data.
     """
     if not stops or len(stops) < 2:
@@ -571,7 +637,15 @@ def distance_to_boarding_stop_along_chain_m(
     if remaining < 0:
         remaining = 0.0
 
-    return remaining
+    # 8) How many stops the bus still has to serve before ours. Distance alone
+    # underestimates arrival time badly, because a bus spends real time stopped:
+    # measured against the operator's own predictions, a pure distance/speed
+    # model ran ~6 min optimistic and got worse the further away the bus was.
+    # Every stop between the projection and the boarding stop sits at a prefix
+    # beyond the projected position.
+    stops_ahead = sum(1 for pd in prefix[1:-1] if pd > dist_from_boarding_to_proj)
+
+    return remaining, stops_ahead
 
 
 
@@ -770,25 +844,20 @@ def route_paths_for_system(system_id: int = DEFAULT_SYSTEM_ID) -> list[dict[str,
             "path": path,
         })
 
-    # Harvard-specific: Use high-res GTFS shapes if available
-    if system_id == 831:
-        # Import here to avoid circular dependencies if any
-        from harvard_mapping import get_gtfs_route_id_by_name
-        from harvard_gtfs import get_harvard_shape_for_route_direction
-        
-        for r_entry in result:
-            p_name = r_entry.get("route_name")
-            if p_name:
-                gtfs_id = get_gtfs_route_id_by_name(p_name)
-                if gtfs_id:
-                    shape = get_harvard_shape_for_route_direction(gtfs_id, None)
-                    if shape:
-                        # Override path with GTFS shape
-                        # Use empty strings for stop_id/name as they are shape points, not stops
-                        r_entry["path"] = [
-                            {"lat": lat, "lng": lon, "stop_id": "", "stop_name": ""} 
-                            for lat, lon in shape
-                        ]
+    # Upgrade the stop-to-stop path to the operator's real street geometry.
+    # Without this a route draws as straight lines between stops.
+    for r_entry in result:
+        rid = r_entry.get("route_id")
+        shape = get_shape_for_route(rid) if rid else None
+        if not shape and r_entry.get("route_name"):
+            resolved = get_route_id_by_name(r_entry["route_name"])
+            shape = get_shape_for_route(resolved) if resolved else None
+        if shape:
+            # Empty stop_id/stop_name: these are shape vertices, not stops.
+            r_entry["path"] = [
+                {"lat": lat, "lng": lon, "stop_id": "", "stop_name": ""}
+                for lat, lon in shape
+            ]
 
     return result
 
@@ -938,26 +1007,6 @@ def find_common_routes(origin_stop, dest_stop, routes_by_id: dict):
     return result
 
 
-def _gtfs_routes_to_passio_routes(gtfs_route_ids: list[str], routes_by_id: dict) -> list[dict]:
-    """Map GTFS route IDs to PassioGO route dicts (same shape as find_common_routes output)."""
-    from harvard_mapping import get_gtfs_route_id_by_name
-    target = set(gtfs_route_ids)
-    routes = []
-    for pid, r_obj in routes_by_id.items():
-        gid = get_gtfs_route_id_by_name(r_obj.name)
-        if gid and gid in target:
-            color = getattr(r_obj, "groupColor", None) or getattr(r_obj, "color", None)
-            if color and not color.startswith("#"):
-                color = f"#{color}"
-            routes.append({
-                "route_id": pid,
-                "route_name": r_obj.name,
-                "short_name": getattr(r_obj, "shortName", None),
-                "color": color,
-            })
-    return routes
-
-
 NEAR_STOP_METERS = 30
 
 def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id: int = DEFAULT_SYSTEM_ID, debug: bool = False):
@@ -1007,7 +1056,8 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
                 })
 
         best_dist = float("inf")
-        best_vehicle = None 
+        best_vehicle = None
+        best_stops_ahead = 0
         
         # leg_stops: boarding→destination only (for ride ETA and display)
         # projection_stops: full sorted route loop (for along-chain vehicle distance)
@@ -1029,20 +1079,34 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
             straight_dist = distance_m(origin_stop.latitude, origin_stop.longitude, v_lat, v_lng)
 
             if straight_dist <= NEAR_STOP_METERS:
-                along_dist = 0.0
+                along_dist, stops_ahead = 0.0, 0
             else:
-                along_dist = distance_to_boarding_stop_along_chain_m(
+                projected = distance_to_boarding_stop_along_chain_m(
                     vehicle_lat=v_lat,
                     vehicle_lng=v_lng,
                     stops=projection_stops,
                     boarding_stop_id=boarding_stop_id,
                 )
-            
+                along_dist, stops_ahead = projected if projected is not None else (None, 0)
+
+                # Prefer distance measured along the route's real geometry. The
+                # stop chain above sums straight lines between stops and so
+                # understates how far the bus drives, which made ETAs optimistic
+                # by a margin that grew with distance. The chain is still what
+                # supplies stops_ahead, and still the fallback when a route has
+                # no usable geometry.
+                road_dist = distance_along_route_m(
+                    seg_id, v_lat, v_lng, origin_stop.latitude, origin_stop.longitude
+                )
+                if road_dist is not None:
+                    along_dist = road_dist
+
             curr_dist = along_dist if along_dist is not None else straight_dist
-            
+
             if curr_dist < best_dist:
-                best_vehicle = vehicle 
+                best_vehicle = vehicle
                 best_dist = curr_dist
+                best_stops_ahead = stops_ahead
 
         if best_vehicle is None:
             r = dict(route)
@@ -1102,8 +1166,51 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
             speed_ms = FALLBACK_SPEED_MS
             speed_source = "fallback"
 
-        # Calculate ETA to boarding stop
-        eta_to_boarding_stop_s = best_dist / speed_ms if (best_dist is not None and speed_ms > 0) else None
+        # ETA to the boarding stop.
+        #
+        # Preferred: sum the measured travel time of each hop the bus still has
+        # to make. Those durations come from arrivals we observed ourselves, so
+        # they already contain this route's lights, turns and dwell — none of
+        # which a speed constant can represent, and all of which are why a
+        # distance model is systematically wrong in ways that vary by segment.
+        #
+        # Fallback: distance over speed, plus dwell per intervening stop. Used
+        # until a segment has been travelled a few times, so a route works from
+        # the first request and improves as history accumulates.
+        eta_to_boarding_stop_s = None
+        eta_source = None
+        learned_fraction = None
+
+        learned = None
+        if best_dist is not None and best_dist > 0:
+            try:
+                learned = learned_eta_to_stop(
+                    route_id=str(seg_id),
+                    vehicle_lat=v_lat,
+                    vehicle_lng=v_lng,
+                    target_stop_id=str(boarding_stop_id),
+                    fallback_speed_ms=speed_ms,
+                    dwell_s=DWELL_S_PER_STOP,
+                )
+            except Exception as e:
+                # A modelling failure must never cost the rider an ETA.
+                logger.warning("Learned ETA failed; using distance model",
+                               exc_info=e, extra={"route": seg_id})
+
+        # Require most of the journey to be covered by measured segments before
+        # trusting it. A mostly-fallback "learned" estimate is just the distance
+        # model wearing a better name, and reporting it as learned would make
+        # the scoreboard flatter.
+        if learned is not None and learned.learned_fraction >= 0.6:
+            eta_to_boarding_stop_s = learned.seconds
+            eta_source = "learned_segments"
+            learned_fraction = learned.learned_fraction
+        elif best_dist is not None and speed_ms > 0:
+            eta_to_boarding_stop_s = (
+                best_dist / speed_ms + best_stops_ahead * DWELL_S_PER_STOP
+            )
+            eta_source = "distance_model"
+            learned_fraction = learned.learned_fraction if learned else 0.0
 
         # Calculate Segment Ride ETA
         ride_eta_s = None
@@ -1122,7 +1229,11 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
             # inflated by SPEED_TORTUOSITY_CORRECTION to approximate along-route speed.
             # Dividing straight-line distance by inflated speed made ride ETAs ~20% too short.
             # Apply the same tortuosity factor to seg_dist so both sides use along-route units.
-            ride_eta_s = (seg_dist * SPEED_TORTUOSITY_CORRECTION) / speed_ms
+            # Dwell applies to the ride too: every stop between boarding and
+            # destination costs the same stopped time, minus the final one,
+            # where arrival is what we are timing.
+            ride_dwell_s = max(0, len(leg_stops) - 2) * DWELL_S_PER_STOP
+            ride_eta_s = (seg_dist * SPEED_TORTUOSITY_CORRECTION) / speed_ms + ride_dwell_s
             if eta_to_boarding_stop_s is not None:
                 segment_eta_s = eta_to_boarding_stop_s + ride_eta_s
 
@@ -1132,6 +1243,9 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
             "lat": v_lat,
             "lng": v_lng,
             "distance_to_boarding_stop_m": best_dist,
+            "stops_ahead": best_stops_ahead,
+            "eta_source": eta_source,
+            "learned_fraction": learned_fraction,
             "eta_to_origin_stop": eta_to_boarding_stop_s,   # legacy name
             "eta_to_boarding_stop_s": eta_to_boarding_stop_s,
             "ride_eta_s": ride_eta_s,
@@ -1188,10 +1302,6 @@ def enrich_trip_skeleton(
         if not sid: return None
         sid_str = str(sid)
         return extra_stops.get(sid_str) or base_stops.get(sid_str)
-    
-    # Imports for GTFS shapes
-    from harvard_mapping import get_gtfs_route_id_by_name
-    from harvard_gtfs import get_harvard_shape_for_route_direction, get_stop_coords_for_route
     
     for i, seg_skel in enumerate(skeleton.segments):
         start_stop = get_stop(seg_skel.start_stop_id)
@@ -1293,43 +1403,49 @@ def enrich_trip_skeleton(
         )
         enriched_data = enriched_list[0] if enriched_list else payload_route
         
-        # GTFS Polyline Slicing
+        # Slice the operator's route geometry down to this leg. Segment-aware,
+        # because a route has several patterns and the widest one does not
+        # always serve both endpoints of the leg.
         polyline = []
-        if system_id == 831:
-            shape = None
-            gtfs_rid = None
-            route_id = str(seg_skel.route_id or "")
-            if route_id:
-                shape = get_harvard_shape_for_route_direction(route_id, None)
-                if shape:
-                    gtfs_rid = route_id
+        route_id = str(seg_skel.route_id or "")
+        shape = None
+        shape_rid = None
 
-            if not shape and enriched_data.get("route_name"):
-                 gtfs_rid = get_gtfs_route_id_by_name(enriched_data["route_name"])
-                 if gtfs_rid:
-                      shape = get_harvard_shape_for_route_direction(gtfs_rid, None)
-
+        if route_id:
+            shape = get_shape_for_segment(
+                route_id, seg_skel.start_stop_id, seg_skel.end_stop_id
+            )
             if shape:
-                slat = getattr(start_stop, 'latitude', None) or getattr(start_stop, 'lat', None)
-                slng = getattr(start_stop, 'longitude', None) or getattr(start_stop, 'lng', None)
-                elat = getattr(end_stop, 'latitude', None) or getattr(end_stop, 'lat', None)
-                elng = getattr(end_stop, 'longitude', None) or getattr(end_stop, 'lng', None)
+                shape_rid = route_id
 
-                # Get stop sequence for direction-aware slicing on loops
-                stop_coords = get_stop_coords_for_route(gtfs_rid) if gtfs_rid else None
+        if not shape and enriched_data.get("route_name"):
+            shape_rid = get_route_id_by_name(enriched_data["route_name"])
+            if shape_rid:
+                shape = get_shape_for_segment(
+                    shape_rid, seg_skel.start_stop_id, seg_skel.end_stop_id
+                )
 
-                if slat is not None and slng is not None and elat is not None and elng is not None:
-                    _slice_key = (gtfs_rid, str(seg_skel.start_stop_id), str(seg_skel.end_stop_id))
-                    if polyline_slice_cache is not None and _slice_key in polyline_slice_cache:
-                        sliced = polyline_slice_cache[_slice_key]
-                    else:
-                        sliced = slice_shape_to_segment(
-                            shape, float(slat), float(slng), float(elat), float(elng),
-                            stop_coords=stop_coords,
-                        )
-                        if polyline_slice_cache is not None:
-                            polyline_slice_cache[_slice_key] = sliced
-                    polyline = [{"lat": lat, "lng": lon} for lat, lon in sliced]
+        if shape:
+            slat = getattr(start_stop, 'latitude', None) or getattr(start_stop, 'lat', None)
+            slng = getattr(start_stop, 'longitude', None) or getattr(start_stop, 'lng', None)
+            elat = getattr(end_stop, 'latitude', None) or getattr(end_stop, 'lat', None)
+            elng = getattr(end_stop, 'longitude', None) or getattr(end_stop, 'lng', None)
+
+            # Stop sequence lets the slicer pick the right way round a loop.
+            stop_coords = get_stop_coords_for_route(shape_rid) if shape_rid else None
+
+            if slat is not None and slng is not None and elat is not None and elng is not None:
+                _slice_key = (shape_rid, str(seg_skel.start_stop_id), str(seg_skel.end_stop_id))
+                if polyline_slice_cache is not None and _slice_key in polyline_slice_cache:
+                    sliced = polyline_slice_cache[_slice_key]
+                else:
+                    sliced = slice_shape_to_segment(
+                        shape, float(slat), float(slng), float(elat), float(elng),
+                        stop_coords=stop_coords,
+                    )
+                    if polyline_slice_cache is not None:
+                        polyline_slice_cache[_slice_key] = sliced
+                polyline = [{"lat": lat, "lng": lon} for lat, lon in sliced]
         
         # Build Final Segment
         final_seg = {
@@ -1503,109 +1619,6 @@ def find_k_paths(graph, origin, dest, k=1, max_depth=20, max_transfers=1):
                 queue.append((nxt, new_nodes, new_edges, rid, new_transfers))
                 
     return results
-
-
-# ---------------------------------------------------------------------------
-# Harvard GTFS-specific pathfinding (for system_id = 831)
-# ---------------------------------------------------------------------------
-
-from functools import lru_cache
-
-@lru_cache(maxsize=4096)
-def find_k_paths_harvard(origin_gtfs_id: str, dest_gtfs_id: str, k=1, max_depth=20, max_transfers=1):
-    """
-    Find up to K distinct paths from origin to dest using BFS on the Harvard GTFS graph.
-    Each path is (nodes, edges) where nodes are GTFS stop_ids.
-    """
-    graph = get_harvard_graph()
-    
-    if origin_gtfs_id == dest_gtfs_id:
-        return [([origin_gtfs_id], [])]
-    
-    # queue of (current_node, nodes_list, edges_list, last_route_id, transfers_count)
-    queue = deque([(origin_gtfs_id, [origin_gtfs_id], [], None, 0)])
-    results = []
-    seen_signatures = set()
-    
-    while queue and len(results) < k:
-        curr, path_nodes, path_edges, last_rid, transfers = queue.popleft()
-        
-        if len(path_nodes) > max_depth + 1:
-            continue
-        
-        edges = graph.get(curr, [])
-        for edge in edges:
-            nxt = edge.next_stop_id
-            rid = edge.route_id
-            
-            # Simple cycle prevention
-            if nxt in path_nodes:
-                continue
-            
-            new_transfers = transfers
-            if last_rid is not None and rid != last_rid:
-                new_transfers += 1
-            
-            if new_transfers > max_transfers:
-                continue
-            
-            new_nodes = path_nodes + [nxt]
-            new_edges = path_edges + [(curr, nxt, rid)]
-            
-            if nxt == dest_gtfs_id:
-                # Deduplicate by route/stop sequence
-                sig = "-".join(str(e[2]) for e in new_edges) + ":" + "-".join(new_nodes)
-                if sig not in seen_signatures:
-                    results.append((new_nodes, new_edges))
-                    seen_signatures.add(sig)
-            else:
-                queue.append((nxt, new_nodes, new_edges, rid, new_transfers))
-    
-    return results
-
-
-@lru_cache(maxsize=4096)
-def find_direct_route_harvard(origin_gtfs_id: str, dest_gtfs_id: str) -> list[str]:
-    """
-    Check if there's a direct (no-transfer) route from origin to dest in Harvard GTFS.
-    Returns list of route_ids that connect them directly, or empty list.
-    """
-    graph = get_harvard_graph()
-    
-    if origin_gtfs_id == dest_gtfs_id:
-        return []
-    
-    # BFS to find paths with 0 transfers (same route throughout)
-    queue = deque([(origin_gtfs_id, [origin_gtfs_id], None)])
-    visited = {(origin_gtfs_id, None)}  # (stop, route) pairs
-    direct_routes = set()
-    
-    while queue:
-        curr, path, route_id = queue.popleft()
-        
-        if len(path) > 50:  # Limit depth
-            continue
-        
-        for edge in graph.get(curr, []):
-            nxt = edge.next_stop_id
-            rid = edge.route_id
-            
-            # If we've established a route, stick with it
-            if route_id is not None and rid != route_id:
-                continue
-            
-            effective_route = rid if route_id is None else route_id
-            
-            if (nxt, effective_route) in visited:
-                continue
-            visited.add((nxt, effective_route))
-            
-            if nxt == dest_gtfs_id:
-                direct_routes.add(effective_route)
-            else:
-                queue.append((nxt, path + [nxt], effective_route))
-    
-    return list(direct_routes)
 
 
 def is_valid_eta(x):
@@ -1885,24 +1898,12 @@ def plan_base_no_transfer_trip(
     system_id: int,
     stops: list = None,
 ) -> list[TripSkeleton]:
-    # For Harvard, use GTFS to supplement PassioGO route discovery — but never to block it.
-    # GTFS BFS can fail (depth limits, mapping misses, loop route quirks) and silently killing
-    # valid routes is worse than occasionally suggesting one that needs direction verification.
-    direct_gtfs_routes = None
-    if system_id == 831 and stops is not None:
-        passio_to_gtfs = get_harvard_passio_to_gtfs_map(stops)
-        origin_gtfs_id = passio_to_gtfs.get(str(origin_stop.id))
-        dest_gtfs_id = passio_to_gtfs.get(str(dest_stop.id))
-
-        if origin_gtfs_id and dest_gtfs_id:
-            direct_gtfs_routes = find_direct_route_harvard(origin_gtfs_id, dest_gtfs_id) or None
-            # Note: if GTFS finds nothing, direct_gtfs_routes stays None.
-            # We fall through to PassioGO's find_common_routes regardless.
-
+    # The GTFS cross-check that used to run here is gone. It existed to catch
+    # pairs that PassioGO's routesAndPositions omitted, by confirming them
+    # against a second feed. There is no second feed now, and there is nothing
+    # left to disagree with: stop-to-route membership and travel order both come
+    # from the same Ride Systems response that supplies the geometry.
     routes = find_common_routes(origin_stop, dest_stop, vehicle_indexes["routes_by_id"])
-    if not routes and direct_gtfs_routes:
-        # PassioGO routesAndPositions missed this pair, but GTFS confirms a direct route
-        routes = _gtfs_routes_to_passio_routes(direct_gtfs_routes, vehicle_indexes["routes_by_id"])
     if not routes:
         return []
 
@@ -1920,7 +1921,11 @@ def plan_base_no_transfer_trip(
         # Check Live (Approximate O(1) check)
         # If any vehicles are on this route, we treat it as potentially live.
         # Enrichment will calculate actual ETA later.
-        has_live = bool(route_to_vehicles.get(rid))
+        # route_to_vehicles is keyed by norm_id(), which lowercases. Passio route
+        # ids were numeric so a raw lookup happened to work; Ride Systems ids are
+        # letters ("AL"), and a raw lookup silently reports every route as dead,
+        # which then costs it the 20000-point live bonus in scoring.
+        has_live = bool(route_to_vehicles.get(norm_id(rid)))
         
         # Segment Skeleton
         # For No-Transfer, we pass [origin, dest] as stops, matching legacy behavior.
@@ -1974,15 +1979,11 @@ def plan_base_transfer_trip(
     system_id: int,
     debug: bool = False
 ) -> list[TripSkeleton]:
-    # Harvard-specific: use GTFS graph
-    if system_id == 831:
-        return _plan_base_transfer_trip_harvard(
-            origin_stop, dest_stop, user_origin_lat, user_origin_lng,
-            user_dest_lat, user_dest_lng, stops, routes_list, vehicle_indexes,
-            system_id, debug
-        )
-    
-    # Non-Harvard: use existing PassioGO-based logic
+    # Harvard used to be routed through a separate GTFS-graph planner here,
+    # because PassioGO's stop sequences were not trustworthy enough to build a
+    # graph from. Ride Systems' sequences are derived from the route geometry
+    # itself (see ridesystems_client._ShapeIndex), so every system now uses the
+    # one graph builder.
     graph, stop_by_id = get_route_graph(system_id, stops)
     origin_id = str(origin_stop.id)
     dest_id = str(dest_stop.id)
@@ -2025,8 +2026,8 @@ def plan_base_transfer_trip(
             short_name = chosen["short_name"] if chosen else None
             color = chosen["color"] if chosen else None
             
-            # Live check (Approx)
-            if route_to_vehicles.get(str(r_id)):
+            # Live check (Approx). Normalized key, as above.
+            if route_to_vehicles.get(norm_id(r_id)):
                 has_live = True
                 
             seg_skeletons.append(SegmentSkeleton(
@@ -2057,155 +2058,6 @@ def plan_base_transfer_trip(
         skeletons.append(skel)
         
     return skeletons
-
-
-def _plan_base_transfer_trip_harvard(
-    origin_stop,
-    dest_stop,
-    user_origin_lat: float,
-    user_origin_lng: float,
-    user_dest_lat: float,
-    user_dest_lng: float,
-    stops: list,
-    routes_list: list,
-    vehicle_indexes: dict,
-    system_id: int,
-    debug: bool = False
-) -> list[TripSkeleton]:
-    """
-    Harvard-specific transfer trip planning using GTFS graph.
-    """
-    # Initialize mapping (first call will build it)
-    passio_to_gtfs = get_harvard_passio_to_gtfs_map(stops)
-    gtfs_to_passio = get_gtfs_to_passio_map(stops)
-    
-    # Map PassioGO stops to GTFS IDs
-    origin_passio_id = str(origin_stop.id)
-    dest_passio_id = str(dest_stop.id)
-    
-    origin_gtfs_id = passio_to_gtfs.get(origin_passio_id)
-    dest_gtfs_id = passio_to_gtfs.get(dest_passio_id)
-    
-    # Fallback to legacy if mapping fails
-    if not origin_gtfs_id or not dest_gtfs_id:
-        # We can recursively call the non-harvard logic by faking system_id?
-        # Or just inline it. For safety, return [] as Harvard fallback is rarely hits.
-        # Original code returned None.
-        return []
-    
-    path_candidates = find_k_paths_harvard(origin_gtfs_id, dest_gtfs_id, k=1, max_depth=20, max_transfers=1)
-    if not path_candidates:
-        return []
-    
-    candidates = []
-    
-    # GTFS Data for PseudoStop lookups
-    gtfs_data = get_harvard_gtfs()
-    # Local extra stops accumulation
-    extra_stops_map = {}
-    
-    stop_by_passio_id = {str(s.id): s for s in stops}
-    
-    # Route Mapping Logic
-    gtfs_id_to_passio_id = {}
-    passio_routes_map = vehicle_indexes.get("routes_by_id", {})
-    vehicles_by_route = vehicle_indexes.get("vehicles_by_route", {})
-    from harvard_mapping import get_gtfs_route_id_by_name
-    
-    for pid, r_obj in passio_routes_map.items():
-        gid = get_gtfs_route_id_by_name(r_obj.name)
-        if gid:
-            if gid in gtfs_id_to_passio_id:
-                curr_pid = gtfs_id_to_passio_id[gid]
-                curr_live = bool(vehicles_by_route.get(str(curr_pid)))
-                new_live = bool(vehicles_by_route.get(str(pid)))
-                if not curr_live and new_live:
-                    gtfs_id_to_passio_id[gid] = str(pid)
-            else:
-                gtfs_id_to_passio_id[gid] = str(pid)
-
-    origin_walk = distance_m(user_origin_lat, user_origin_lng, origin_stop.latitude, origin_stop.longitude)
-    dest_walk = distance_m(user_dest_lat, user_dest_lng, dest_stop.latitude, dest_stop.longitude)
-    total_walk = origin_walk + dest_walk
-    
-    route_to_vehicles = vehicle_indexes.get("route_to_vehicles", {})
-
-    for gtfs_nodes, gtfs_edges in path_candidates:
-        passio_nodes = []
-        # Convert Nodes
-        for gtfs_id in gtfs_nodes:
-            passio_id = gtfs_to_passio.get(gtfs_id)
-            if passio_id:
-                passio_nodes.append(passio_id)
-            else:
-                passio_nodes.append(gtfs_id)
-                # Create PseudoStop if unknown
-                if gtfs_id not in stop_by_passio_id and gtfs_id not in extra_stops_map:
-                    gtfs_stop = gtfs_data.stops_by_id.get(gtfs_id)
-                    if gtfs_stop:
-                        extra_stops_map[gtfs_id] = PseudoStop(gtfs_id, gtfs_stop.stop_name, gtfs_stop.lat, gtfs_stop.lon)
-        
-        # Convert Edges
-        passio_edges = []
-        for (from_gtfs, to_gtfs, route_id) in gtfs_edges:
-            passio_route_id = gtfs_id_to_passio_id.get(route_id, route_id)
-            from_passio = gtfs_to_passio.get(from_gtfs, from_gtfs)
-            to_passio = gtfs_to_passio.get(to_gtfs, to_gtfs)
-            passio_edges.append((from_passio, to_passio, passio_route_id))
-            
-        rid_to_name = vehicle_indexes["rid_to_name"]
-        raw_segments = compress_path_by_route(passio_nodes, passio_edges, rid_to_canonical=rid_to_name)
-        
-        seg_skeletons = []
-        has_live = False
-        
-        for rseg in raw_segments:
-            r_id = rseg["route_id"]
-            start_i = rseg["start_stop_index"]
-            end_i = rseg["end_stop_index"]
-            
-            seg_nodes = passio_nodes[start_i:end_i+1]
-            start_sid = seg_nodes[0]
-            end_sid = seg_nodes[-1]
-            
-            # Lookup route info
-            # Try Passio route first
-            passio_route = passio_routes_map.get(str(r_id))
-            r_name = passio_route.name if passio_route else None
-            short_name = getattr(passio_route, "shortName", None) if passio_route else None
-            color = getattr(passio_route, "color", None) or getattr(passio_route, "groupColor", None)
-            if color and not color.startswith("#"): color = f"#{color}"
-            
-            # Check Live
-            if route_to_vehicles.get(str(r_id)):
-                has_live = True
-                
-            seg_skeletons.append(SegmentSkeleton(
-                route_id=str(r_id),
-                start_stop_id=str(start_sid),
-                end_stop_id=str(end_sid),
-                route_name=r_name,
-                short_name=short_name,
-                color=color,
-                stops=seg_nodes
-            ))
-            
-        num_transfers = max(0, len(seg_skeletons) - 1)
-        score = (0 if has_live else 10000) + (num_transfers * 10000) + (total_walk * 0.5)
-        
-        candidates.append(TripSkeleton(
-            segments=seg_skeletons,
-            score=score,
-            num_transfers=num_transfers,
-            has_live_vehicle=has_live,
-            kind="base_transfer",
-            origin_stop=origin_stop,
-            dest_stop=dest_stop,
-            total_walk_m=total_walk,
-            extra_stops_map=extra_stops_map
-        ))
-        
-    return candidates
 
 
 MAX_WALK_PAIRS = 20
@@ -2383,16 +2235,30 @@ def api_trip(
     lat2: float = Query(..., ge=-90, le=90),
     lng2: float = Query(..., ge=-180, le=180),
     system_id: int = DEFAULT_SYSTEM_ID,
+    route_id: str | None = None,
     debug: bool = False,
     debug_paths: bool = False,
 ):
+    """Plan a trip between two points.
+
+    `route_id` restricts the answer to trips carried by that one route. It
+    exists for "show me this bus's run", which is a different question from
+    "get me there fastest": on a loop the far end of a run comes back near
+    where it started, so the unrestricted planner correctly answers with a
+    one-hop shortcut on some other route — and then the map draws a route the
+    rider was not asking about. Falls back to the unrestricted result when the
+    named route cannot make the trip.
+    """
     if system_id <= 0:
         raise HTTPException(status_code=400, detail="Invalid system_id")
 
     t0 = time.perf_counter()
 
     # 0. Check cache before any data fetches
-    cache_key = f"trip_v2:{system_id}:{round(lat,4)}:{round(lng,4)}:{round(lat2,4)}:{round(lng2,4)}"
+    cache_key = (
+        f"trip_v2:{system_id}:{round(lat,4)}:{round(lng,4)}"
+        f":{round(lat2,4)}:{round(lng2,4)}:{route_id or '-'}"
+    )
     if redis_client is not None:
         try:
             cached = redis_client.get(cache_key)
@@ -2466,6 +2332,20 @@ def api_trip(
     all_skeletons = _dedup_skeletons(all_skeletons)
     all_skeletons.sort(key=lambda x: x.score)
 
+    if route_id:
+        on_route = [
+            skel for skel in all_skeletons
+            if skel.segments
+            and all(norm_id(seg.route_id) == norm_id(route_id) for seg in skel.segments)
+        ]
+        if on_route:
+            all_skeletons = on_route
+        else:
+            logger.info(
+                "No trip on the requested route; answering unrestricted",
+                extra={"route_id": route_id},
+            )
+
     # Pick Top K (more than before to surface diverse options)
     K = 6
     top_skeletons = all_skeletons[:K]
@@ -2476,7 +2356,7 @@ def api_trip(
     t_enrich_start = time.perf_counter()
     enriched_candidates = []
     _route_stops_cache: dict = {}    # shared across workers; GIL makes dict ops thread-safe
-    _polyline_slice_cache: dict = {}  # keyed by (gtfs_rid, start_stop_id, end_stop_id)
+    _polyline_slice_cache: dict = {}  # keyed by (route_id, start_stop_id, end_stop_id)
 
     def _enrich_one(skel: TripSkeleton) -> dict | None:
         try:
@@ -2607,3 +2487,372 @@ def list_vehicles_raw(system_id: int = DEFAULT_SYSTEM_ID):
     vehicles = get_vehicles(system_id)
     # vars(v) turns the Python object into its __dict__ so you see real fields
     return [vars(v) for v in vehicles]
+
+
+# ---------------------------------------------------------------------------
+# Arrival predictions: ours vs the operator's
+#
+# Ride Systems publishes its own arrival predictions (PlatformET). We do not
+# route on them. The projection engine above — snap the bus to the route chain,
+# measure the remaining distance, divide by a smoothed speed — still produces
+# every ETA the app shows.
+#
+# Keeping our own engine means its accuracy is measurable rather than assumed:
+# the operator's number is an independent label for the same event, so the two
+# can be compared continuously. eta_compare.py drives this endpoint to do that.
+# ---------------------------------------------------------------------------
+
+def estimate_arrivals_for_stop(stop_id: str, system_id: int = DEFAULT_SYSTEM_ID) -> list[dict]:
+    """Our predicted arrival, per route serving this stop.
+
+    Runs the same enrichment path /trip uses, so the numbers reported here are
+    the numbers riders see rather than a parallel reimplementation.
+    """
+    stops = get_stops(system_id)
+    stop = next((s for s in stops if str(s.id) == str(stop_id)), None)
+    if stop is None:
+        raise HTTPException(status_code=404, detail="Unknown stop")
+
+    routes = get_routes_cached(system_id)
+    vehicles = get_vehicles(system_id)
+    vehicle_indexes = build_trip_indexes(stops, routes, vehicles)
+
+    payload_routes = []
+    for rid in (getattr(stop, "routesAndPositions", {}) or {}).keys():
+        route = vehicle_indexes["routes_by_id"].get(str(rid))
+        if route is None:
+            continue
+
+        # The full loop in travel order is what the vehicle gets projected onto.
+        full_route_stops = []
+        if hasattr(route, "getStops"):
+            full_route_stops = [stopdict(s) for s in (route.getStops() or [])]
+
+        color = getattr(route, "groupColor", None) or getattr(route, "color", None)
+        payload_routes.append({
+            "route_id": str(rid),
+            "route_name": route.name,
+            "short_name": getattr(route, "shortName", None),
+            "color": color,
+            # Boarding-only: we are predicting arrival at this stop, not a ride.
+            "stops": [stopdict(stop)],
+            "full_route_stops": full_route_stops,
+            "start_stop": stopdict(stop),
+            "end_stop": stopdict(stop),
+        })
+
+    enriched = enrich_routes_with_next_bus(
+        payload_routes, stop, vehicle_indexes, system_id
+    )
+
+    out = []
+    for r in enriched:
+        nb = r.get("next_bus")
+        if not nb or nb.get("eta_to_boarding_stop_s") is None:
+            continue
+        out.append({
+            "route_id": r["route_id"],
+            "route_name": r.get("route_name"),
+            "eta_minutes": nb["eta_to_boarding_stop_s"] / 60.0,
+            "distance_m": nb.get("distance_to_boarding_stop_m"),
+            "stops_ahead": nb.get("stops_ahead"),
+            "vehicle_id": nb.get("vehicle_id"),
+            "speed_source": nb.get("speed_source"),
+            "eta_source": nb.get("eta_source"),
+            "learned_fraction": nb.get("learned_fraction"),
+        })
+
+    out.sort(key=lambda e: e["eta_minutes"])
+    return out
+
+
+@app.get("/stop_etas", dependencies=[Depends(OptionalRateLimiter(times=60, seconds=60))])
+def api_stop_etas(stop_id: str, system_id: int = DEFAULT_SYSTEM_ID):
+    """Our arrival predictions for a stop, alongside the operator's.
+
+    `ours` drives the app. `vendor` is here for comparison only — see
+    eta_compare.py, which samples this endpoint over time to score our engine
+    against the operator's predictions.
+    """
+    stops = get_stops(system_id)
+    stop = next((s for s in stops if str(s.id) == str(stop_id)), None)
+    if stop is None:
+        raise HTTPException(status_code=404, detail="Unknown stop")
+
+    ours = estimate_arrivals_for_stop(stop_id, system_id)
+
+    vendor = []
+    try:
+        for e in get_platform_etas(stop_id):
+            vendor.append({
+                "route_id": e.route_id,
+                "route_name": e.route_name,
+                "destination": e.destination,
+                "eta_minutes": e.eta_minutes,
+                "scheduled": e.scheduled,
+            })
+    except HTTPException:
+        # The operator's predictions are a nice-to-have on this endpoint; ours
+        # are the product. Never fail the request because theirs was down.
+        logger.warning("Operator ETA fetch failed", extra={"stop_id": stop_id})
+
+    return {
+        "stop": stopdict(stop),
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "ours": ours,
+        "vendor": vendor,
+    }
+
+
+@app.get("/arrivals")
+def api_arrivals(since: float | None = None, limit: int = 5000):
+    """Arrivals we observed ourselves, as (route, stop, time) triples.
+
+    This is the ground truth both predictors get scored against: not what
+    anyone predicted, but when a bus was actually seen to reach a stop. Derived
+    from the position stream by arrivals.py.
+    """
+    out = []
+    for (route_id, stop_id), times in ARRIVAL_STORE.stop_arrivals.items():
+        for t in times:
+            if since is not None and t <= since:
+                continue
+            out.append({"t": t, "route_id": route_id, "stop_id": stop_id})
+
+    out.sort(key=lambda a: a["t"])
+    truncated = len(out) > limit
+    return {
+        "arrivals": out[-limit:],
+        "count": min(len(out), limit),
+        "truncated": truncated,
+    }
+
+
+@app.get("/eta_model")
+def api_eta_model():
+    """How much of the network the learned model actually covers.
+
+    `segments_usable` is the number of stop-to-stop hops with enough observed
+    traversals to predict from. Until that approaches `segments_seen`, most
+    ETAs still come from the distance fallback, and the scoreboard will show
+    the two sources separately.
+    """
+    coverage = ARRIVAL_STORE.coverage()
+    return {
+        **coverage,
+        "min_observations_per_segment": arrivals_module.MIN_OBS_FOR_SEGMENT,
+        "fallback_speed_ms": FALLBACK_SPEED_MS,
+        "dwell_s_per_stop": DWELL_S_PER_STOP,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Next Bus Out
+#
+# The other half of the app answers "how do I get from A to B". This answers
+# the question people actually ask most often on campus: "I am standing here,
+# what is leaving and when". No inputs, no planning — location in, departures
+# out.
+#
+# It covers stops within a short walk rather than only the single nearest one,
+# because the nearest stop is frequently the wrong answer: a bus in 2 minutes
+# from a stop 200 m away beats a bus in 14 minutes from the one you are
+# standing at. Each departure carries the walk to its stop so that trade-off
+# is visible instead of hidden.
+# ---------------------------------------------------------------------------
+
+# Beyond this, walking to a different stop stops being a reasonable suggestion
+# for someone who just wants the next bus.
+DEPARTURES_WALK_RADIUS_M = 500.0
+DEPARTURES_MAX_STOPS = 4
+
+# Typical walking pace, for deciding whether a departure is actually catchable.
+WALK_SPEED_MS = 1.35
+
+
+# How many downstream stops to report per departure. Enough to answer "does
+# this bus go where I need", not the whole loop.
+DEPARTURE_TO_STOPS = 8
+
+
+def downstream_stops(route_id: str, boarding_stop_id: str, depart_in_min: float) -> list[dict]:
+    """Where a bus goes after this stop, with a clock time for each.
+
+    Answers the question a departure board leaves open: the route code and a
+    headsign tell you nothing if you do not already know the route. Times are
+    cumulative from the departure, using the learned segment times where they
+    exist and the distance model where they do not — the same estimates the ETA
+    itself is built from, so the numbers cannot disagree with each other.
+    """
+    chain = get_route_stop_ids(route_id)
+    if not chain:
+        return []
+
+    try:
+        start = chain.index(str(boarding_stop_id))
+    except ValueError:
+        return []
+
+    stops_by_id = {str(s.id): s for s in get_stops(DEFAULT_SYSTEM_ID)}
+    out: list[dict] = []
+    cumulative_s = depart_in_min * 60.0
+    prev_id = str(boarding_stop_id)
+
+    # Wrap around the loop, stopping before we arrive back at the boarding stop.
+    for step in range(1, min(len(chain), DEPARTURE_TO_STOPS + 1)):
+        sid = chain[(start + step) % len(chain)]
+        if sid == str(boarding_stop_id):
+            break
+        stop = stops_by_id.get(sid)
+        if stop is None:
+            continue
+
+        learned = ARRIVAL_STORE.segment_estimate(route_id, prev_id, sid)
+        if learned is not None:
+            hop_s = learned[0]
+            source = "learned"
+        else:
+            prev_stop = stops_by_id.get(prev_id)
+            hop_m = (
+                distance_m(prev_stop.latitude, prev_stop.longitude,
+                           stop.latitude, stop.longitude)
+                if prev_stop else 0.0
+            )
+            hop_s = hop_m / FALLBACK_SPEED_MS + DWELL_S_PER_STOP
+            source = "estimated"
+
+        cumulative_s += hop_s
+        out.append({
+            **stopdict(stop),
+            "minutes": cumulative_s / 60.0,
+            "arrives_at": (datetime.now() + timedelta(seconds=cumulative_s)).strftime("%-I:%M"),
+            "source": source,
+        })
+        prev_id = sid
+
+    return out
+
+
+@app.get("/departures", dependencies=[Depends(OptionalRateLimiter(times=60, seconds=60))])
+def api_departures(
+    lat: float = Query(..., ge=-90, le=90),
+    lng: float = Query(..., ge=-180, le=180),
+    radius_m: float = Query(DEPARTURES_WALK_RADIUS_M, gt=0, le=2000),
+    system_id: int = DEFAULT_SYSTEM_ID,
+):
+    """Departures from the stops within walking distance of a point.
+
+    Sorted soonest first across all nearby stops. `catchable` is false when the
+    walk to that stop takes longer than the bus will take to arrive — still
+    listed, because a rider may prefer to know, but not presented as an option
+    they can take.
+    """
+    stops = get_stops(system_id)
+    if not stops:
+        raise HTTPException(status_code=503, detail="No stops available")
+
+    nearby = [
+        (s, distance_m(lat, lng, s.latitude, s.longitude)) for s in stops
+    ]
+    nearby = [(s, d) for s, d in nearby if d <= radius_m]
+    nearby.sort(key=lambda pair: pair[1])
+    nearby = nearby[:DEPARTURES_MAX_STOPS]
+
+    if not nearby:
+        # Someone off campus. Report the closest stop anyway so the client can
+        # say how far away it is rather than showing an empty screen.
+        closest, dist = min(
+            ((s, distance_m(lat, lng, s.latitude, s.longitude)) for s in stops),
+            key=lambda pair: pair[1],
+        )
+        return {
+            "location": {"lat": lat, "lng": lng},
+            "nearest_stop": stopdict(closest),
+            "nearest_stop_distance_m": dist,
+            "out_of_range": True,
+            "departures": [],
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+    # The operator's per-stop predictions carry a destination headsign, which
+    # our own projection has no equivalent for and which is what tells a rider
+    # where a bus is actually going.
+    departures = []
+    for stop, walk_m in nearby:
+        walk_s = walk_m / WALK_SPEED_MS
+
+        vendor_by_route: dict[str, list] = defaultdict(list)
+        try:
+            for e in get_platform_etas(stop.id):
+                vendor_by_route[e.route_id].append(e)
+        except HTTPException:
+            logger.warning("Operator ETAs unavailable for stop",
+                           extra={"stop_id": stop.id})
+
+        ours_by_route = {}
+        try:
+            for o in estimate_arrivals_for_stop(stop.id, system_id):
+                ours_by_route[o["route_id"]] = o
+        except HTTPException:
+            pass
+
+        for route_id in set(vendor_by_route) | set(ours_by_route):
+            mine = ours_by_route.get(route_id)
+            vendor_list = sorted(
+                vendor_by_route.get(route_id, []), key=lambda e: e.eta_minutes
+            )
+            vendor = vendor_list[0] if vendor_list else None
+
+            # Prefer our own estimate — it is the product — and fall back to
+            # the operator's when we have no vehicle for that route.
+            if mine is not None:
+                eta_min = mine["eta_minutes"]
+                source = mine.get("eta_source") or "ours"
+            elif vendor is not None:
+                eta_min = float(vendor.eta_minutes)
+                source = "operator"
+            else:
+                continue
+
+            route = next(
+                (r for r in get_routes_cached(system_id) if str(r.myid) == str(route_id)),
+                None,
+            )
+            color = None
+            route_name = vendor.route_name if vendor else None
+            if route is not None:
+                color = getattr(route, "groupColor", None) or getattr(route, "color", None)
+                route_name = route.name
+
+            departures.append({
+                "route_id": route_id,
+                "route_name": route_name,
+                "short_name": getattr(route, "shortName", None) if route else route_id,
+                "color": color,
+                "headsign": vendor.destination if vendor else None,
+                "eta_minutes": eta_min,
+                "eta_source": source,
+                "stop": stopdict(stop),
+                "walk_m": walk_m,
+                "walk_minutes": walk_s / 60.0,
+                # False when the bus will be gone before you could get there.
+                "catchable": eta_min * 60.0 >= walk_s,
+                # Where this bus takes you, so the row can answer "does it go
+                # where I need" without a second request.
+                "to_stops": downstream_stops(route_id, stop.id, eta_min),
+                # Later buses on the same route, so the list can show a second
+                # option without another request.
+                "following_minutes": [float(e.eta_minutes) for e in vendor_list[1:3]],
+            })
+
+    departures.sort(key=lambda d: (not d["catchable"], d["eta_minutes"]))
+
+    return {
+        "location": {"lat": lat, "lng": lng},
+        "nearest_stop": stopdict(nearby[0][0]),
+        "nearest_stop_distance_m": nearby[0][1],
+        "out_of_range": False,
+        "stops_considered": len(nearby),
+        "departures": departures,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+    }

@@ -1,12 +1,13 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MapContainer, TileLayer, Popup, Polyline, useMap, Marker } from 'react-leaflet';
 import { Navigation as NavigationIcon, Settings } from 'lucide-react';
 import clsx from 'clsx';
 import L from 'leaflet';
 import type { LatLngExpression } from 'leaflet';
 import { ShuttleMarker } from './ShuttleMarker';
+import { buttonVariants, cn } from './ui/styles';
 import type { Stop, Vehicle, RoutePath, TripResponse, TripSegment } from './types';
-import { API_BASE_URL } from '@/config';
+import { API_BASE_URL, MAP_ATTRIBUTION, MAP_MAX_NATIVE_ZOOM, MAP_MAX_ZOOM, MAP_SUBDOMAINS, MAP_TILE_URL } from '@/config';
 
 // Fallback color palette for routes without a defined color
 const FALLBACK_ROUTE_COLORS = [
@@ -25,6 +26,7 @@ interface MapShellProps {
     trip: TripResponse | null;
     userLocation?: { lat: number; lng: number } | null;
 }
+
 
 
 function computeTripBounds(trip: TripResponse | null): L.LatLngBounds | null {
@@ -59,11 +61,13 @@ function computeTripKey(trip: TripResponse | null): string | null {
 
 // Separate component to safely use useMap()
 function MapController({
+    systemId,
     systemBounds,
     activeTripBounds,
     tripKey,
     setMap,
 }: {
+    systemId: number | null;
     systemBounds: L.LatLngBounds | null;
     activeTripBounds: L.LatLngBounds | null;
     tripKey: string | null;
@@ -75,35 +79,68 @@ function MapController({
         if (map) setMap(map);
     }, [map, setMap]);
 
-    // Fit to system bounds when it first becomes available
+    // The bottom sheet covers roughly the lower 45% of the screen on mobile,
+    // and Leaflet fits to the whole container — so a symmetric fit puts the
+    // bottom of the bounds underneath the panel. Reserve that space instead,
+    // or half of every fitted route is hidden behind the UI.
+    const fitOptions = useCallback((): L.FitBoundsOptions => {
+        const isNarrow = window.innerWidth < 768;
+        // maxZoom keeps a fit on a short ride from slamming into the deepest
+        // zoom, where the upscaled basemap is blurriest and the surroundings
+        // are lost. A two-stop hop frames at neighbourhood scale, not doorstep.
+        const common = { maxZoom: Math.min(MAP_MAX_NATIVE_ZOOM, 16) };
+        return isNarrow
+            ? {
+                  ...common,
+                  paddingTopLeft: [30, 40],
+                  paddingBottomRight: [30, Math.round(window.innerHeight * 0.48)],
+              }
+            : { ...common, paddingTopLeft: [430, 60], paddingBottomRight: [60, 60] };
+    }, []);
+
+    // Fit the whole network on launch, so the opening view shows every route
+    // and every bus in service rather than an arbitrary crop.
     const hasInitialSystemFit = useRef(false);
     useEffect(() => {
         if (map && systemBounds && !hasInitialSystemFit.current) {
-            map.fitBounds(systemBounds, { padding: [80, 80] });
+            map.fitBounds(systemBounds, fitOptions());
             hasInitialSystemFit.current = true;
         }
-    }, [map, systemBounds]);
+    }, [map, systemBounds, fitOptions]);
 
-    // Reset initial fit if system changes
+    // Reset the initial fit on a system change only. Keying this on the bounds
+    // object would refit the map every time the bounds are recomputed, which
+    // now happens on each vehicle poll — the map would snap back while
+    // someone was panning it.
     useEffect(() => {
         hasInitialSystemFit.current = false;
-    }, [systemBounds]);
+    }, [systemId]);
 
-    // Smart trip centering: only fit bounds when trip key changes (new trip)
+    // Trip / departure centering, and the return trip back to the overview.
     const lastCenteredTripKey = useRef<string | null>(null);
     useEffect(() => {
-        if (map && activeTripBounds && tripKey) {
-            // Only center if this is a different trip than last time
+        if (!map) return;
+
+        if (activeTripBounds && tripKey) {
+            // Only recentre when this is a different trip or departure than
+            // last time, so live updates do not fight the user's panning.
             if (tripKey !== lastCenteredTripKey.current) {
-                map.fitBounds(activeTripBounds, { padding: [80, 80] });
+                map.fitBounds(activeTripBounds, fitOptions());
                 lastCenteredTripKey.current = tripKey;
             }
+            return;
         }
-        // Reset when trip is cancelled
-        if (!tripKey) {
+
+        // Nothing selected any more. If something was, deselecting is a request
+        // to see the whole network again — otherwise the map stays zoomed into
+        // wherever the last route happened to go.
+        if (lastCenteredTripKey.current !== null) {
             lastCenteredTripKey.current = null;
+            if (systemBounds) {
+                map.fitBounds(systemBounds, fitOptions());
+            }
         }
-    }, [map, activeTripBounds, tripKey]);
+    }, [map, activeTripBounds, tripKey, systemBounds, fitOptions]);
 
     return null;
 }
@@ -122,7 +159,25 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
     const routeSettingsRef = useRef<HTMLDivElement>(null);
 
     const [systemBounds, setSystemBounds] = useState<L.LatLngBounds | null>(null);
-    const activeTripBounds = useMemo(() => computeTripBounds(trip), [trip]);
+    // The launch/overview view. Stops define the network, but a bus can sit
+    // just outside their envelope — north of the Quad, or out past Barry's
+    // Corner — so vehicles are folded in to guarantee every bus in service is
+    // on screen.
+    const overviewBounds = useMemo(() => {
+        if (!systemBounds) return null;
+        if (vehicles.length === 0) return systemBounds;
+        const b = L.latLngBounds(systemBounds.getSouthWest(), systemBounds.getNorthEast());
+        for (const v of vehicles) {
+            if (typeof v.lat === 'number' && typeof v.lng === 'number') {
+                b.extend([v.lat, v.lng]);
+            }
+        }
+        return b;
+    }, [systemBounds, vehicles]);
+
+    const tripBounds = useMemo(() => computeTripBounds(trip), [trip]);
+
+    const activeTripBounds = tripBounds;
     const [mapInstance, setMapInstance] = useState<L.Map | null>(null);
 
     // Stop Icon with larger hitbox (white default)
@@ -218,7 +273,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
         };
     }, [systemId]);
 
-    // Fetch routes when showRoutes is toggled
+
     useEffect(() => {
         if (!systemId || !showRoutes) {
             // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -347,26 +402,55 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                     key={systemId}
                     center={center}
                     zoom={15}
+                    maxZoom={MAP_MAX_ZOOM}
                     className="h-full w-full bg-neutral-900"
                     scrollWheelZoom={true}
                     zoomControl={false}
                 >
                     <MapController
-                        systemBounds={systemBounds}
+                        systemId={systemId}
+                        systemBounds={overviewBounds}
                         activeTripBounds={activeTripBounds}
                         tripKey={tripKey}
                         setMap={setMapInstance}
                     />
 
-                    {/* Carto Dark Matter - no auth required */}
+                    {/* Basemap. Provider is configurable; see config.ts for why
+                        the CARTO URL that used to be hardcoded here had to go. */}
                     <TileLayer
-                        attribution='&copy; <a href="https://carto.com/">CARTO</a>, &copy; <a href="http://openstreetmap.org">OpenStreetMap</a> contributors'
-                        url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-                        maxZoom={20}
-                        subdomains="abcd"
+                        attribution={MAP_ATTRIBUTION}
+                        url={MAP_TILE_URL}
+                        maxZoom={MAP_MAX_ZOOM}
+                        // Keep a wide ring of offscreen tiles alive. Leaflet
+                        // prunes to 2 screens by default, so panning walked
+                        // straight onto tiles that had been thrown away and had
+                        // to be refetched — the gaps are what flashed. Six is
+                        // the whole campus at working zooms, which is small
+                        // enough to just hold.
+                        keepBuffer={6}
+                        // Do not swap tiles mid-zoom. Leaflet otherwise starts
+                        // loading the new level while the old one is still on
+                        // screen, and the half-loaded level is the worst of the
+                        // flashing.
+                        updateWhenZooming={false}
+                        // Cross-fading tiles in is what makes a fetch visible
+                        // at all. Without it a tile appears when it is ready,
+                        // over a ground already the right colour.
+                        className="shuttl-tile"
+                        // Request tiles with CORS. Leaflet's img tiles are
+                        // no-cors by default, which makes every response
+                        // opaque: status 0, ok false, headers unreadable. The
+                        // tile-cache worker then cannot tell a real tile from
+                        // Esri's light "not available" placeholder, and cannot
+                        // even see that the fetch succeeded. Esri serves
+                        // Access-Control-Allow-Origin, so asking for CORS costs
+                        // nothing and makes the responses inspectable.
+                        crossOrigin="anonymous"
+                        maxNativeZoom={MAP_MAX_NATIVE_ZOOM}
+                        {...(MAP_SUBDOMAINS ? { subdomains: MAP_SUBDOMAINS } : {})}
                     />
 
-                    {/* Route polylines (glowing) */}
+                    {/* Route polylines, one solid line each. */}
                     {showRoutes &&
                         routes.filter((r) => routeVisibility[r.route_id] !== false).map((r) => {
                             if (!r.path || r.path.length === 0) return null;
@@ -374,54 +458,38 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                             const positions: LatLngExpression[] = r.path.map((p) => [p.lat, p.lng]);
                             const color = r.color || '#a51c30'; // fallback to harvard crimson if missing
 
+                            // One solid line per route. The translucent glow
+                            // underlay that used to sit beneath every route
+                            // muddied adjacent routes into a haze and made the
+                            // colours read washed out; brightness now comes
+                            // from the colour itself.
                             return (
-                                <React.Fragment key={r.route_id}>
-                                    {/* Glow layer (thicker, translucent) */}
-                                    <Polyline
-                                        positions={positions}
-                                        pathOptions={{
-                                            color,
-                                            weight: 10,
-                                            opacity: 0.28,
-                                        }}
-                                    />
-                                    {/* Core line (thinner, bright) */}
-                                    <Polyline
-                                        positions={positions}
-                                        pathOptions={{
-                                            color,
-                                            weight: 4,
-                                            opacity: 0.95,
-                                        }}
-                                    />
-                                </React.Fragment>
+                                <Polyline
+                                    key={r.route_id}
+                                    positions={positions}
+                                    pathOptions={{
+                                        color,
+                                        weight: 4,
+                                        opacity: 1,
+                                    }}
+                                />
                             );
                         })}
 
-                    {/* Planned trip path (if any) - Route-colored with pulsing glow */}
+                    {/* Planned trip path, solid in the route colour. This drew
+                        a 14px translucent layer under a 5px core, both running
+                        an opacity animation — the pulse read as a glow and made
+                        the colour look washed out at every point in the cycle. */}
                     {tripPolylines.map((line) => (
-                        <React.Fragment key={`trip-${line.idx}`}>
-                            {/* Outer glow layer */}
-                            <Polyline
-                                positions={line.positions}
-                                pathOptions={{
-                                    color: line.color,
-                                    weight: 14,
-                                    opacity: 0.35,
-                                    className: 'trip-segment-active'
-                                }}
-                            />
-                            {/* Core line */}
-                            <Polyline
-                                positions={line.positions}
-                                pathOptions={{
-                                    color: line.color,
-                                    weight: 5,
-                                    opacity: 0.95,
-                                    className: 'trip-segment-active'
-                                }}
-                            />
-                        </React.Fragment>
+                        <Polyline
+                            key={`trip-${line.idx}`}
+                            positions={line.positions}
+                            pathOptions={{
+                                color: line.color,
+                                weight: 6,
+                                opacity: 1,
+                            }}
+                        />
                     ))}
 
                     {/* Stops: Glowing Dots with larger hitboxes */}
@@ -465,7 +533,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                     {vehicles
                         .filter((v): v is Vehicle & { lat: number; lng: number } => v.lat !== null && v.lng !== null)
                         .map((v) => (
-                            <ShuttleMarker key={v.id} v={v} durationMs={1200} />
+                            <ShuttleMarker key={v.id} v={v} durationMs={3000} />
                         ))}
                 </MapContainer>
             ) : (
@@ -512,11 +580,11 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                                 if (!mapInstance) return;
                                 if (activeTripBounds) {
                                     mapInstance.fitBounds(activeTripBounds, { padding: [80, 80] });
-                                } else if (systemBounds) {
-                                    mapInstance.fitBounds(systemBounds, { padding: [80, 80] });
+                                } else if (overviewBounds) {
+                                    mapInstance.fitBounds(overviewBounds, { padding: [50, 50] });
                                 }
                             }}
-                            className="rounded-full bg-neutral-900/90 w-9 h-9 flex items-center justify-center text-white shadow-xl backdrop-blur-md border border-white/10 hover:bg-neutral-800 active:scale-95 transition-all"
+                            className={cn(buttonVariants({ variant: 'overlay', size: 'icon' }), 'text-white')}
                             aria-label="Recenter map"
                         >
                             <NavigationIcon size={14} className="fill-current -translate-x-[1px] translate-y-[1px]" />
@@ -528,7 +596,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                             className={clsx(
                                 'rounded-full w-9 h-9 flex items-center justify-center shadow-xl backdrop-blur-md border active:scale-95 transition-all',
                                 showRouteSettings
-                                    ? 'bg-crimson/20 border-crimson/40 text-crimson'
+                                    ? 'bg-crimson/25 border-crimson/60 text-white'
                                     : 'bg-neutral-900/90 border-white/10 text-neutral-300 hover:bg-neutral-800'
                             )}
                             aria-label="Route settings"
@@ -543,9 +611,10 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                     type="button"
                     onClick={() => setShowRoutes((prev) => !prev)}
                     className={clsx(
-                        'justify-self-end pointer-events-auto h-9 rounded-full border px-3 py-1.5 text-[10px] font-medium leading-none transition-all backdrop-blur-md shadow-lg flex items-center justify-center whitespace-nowrap min-w-[32px]',
+                        'justify-self-end pointer-events-auto min-w-[32px]',
+                        buttonVariants({ variant: showRoutes ? 'selected' : 'overlay', size: 'md' }),
                         showRoutes
-                            ? 'border-crimson bg-crimson/20 text-crimson animate-pulse-subtle'
+                            ? 'border-crimson/60 bg-crimson/25 text-white'
                             : 'border-white/10 bg-black/60 text-neutral-300 hover:border-white/20'
                     )}
                 >
@@ -564,12 +633,12 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                         className={[
                             'rounded-full border px-4 py-2 text-xs font-medium transition-all backdrop-blur-md shadow-lg',
                             showRoutes
-                                ? 'border-crimson bg-crimson/20 text-crimson animate-pulse-subtle'
+                                ? 'border-crimson/60 bg-crimson/25 text-white'
                                 : 'border-white/10 bg-black/60 text-neutral-300 hover:border-white/20',
                         ].join(' ')}
                     >
                         <div className="flex items-center gap-2">
-                            <div className={`h-1.5 w-1.5 rounded-full ${showRoutes ? 'bg-crimson shadow-[0_0_8px_rgba(165,28,48,0.6)]' : 'bg-neutral-500'}`} />
+                            <div className={`h-1.5 w-1.5 rounded-full ${showRoutes ? 'bg-crimson' : 'bg-neutral-500'}`} />
                             {showRoutes ? 'Hide Routes' : 'Show Routes'}
                             {loadingRoutes && showRoutes && (
                                 <div className="h-3 w-3 animate-spin rounded-full border-2 border-crimson/30 border-t-crimson" />
@@ -587,7 +656,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                         className={clsx(
                             'rounded-full border px-3 py-2 text-xs font-medium transition-all backdrop-blur-md shadow-lg',
                             showRouteSettings
-                                ? 'border-crimson bg-crimson/20 text-crimson'
+                                ? 'border-crimson/60 bg-crimson/25 text-white'
                                 : 'border-white/10 bg-black/60 text-neutral-300 hover:border-white/20'
                         )}
                     >
@@ -628,8 +697,8 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                         if (!mapInstance) return;
                         if (activeTripBounds) {
                             mapInstance.fitBounds(activeTripBounds, { padding: [80, 80] });
-                        } else if (systemBounds) {
-                            mapInstance.fitBounds(systemBounds, { padding: [80, 80] });
+                        } else if (overviewBounds) {
+                            mapInstance.fitBounds(overviewBounds, { padding: [50, 50] });
                         }
                     }}
                     className="hidden md:block pointer-events-auto absolute right-6 bottom-32 z-[1000] rounded-full bg-neutral-900/90 px-4 py-2 text-xs font-bold text-white shadow-xl backdrop-blur-md border border-white/10 hover:bg-neutral-800 transition-all active:scale-95"
@@ -693,7 +762,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                                             <div className={clsx(
                                                 'h-3.5 w-3.5 rounded-full transition-all duration-200',
                                                 isVisible
-                                                    ? 'translate-x-[14px] bg-crimson shadow-[0_0_6px_rgba(165,28,48,0.5)]'
+                                                    ? 'translate-x-[14px] bg-crimson'
                                                     : 'translate-x-0 bg-neutral-400'
                                             )} />
                                         </div>

@@ -10,12 +10,11 @@ interface System {
 
 interface LayoutProps {
     system: System | null;
-    onChangeSystem: () => void;
     trip: TripResponse | null;
     onTripChange: (trip: TripResponse | null) => void;
 }
 
-export const Layout = ({ system, onChangeSystem, trip, onTripChange }: LayoutProps) => {
+export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
     const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
 
     return (
@@ -53,7 +52,6 @@ export const Layout = ({ system, onChangeSystem, trip, onTripChange }: LayoutPro
                     <TripPlannerPanel
                         className="w-full"
                         system={system}
-                        onChangeSystem={onChangeSystem}
                         trip={trip}
                         onTripChange={onTripChange}
                         onUserLocationChange={setUserLocation}
