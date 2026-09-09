@@ -621,20 +621,32 @@ def _pick_project(payload: dict) -> dict:
 # reads as black, and Quad Express and Quad Yard Express are both #136D1C —
 # the same dark green for two different routes, which no legend can fix.
 #
-# These are nine distinct hues at high saturation, spaced so that no two are
-# confusable at the width of a map line, and bright enough to hold up against
-# a grey basemap. Hue is kept near the operator's where theirs was already
-# meaningful, so riders who know "the purple one" still recognise it.
+# These are the only colours on screen that are not grey or crimson, so they
+# are chosen to sit inside that style rather than against it: muted, near-equal
+# in lightness, warm on one side and cool on the other, with Allston Loop kept
+# red so the busiest route agrees with the app's accent.
+#
+# Two constraints set the values:
+#
+#   Lightness has a floor — this is the mistake Harvard's own palette makes.
+#   Below roughly L* 50 a 4px line disappears into the dark basemap.
+#
+#   Chroma stays restrained. Nine full-brightness hues is a rainbow: every line
+#   shouts, none looks like it belongs to the same product, and the crimson
+#   interface ends up competing with all of them.
+#
+# Hue tracks the operator's where theirs was meaningful, so riders who know
+# "the purple one" still recognise it.
 ROUTE_COLOR_OVERRIDES = {
-    "AL": "#EA4335",    # red — Allston Loop, was an unreadable maroon
-    "XSEC": "#FA7B17",  # orange
-    "OVNT": "#FBBC04",  # amber
-    "QYE": "#A8E000",   # lime — was identical to QE
-    "QSTA": "#34A853",  # green
-    "QE": "#12B5CB",    # teal — was identical to QYE
-    "ME": "#4285F4",    # blue
-    "QSEC": "#A142F4",  # purple, as theirs was
-    "AC": "#F439A0",    # pink, close to their magenta
+    "AL": "#C04B42",    # brick red — agrees with the crimson accent
+    "XSEC": "#BE7B3C",  # ochre
+    "QYE": "#8C9A3E",   # olive, kept green-leaning so it separates from XSEC
+    "QSTA": "#55935C",  # green
+    "QE": "#3F8A8A",    # teal — was identical to QYE
+    "ME": "#4374B0",    # steel blue
+    "QSEC": "#7360A8",  # indigo violet, as theirs was purple
+    "AC": "#A25C88",    # plum, close to their magenta
+    "OVNT": "#6E7A8C",  # slate — the quiet overnight route
 }
 
 

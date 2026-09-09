@@ -739,7 +739,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusDeparture }: MapSh
                             className={clsx(
                                 'rounded-full w-9 h-9 flex items-center justify-center shadow-xl backdrop-blur-md border active:scale-95 transition-all',
                                 showRouteSettings
-                                    ? 'bg-neutral-100 border-neutral-100 text-neutral-950'
+                                    ? 'bg-crimson/20 border-crimson/40 text-crimson'
                                     : 'bg-neutral-900/90 border-white/10 text-neutral-300 hover:bg-neutral-800'
                             )}
                             aria-label="Route settings"
@@ -756,7 +756,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusDeparture }: MapSh
                     className={clsx(
                         'justify-self-end pointer-events-auto h-9 rounded-full border px-3 py-1.5 text-[10px] font-medium leading-none transition-all backdrop-blur-md shadow-lg flex items-center justify-center whitespace-nowrap min-w-[32px]',
                         showRoutes
-                            ? 'border-neutral-100 bg-neutral-100 text-neutral-950'
+                            ? 'border-crimson bg-crimson/20 text-crimson'
                             : 'border-white/10 bg-black/60 text-neutral-300 hover:border-white/20'
                     )}
                 >
@@ -775,15 +775,15 @@ export const MapShell = ({ systemId, trip, userLocation, focusDeparture }: MapSh
                         className={[
                             'rounded-full border px-4 py-2 text-xs font-medium transition-all backdrop-blur-md shadow-lg',
                             showRoutes
-                                ? 'border-neutral-100 bg-neutral-100 text-neutral-950'
+                                ? 'border-crimson bg-crimson/20 text-crimson'
                                 : 'border-white/10 bg-black/60 text-neutral-300 hover:border-white/20',
                         ].join(' ')}
                     >
                         <div className="flex items-center gap-2">
-                            <div className={`h-1.5 w-1.5 rounded-full ${showRoutes ? 'bg-neutral-100' : 'bg-neutral-600'}`} />
+                            <div className={`h-1.5 w-1.5 rounded-full ${showRoutes ? 'bg-crimson' : 'bg-neutral-500'}`} />
                             {showRoutes ? 'Hide Routes' : 'Show Routes'}
                             {loadingRoutes && showRoutes && (
-                                <div className="h-3 w-3 animate-spin rounded-full border-2 border-neutral-100/25 border-t-neutral-100" />
+                                <div className="h-3 w-3 animate-spin rounded-full border-2 border-crimson/30 border-t-crimson" />
                             )}
                         </div>
                     </button>
@@ -798,7 +798,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusDeparture }: MapSh
                         className={clsx(
                             'rounded-full border px-3 py-2 text-xs font-medium transition-all backdrop-blur-md shadow-lg',
                             showRouteSettings
-                                ? 'border-neutral-100 bg-neutral-100 text-neutral-950'
+                                ? 'border-crimson bg-crimson/20 text-crimson'
                                 : 'border-white/10 bg-black/60 text-neutral-300 hover:border-white/20'
                         )}
                     >
@@ -867,7 +867,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusDeparture }: MapSh
                     </div>
                     {loadingRoutes ? (
                         <div className="flex items-center gap-2 py-3 px-1">
-                            <div className="h-3 w-3 animate-spin rounded-full border-2 border-neutral-100/25 border-t-neutral-100" />
+                            <div className="h-3 w-3 animate-spin rounded-full border-2 border-crimson/30 border-t-crimson" />
                             <span className="text-[11px] text-neutral-500">Loading routes...</span>
                         </div>
                     ) : routes.length === 0 ? (
@@ -899,12 +899,12 @@ export const MapShell = ({ systemId, trip, userLocation, focusDeparture }: MapSh
                                         </span>
                                         <div className={clsx(
                                             'h-5 w-9 rounded-full transition-all duration-200 flex items-center px-0.5 flex-shrink-0',
-                                            isVisible ? 'bg-neutral-100/25' : 'bg-neutral-700'
+                                            isVisible ? 'bg-crimson/30' : 'bg-neutral-700'
                                         )}>
                                             <div className={clsx(
                                                 'h-3.5 w-3.5 rounded-full transition-all duration-200',
                                                 isVisible
-                                                    ? 'translate-x-[14px] bg-neutral-100'
+                                                    ? 'translate-x-[14px] bg-crimson'
                                                     : 'translate-x-0 bg-neutral-400'
                                             )} />
                                         </div>
