@@ -33,8 +33,13 @@
 }
 
 /* Map Styles */
-.leaflet-container {
-  background: #0b0f17;
+/* Belt and braces on top of the import order: whatever is behind an unloaded
+   tile must be dark, because that is what a zoom or a pan onto new ground
+   shows for as long as the fetch takes. Leaflet ships #ddd here. */
+.leaflet-container,
+.leaflet-container .leaflet-pane,
+.leaflet-tile-container {
+  background-color: #0b0f17;
 }
 
 /* The basemap arrives mid-grey, several stops lighter than the panel above it,
