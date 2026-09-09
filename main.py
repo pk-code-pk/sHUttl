@@ -1237,6 +1237,32 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
             if eta_to_boarding_stop_s is not None:
                 segment_eta_s = eta_to_boarding_stop_s + ride_eta_s
 
+        # Show the operator's prediction for this stop and route when they have
+        # one. They are simply more accurate — 0.44 min mean absolute error
+        # against our 3.63 over 76 paired samples — because they know the
+        # assigned run, the scheduled departure and whether a driver is holding,
+        # none of which is inferable from position alone. Ours is kept alongside
+        # it so the two stay comparable, and is what gets shown wherever they
+        # have no prediction.
+        operator_eta_s = None
+        try:
+            for e in get_platform_etas(str(boarding_stop_id)):
+                if norm_id(e.route_id) == seg_key:
+                    candidate_s = float(e.eta_minutes) * 60.0
+                    if operator_eta_s is None or candidate_s < operator_eta_s:
+                        operator_eta_s = candidate_s
+        except Exception as exc:
+            # Their feed being down must not cost the rider an ETA; ours stands.
+            logger.warning("Operator ETA lookup failed; using our estimate",
+                           exc_info=exc, extra={"stop": boarding_stop_id})
+
+        own_eta_s = eta_to_boarding_stop_s
+        if operator_eta_s is not None:
+            eta_to_boarding_stop_s = operator_eta_s
+            eta_source = "operator"
+            if ride_eta_s is not None:
+                segment_eta_s = eta_to_boarding_stop_s + ride_eta_s
+
         r = dict(route)
         r["next_bus"] = {
             "vehicle_id": best_vehicle.id,
@@ -1245,6 +1271,9 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
             "distance_to_boarding_stop_m": best_dist,
             "stops_ahead": best_stops_ahead,
             "eta_source": eta_source,
+            # Our own estimate, kept whichever one is being shown, so the
+            # accuracy tooling can score them against observed arrivals.
+            "own_eta_s": own_eta_s,
             "learned_fraction": learned_fraction,
             "eta_to_origin_stop": eta_to_boarding_stop_s,   # legacy name
             "eta_to_boarding_stop_s": eta_to_boarding_stop_s,
@@ -2803,14 +2832,25 @@ def api_departures(
             )
             vendor = vendor_list[0] if vendor_list else None
 
-            # Prefer our own estimate — it is the product — and fall back to
-            # the operator's when we have no vehicle for that route.
-            if mine is not None:
-                eta_min = mine["eta_minutes"]
-                source = mine.get("eta_source") or "ours"
-            elif vendor is not None:
+            # Show the operator's prediction when they have one.
+            #
+            # They are simply better: measured against each other over 76
+            # paired samples, theirs sat at 0.44 min mean absolute error and
+            # ours at 3.63. That is not an algorithm gap — they know the
+            # assigned run, the scheduled departure, whether a driver is
+            # holding at a terminal, and they get telemetry we cannot see. A
+            # rider wants the accurate number, not ours.
+            #
+            # Our own estimate still runs, and still fills in wherever they
+            # have no prediction — a bus they are not predicting for is
+            # exactly the case where an inferred ETA beats nothing at all.
+            # eta_compare.py and eta_scoreboard.py keep scoring both.
+            if vendor is not None:
                 eta_min = float(vendor.eta_minutes)
                 source = "operator"
+            elif mine is not None:
+                eta_min = mine["eta_minutes"]
+                source = mine.get("eta_source") or "ours"
             else:
                 continue
 
