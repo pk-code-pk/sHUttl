@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { motion, AnimatePresence, type PanInfo } from "framer-motion";
+import { motion, AnimatePresence, type PanInfo } from "motion/react";
 import { MapPin, Navigation as NavigationIcon, ArrowUpDown, Clock, Info, ChevronDown, ChevronLeft, X, Share2, Check } from "lucide-react";
 import clsx from "clsx";
 import type { TripResponse, TripCandidate, TripCandidatesResponse } from "./types";
@@ -13,6 +13,9 @@ import logo from "../assets/logo.svg";
 import { API_BASE_URL } from "@/config";
 import { describeFailure, getLocation } from "@/lib/geolocation";
 import { NextBusPanel } from "./NextBusPanel";
+import { Button } from "./ui/Button";
+import { cn } from "./ui/styles";
+import { SegmentedControl } from "./ui/SegmentedControl";
 import {
     buildTripUrl,
     copyToClipboard,
@@ -808,27 +811,16 @@ export const TripPlannerPanel = ({
                     to change to. The logo already says what the app is. */}
                 <div className="mb-2 flex shrink-0 items-center gap-2">
                     <img src={logo} alt="sHUttl" className="h-5 w-auto shrink-0 opacity-90" />
-                    <div className="flex flex-1 gap-1 rounded-xl bg-neutral-800/40 p-1">
-                    {([
-                        { id: 'next' as PanelMode, label: 'Next Bus Out' },
-                        { id: 'plan' as PanelMode, label: 'Plan Trip' },
-                    ]).map((m) => (
-                        <button
-                            key={m.id}
-                            type="button"
-                            onClick={() => requestMode(m.id)}
-                            aria-pressed={mode === m.id}
-                            className={clsx(
-                                "flex-1 rounded-lg py-1.5 text-[11px] font-bold transition-colors",
-                                mode === m.id
-                                    ? "bg-crimson text-white"
-                                    : "text-neutral-400 hover:text-white"
-                            )}
-                        >
-                            {m.label}
-                        </button>
-                    ))}
-                    </div>
+                    <SegmentedControl
+                        className="flex-1"
+                        layoutGroup="panel-mode"
+                        value={mode}
+                        onChange={requestMode}
+                        segments={[
+                            { id: 'next' as PanelMode, label: 'Next Bus Out' },
+                            { id: 'plan' as PanelMode, label: 'Plan Trip' },
+                        ]}
+                    />
                 </div>
 
                 {pendingMode && (
@@ -837,20 +829,12 @@ export const TripPlannerPanel = ({
                             Switching to Next Bus Out clears your planned trip.
                         </p>
                         <div className="mt-2 flex gap-2">
-                            <button
-                                type="button"
-                                onClick={confirmModeSwitch}
-                                className="flex-1 rounded-lg bg-crimson py-1.5 text-[11px] font-bold text-white transition-colors hover:bg-crimson-dark"
-                            >
+                            <Button variant="primary" size="sm" block onClick={confirmModeSwitch}>
                                 Clear and switch
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => setPendingMode(null)}
-                                className="flex-1 rounded-lg bg-neutral-800 py-1.5 text-[11px] font-bold text-neutral-300 transition-colors hover:text-white"
-                            >
+                            </Button>
+                            <Button variant="secondary" size="sm" block onClick={() => setPendingMode(null)}>
                                 Keep trip
-                            </button>
+                            </Button>
                         </div>
                     </div>
                 )}
@@ -1114,7 +1098,12 @@ export const TripPlannerPanel = ({
                             setOriginCoords(null);
                             resetLiveState();
                         }}
-                        className="h-10 px-3 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-400 hover:text-white transition-colors flex items-center justify-center"
+                        className={cn(
+                            "flex h-10 items-center justify-center rounded-xl px-3",
+                            "bg-neutral-800 text-neutral-400 transition-all duration-150",
+                            "hover:bg-neutral-700 hover:text-white active:scale-[0.97]",
+                            "shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]",
+                        )}
                         aria-label="Swap origin and destination"
                     >
                         <ArrowUpDown size={16} />
@@ -1129,7 +1118,9 @@ export const TripPlannerPanel = ({
                         className={clsx(
                             "h-10 flex-1 text-sm font-bold rounded-lg transition-all relative overflow-hidden",
                             (system && (originStopId || originUseCurrentLocation) && destStopId)
-                                ? (planning ? "bg-[#6a0101] text-white/50" : "bg-[#A20202] hover:bg-[#8a0101] text-white shadow-lg shadow-red-900/30")
+                                ? (planning
+                                    ? "bg-crimson-dark text-white/50"
+                                    : "bg-crimson hover:bg-crimson-light text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.18)]")
                                 : "bg-neutral-800 text-neutral-500 cursor-not-allowed"
                         )}
                         aria-busy={planning}

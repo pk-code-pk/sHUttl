@@ -14,7 +14,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
+import { AnimatePresence, motion } from 'motion/react';
 import { ChevronDown, Footprints, LocateFixed, MapPin, RefreshCw, TriangleAlert } from 'lucide-react';
 import clsx from 'clsx';
 import { API_BASE_URL } from '@/config';

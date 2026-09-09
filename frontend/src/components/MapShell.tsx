@@ -5,6 +5,7 @@ import clsx from 'clsx';
 import L from 'leaflet';
 import type { LatLngExpression } from 'leaflet';
 import { ShuttleMarker } from './ShuttleMarker';
+import { buttonVariants, cn } from './ui/styles';
 import type { Stop, Vehicle, RoutePath, TripResponse, TripSegment } from './types';
 import { API_BASE_URL, MAP_ATTRIBUTION, MAP_MAX_NATIVE_ZOOM, MAP_MAX_ZOOM, MAP_SUBDOMAINS, MAP_TILE_URL } from '@/config';
 
@@ -558,7 +559,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                                     mapInstance.fitBounds(overviewBounds, { padding: [50, 50] });
                                 }
                             }}
-                            className="rounded-full bg-neutral-900/90 w-9 h-9 flex items-center justify-center text-white shadow-xl backdrop-blur-md border border-white/10 hover:bg-neutral-800 active:scale-95 transition-all"
+                            className={cn(buttonVariants({ variant: 'overlay', size: 'icon' }), 'text-white')}
                             aria-label="Recenter map"
                         >
                             <NavigationIcon size={14} className="fill-current -translate-x-[1px] translate-y-[1px]" />
@@ -585,7 +586,8 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                     type="button"
                     onClick={() => setShowRoutes((prev) => !prev)}
                     className={clsx(
-                        'justify-self-end pointer-events-auto h-9 rounded-full border px-3 py-1.5 text-[10px] font-medium leading-none transition-all backdrop-blur-md shadow-lg flex items-center justify-center whitespace-nowrap min-w-[32px]',
+                        'justify-self-end pointer-events-auto min-w-[32px]',
+                        buttonVariants({ variant: showRoutes ? 'selected' : 'overlay', size: 'md' }),
                         showRoutes
                             ? 'border-crimson bg-crimson/20 text-crimson'
                             : 'border-white/10 bg-black/60 text-neutral-300 hover:border-white/20'

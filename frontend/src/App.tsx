@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { AnimatePresence } from "framer-motion";
+import { AnimatePresence } from "motion/react";
 import { SplashScreen } from "./components/SplashScreen";
 import { Layout } from "./components/Layout";
 import { SystemSelectModal } from "./components/SystemSelectModal";
