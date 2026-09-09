@@ -64,15 +64,18 @@ interface DeparturesResponse {
 interface NextBusPanelProps {
     systemId: number | undefined;
     /**
-     * Plan a trip from a departure's boarding stop to one of its onward stops.
+     * Show a departure on the map, or clear it when passed null.
      *
-     * Next Bus Out deliberately owns none of what happens next. Choosing a
-     * destination hands the pair to the trip planner, so the itinerary, the
-     * route drawn on the map, the endpoint markers, the map framing and the
-     * live refresh are all the Plan Trip code path rather than a second
-     * implementation of it that would drift.
+     * This panel keeps its own list UI and owns none of the map behaviour:
+     * the pan, the route highlight, the drawn path and the live refresh all
+     * come from the trip planner's implementation, so there is no second copy
+     * of it here to drift out of step.
      */
-    onPlanFromDeparture?: (originStopId: string, destStopId: string) => void;
+    onShowOnMap?: (
+        originStopId: string,
+        destStopId: string | null,
+        routeId?: string,
+    ) => void;
 }
 
 const REFRESH_MS = 15000;
@@ -90,7 +93,7 @@ function formatWalk(minutes: number, meters: number): string {
     return `${m} min walk`;
 }
 
-export const NextBusPanel = ({ systemId, onPlanFromDeparture }: NextBusPanelProps) => {
+export const NextBusPanel = ({ systemId, onShowOnMap }: NextBusPanelProps) => {
     // Which row is open. Expanding a departure lists where that bus goes, and
     // each of those stops is a destination you can plan to — "when does it
     // come" and "where does it go" are the same question for someone who does
@@ -199,8 +202,18 @@ export const NextBusPanel = ({ systemId, onPlanFromDeparture }: NextBusPanelProp
 
     const keyFor = (d: Departure, i: number) => `${d.route_id}-${d.stop.id}-${i}`;
 
-    const toggleRow = (key: string) => {
-        setOpenKey(openKey === key ? null : key);
+    const toggleRow = (d: Departure, key: string) => {
+        const opening = openKey !== key;
+        setOpenKey(opening ? key : null);
+
+        // Expanding only lists where the bus goes; the map waits for a
+        // destination. Opening a row used to draw the run automatically by
+        // treating its last onward stop as the destination, which is wrong on
+        // a loop: XSEC's run ends at Kennedy School (Northbound), about 100 m
+        // from where you board it, so the map correctly drew a 100 m stub.
+        // Picking any single stop from the list as "the destination" is a guess
+        // either way, and the rider is about to make that choice explicitly.
+        if (!opening) onShowOnMap?.(d.stop.id, null);
     };
 
     return (
@@ -313,8 +326,8 @@ export const NextBusPanel = ({ systemId, onPlanFromDeparture }: NextBusPanelProp
                             key={key}
                             departure={d}
                             open={openKey === key}
-                            onClick={() => toggleRow(key)}
-                            onPlanTo={onPlanFromDeparture}
+                            onClick={() => toggleRow(d, key)}
+                            onPlanTo={(o, dst) => onShowOnMap?.(o, dst, d.route_id)}
                         />
                     );
                 })}
@@ -332,8 +345,8 @@ export const NextBusPanel = ({ systemId, onPlanFromDeparture }: NextBusPanelProp
                                     departure={d}
                                     dimmed
                                     open={openKey === key}
-                                    onClick={() => toggleRow(key)}
-                                    onPlanTo={onPlanFromDeparture}
+                                    onClick={() => toggleRow(d, key)}
+                                    onPlanTo={(o, dst) => onShowOnMap?.(o, dst, d.route_id)}
                                 />
                             );
                         })}
@@ -435,8 +448,7 @@ const DepartureRow = ({
                             <p className="py-1 text-[10px] text-neutral-500">
                                 Onward stops unavailable for this route.
                             </p>
-                        ) : !onPlanTo ? (
-                            <p className="pb-1 text-[10px] text-neutral-500">Stops on this run</p>
+
                         ) : (
                             <ol className="space-y-0.5">
                                 {d.to_stops.map((t) => (

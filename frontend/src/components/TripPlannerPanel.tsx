@@ -421,7 +421,12 @@ export const TripPlannerPanel = ({
     // `pair` lets a caller plan a specific origin/destination straight away.
     // Next Bus Out uses it: setting the state and then calling would read the
     // previous values, since state updates are not applied synchronously.
-    const handlePlanTrip = async (pair?: { originStopId: string; destStopId: string }) => {
+    const handlePlanTrip = async (pair?: {
+        originStopId: string;
+        destStopId: string;
+        /** Constrain the answer to one route — see /trip's route_id. */
+        routeId?: string;
+    }) => {
         setError(null);
 
         if (!system?.id) {
@@ -473,6 +478,7 @@ export const TripPlannerPanel = ({
                 lng2: destLng.toString(),
                 system_id: system.id.toString(),
             });
+            if (pair?.routeId) params.set('route_id', pair.routeId);
 
             const res = await fetch(`${API_BASE_URL}/trip?${params.toString()}`);
             if (!res.ok) {
@@ -576,7 +582,31 @@ export const TripPlannerPanel = ({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [system?.id, stops, originStopId, destStopId, originCoords]);
 
-    const planFromDeparture = (originStopId: string, destStopId: string) => {
+    /**
+     * Draw a departure on the map, without leaving Next Bus Out.
+     *
+     * The panel keeps its own list UI; only the map behaviour is shared. That
+     * sharing is the point: this runs the same /trip request and pushes the
+     * result through the same `trip` prop the planner uses, so the panning,
+     * the route highlight, the drawn path, the endpoint markers and the live
+     * refresh are the Plan Trip implementation rather than a second one that
+     * drifts from it.
+     *
+     * The planner's own fields are filled too, so switching to Plan Trip
+     * afterwards shows the trip you were just looking at instead of an empty
+     * form. What it deliberately does not do is switch modes.
+     */
+    const showDepartureOnMap = (
+        originStopId: string,
+        destStopId: string | null,
+        routeId?: string,
+    ) => {
+        if (!destStopId) {
+            onTripChange(null);
+            resetLiveState();
+            return;
+        }
+
         const origin = findStopById(originStopId);
         const dest = findStopById(destStopId);
         if (!origin || !dest) return;
@@ -587,8 +617,7 @@ export const TripPlannerPanel = ({
         setOriginQuery(origin.name);
         setDestStopId(destStopId);
         setDestQuery(dest.name);
-        setMode('plan');
-        void handlePlanTrip({ originStopId, destStopId });
+        void handlePlanTrip({ originStopId, destStopId, routeId });
     };
 
     // Helper: Reset live updates and candidates when inputs change significantly
@@ -778,7 +807,7 @@ export const TripPlannerPanel = ({
                 {mode === 'next' && (
                     <NextBusPanel
                         systemId={system?.id}
-                        onPlanFromDeparture={planFromDeparture}
+                        onShowOnMap={showDepartureOnMap}
                     />
                 )}
 

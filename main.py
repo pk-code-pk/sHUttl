@@ -2235,16 +2235,30 @@ def api_trip(
     lat2: float = Query(..., ge=-90, le=90),
     lng2: float = Query(..., ge=-180, le=180),
     system_id: int = DEFAULT_SYSTEM_ID,
+    route_id: str | None = None,
     debug: bool = False,
     debug_paths: bool = False,
 ):
+    """Plan a trip between two points.
+
+    `route_id` restricts the answer to trips carried by that one route. It
+    exists for "show me this bus's run", which is a different question from
+    "get me there fastest": on a loop the far end of a run comes back near
+    where it started, so the unrestricted planner correctly answers with a
+    one-hop shortcut on some other route — and then the map draws a route the
+    rider was not asking about. Falls back to the unrestricted result when the
+    named route cannot make the trip.
+    """
     if system_id <= 0:
         raise HTTPException(status_code=400, detail="Invalid system_id")
 
     t0 = time.perf_counter()
 
     # 0. Check cache before any data fetches
-    cache_key = f"trip_v2:{system_id}:{round(lat,4)}:{round(lng,4)}:{round(lat2,4)}:{round(lng2,4)}"
+    cache_key = (
+        f"trip_v2:{system_id}:{round(lat,4)}:{round(lng,4)}"
+        f":{round(lat2,4)}:{round(lng2,4)}:{route_id or '-'}"
+    )
     if redis_client is not None:
         try:
             cached = redis_client.get(cache_key)
@@ -2317,6 +2331,20 @@ def api_trip(
     # ---------------------------------------------------------
     all_skeletons = _dedup_skeletons(all_skeletons)
     all_skeletons.sort(key=lambda x: x.score)
+
+    if route_id:
+        on_route = [
+            skel for skel in all_skeletons
+            if skel.segments
+            and all(norm_id(seg.route_id) == norm_id(route_id) for seg in skel.segments)
+        ]
+        if on_route:
+            all_skeletons = on_route
+        else:
+            logger.info(
+                "No trip on the requested route; answering unrestricted",
+                extra={"route_id": route_id},
+            )
 
     # Pick Top K (more than before to surface diverse options)
     K = 6
