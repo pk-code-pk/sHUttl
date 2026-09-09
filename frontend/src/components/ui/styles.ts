@@ -39,11 +39,15 @@ export const buttonVariants = cva(
     {
         variants: {
             variant: {
+                // The deep tone, not the bright one: on a dark map a
+                // full-strength red fill is the brightest thing on screen and
+                // pulls the eye off the routes. Hover lifts one step to the
+                // mid-tone, so the change is felt without becoming loud.
                 primary: [
-                    "bg-crimson text-white hover:bg-crimson-light",
-                    // A hairline of lighter crimson along the top edge reads as
-                    // a lit edge on a raised key rather than a border.
-                    "shadow-[inset_0_1px_0_rgba(255,255,255,0.18)]",
+                    "bg-crimson text-white hover:bg-crimson-mid",
+                    // A hairline along the top edge reads as a lit edge on a
+                    // raised key rather than a border.
+                    "shadow-[inset_0_1px_0_rgba(255,255,255,0.14)]",
                 ],
                 secondary: [
                     "bg-neutral-800 text-neutral-200 hover:bg-neutral-700 hover:text-white",
@@ -60,9 +64,11 @@ export const buttonVariants = cva(
                 // White label, not crimson-on-crimson: a tinted label on a
                 // tinted fill is the lowest-contrast text in the app, and this
                 // variant marks the thing currently switched on.
+                // A tinted fill of the deep tone with a mid-tone border: the
+                // border is what marks it as on, so the fill can stay quiet.
                 selected: [
-                    "bg-crimson/25 text-white backdrop-blur-md",
-                    "border border-crimson/60 hover:bg-crimson/30",
+                    "bg-crimson-deep/50 text-white backdrop-blur-md",
+                    "border border-crimson-mid/70 hover:bg-crimson-deep/65",
                 ],
             },
             size: {

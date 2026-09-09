@@ -421,6 +421,31 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                         attribution={MAP_ATTRIBUTION}
                         url={MAP_TILE_URL}
                         maxZoom={MAP_MAX_ZOOM}
+                        // Keep a wide ring of offscreen tiles alive. Leaflet
+                        // prunes to 2 screens by default, so panning walked
+                        // straight onto tiles that had been thrown away and had
+                        // to be refetched — the gaps are what flashed. Six is
+                        // the whole campus at working zooms, which is small
+                        // enough to just hold.
+                        keepBuffer={6}
+                        // Do not swap tiles mid-zoom. Leaflet otherwise starts
+                        // loading the new level while the old one is still on
+                        // screen, and the half-loaded level is the worst of the
+                        // flashing.
+                        updateWhenZooming={false}
+                        // Cross-fading tiles in is what makes a fetch visible
+                        // at all. Without it a tile appears when it is ready,
+                        // over a ground already the right colour.
+                        className="shuttl-tile"
+                        // Request tiles with CORS. Leaflet's img tiles are
+                        // no-cors by default, which makes every response
+                        // opaque: status 0, ok false, headers unreadable. The
+                        // tile-cache worker then cannot tell a real tile from
+                        // Esri's light "not available" placeholder, and cannot
+                        // even see that the fetch succeeded. Esri serves
+                        // Access-Control-Allow-Origin, so asking for CORS costs
+                        // nothing and makes the responses inspectable.
+                        crossOrigin="anonymous"
                         maxNativeZoom={MAP_MAX_NATIVE_ZOOM}
                         {...(MAP_SUBDOMAINS ? { subdomains: MAP_SUBDOMAINS } : {})}
                     />

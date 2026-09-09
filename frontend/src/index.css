@@ -14,9 +14,22 @@
    crimson rather than the muddy #A20202 that was here.
 --------------------------------------------------------------------------- */
 @theme {
-  --color-crimson: #a51c30;
-  --color-crimson-dark: #7f1526;
-  --color-crimson-light: #c8324a;
+  /* Two neighbouring values rather than one bright red. The deep tone carries
+     surfaces — pills, active states, the primary action — and the lighter one
+     is reserved for text and hairlines sitting on top of it. They are ~14
+     degrees apart in hue and close in chroma, so a filled pill and its label
+     read as one material instead of two colours meeting.
+
+     The pills were previously filled with #a51c30 at full strength, which on a
+     dark map is the brightest thing on screen and pulled the eye off the
+     routes. `deep` is where fills live now; the old value survives as the
+     mid-tone for borders. */
+  --color-crimson: #8e1c2b;
+  --color-crimson-deep: #6d1522;
+  --color-crimson-mid: #a5233a;
+  --color-crimson-light: #d4737f;
+  /* Kept: existing rules reference it. */
+  --color-crimson-dark: #6d1522;
 }
 
 /* Map Styles */
@@ -34,6 +47,24 @@
    which costs the orientation a map exists to give. This keeps streets
    readable while sitting a step above the sheet, so map and panel still read
    as figure and ground. */
+/* Anything not yet painted shows this rather than the page beneath, so a tile
+   still in flight is a dark square instead of a white one. Leaflet leaves
+   tiles transparent, which is where the bursts of white came from: the browser
+   showed whatever was behind the pane. */
+.leaflet-tile-pane img,
+.leaflet-tile {
+  background: #0b0f17;
+}
+
+/* Kill the fade-in. Leaflet ramps opacity 0 to 1 per tile, which is precisely
+   what makes loading visible; with the dark ground above, a tile can simply
+   appear. */
+.shuttl-tile,
+.leaflet-tile {
+  opacity: 1 !important;
+  transition: none !important;
+}
+
 .leaflet-tile-pane {
   /* Darker, so the route colours and the buses carry the map rather than
      competing with the ground under them.

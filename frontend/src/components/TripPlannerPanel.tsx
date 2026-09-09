@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { MapPin, Navigation as NavigationIcon, ArrowUpDown, Clock, Info, ChevronDown, ChevronLeft, X, Share2, Check } from "lucide-react";
+import { createPortal } from "react-dom";
+import { MapPin, Navigation as NavigationIcon, ArrowUpDown, Clock, Info, ChevronDown, ChevronLeft, X, Share2, Check, TriangleAlert } from "lucide-react";
 import clsx from "clsx";
 import type { TripResponse, TripCandidate, TripCandidatesResponse } from "./types";
 import {
@@ -14,6 +15,7 @@ import { API_BASE_URL } from "@/config";
 import { describeFailure, getLocation } from "@/lib/geolocation";
 import { NextBusPanel } from "./NextBusPanel";
 import { Button } from "./ui/Button";
+import { Alert, AlertActions, AlertContent, AlertDescription, AlertIcon, AlertTitle } from "./ui/Alert";
 import { cn } from "./ui/styles";
 import { SegmentedControl } from "./ui/SegmentedControl";
 import { PanelSheet } from "./ui/PanelSheet";
@@ -747,20 +749,57 @@ export const TripPlannerPanel = ({
                     />
                 </div>
 
-                {pendingMode && (
-                    <div className="mb-2 shrink-0 rounded-xl border border-crimson/40 bg-crimson/10 px-3 py-2.5">
-                        <p className="text-[11px] leading-snug text-neutral-200">
-                            Switching to Next Bus Out clears your planned trip.
-                        </p>
-                        <div className="mt-2 flex gap-2">
-                            <Button variant="primary" size="sm" block onClick={confirmModeSwitch}>
-                                Clear and switch
-                            </Button>
-                            <Button variant="secondary" size="sm" block onClick={() => setPendingMode(null)}>
-                                Keep trip
-                            </Button>
-                        </div>
-                    </div>
+                {/* Centred over the whole screen, not inline in the sheet.
+                    A confirmation that appears in the flow of a panel is easy
+                    to miss and easy to mis-tap; this is a decision that
+                    discards work, so it takes the screen until it is answered. */}
+                {/* Portalled to the body: the sheet is transformed, and a
+                    transformed ancestor makes position:fixed resolve against
+                    it rather than the viewport — so the overlay was trapped
+                    inside the sheet and landed at its bottom edge. */}
+                {createPortal(
+                    <AnimatePresence>
+                        {pendingMode && (
+                        <>
+                            <motion.div
+                                className="fixed inset-0 z-[70] bg-black/60 backdrop-blur-sm"
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                exit={{ opacity: 0 }}
+                                onClick={() => setPendingMode(null)}
+                            />
+                            <motion.div
+                                className="fixed inset-x-4 top-1/2 z-[71] -translate-y-1/2"
+                                initial={{ opacity: 0, scale: 0.96, y: '-46%' }}
+                                animate={{ opacity: 1, scale: 1, y: '-50%' }}
+                                exit={{ opacity: 0, scale: 0.97, y: '-48%' }}
+                                transition={{ type: 'spring', stiffness: 420, damping: 34 }}
+                            >
+                                <Alert variant="warning" className="mx-auto max-w-sm shadow-2xl">
+                                    <AlertIcon>
+                                        <TriangleAlert size={16} />
+                                    </AlertIcon>
+                                    <AlertContent>
+                                        <AlertTitle>Clear your planned trip?</AlertTitle>
+                                        <AlertDescription>
+                                            Next Bus Out shows departures near you, so the
+                                            route you planned will come off the map.
+                                        </AlertDescription>
+                                        <AlertActions>
+                                            <Button variant="primary" size="sm" block onClick={confirmModeSwitch}>
+                                                Clear and switch
+                                            </Button>
+                                            <Button variant="secondary" size="sm" block onClick={() => setPendingMode(null)}>
+                                                Keep trip
+                                            </Button>
+                                        </AlertActions>
+                                    </AlertContent>
+                                </Alert>
+                            </motion.div>
+                        </>
+                        )}
+                    </AnimatePresence>,
+                    document.body,
                 )}
 
                 {mode === 'next' && (
