@@ -255,6 +255,12 @@ export const TripPlannerPanel = ({
         hasTripLink(window.location.search) ? 'plan' : 'next',
     );
 
+    // A mode switch that would discard a planned trip waits for confirmation.
+    // Switching to Next Bus Out has to clear the trip — the panel below it is
+    // a departures list, so leaving a planned route drawn on the map would
+    // show a trip nothing on screen refers to.
+    const [pendingMode, setPendingMode] = useState<PanelMode | null>(null);
+
     // Shareable-link state. `sharedEndpoints` remembers what the current
     // result was planned from, because the trip response only carries the
     // matched stops — not whether the user asked for a stop or dropped a pin,
@@ -620,6 +626,27 @@ export const TripPlannerPanel = ({
         void handlePlanTrip({ originStopId, destStopId, routeId });
     };
 
+    const requestMode = (next: PanelMode) => {
+        if (next === mode) return;
+        // Only worth interrupting when there is something to lose: a trip on
+        // the map, or candidates the user is still choosing between.
+        const wouldDiscardTrip = next === 'next' && (Boolean(trip) || candidates.length > 0);
+        if (wouldDiscardTrip) {
+            setPendingMode(next);
+            return;
+        }
+        setPendingMode(null);
+        setMode(next);
+    };
+
+    const confirmModeSwitch = () => {
+        if (!pendingMode) return;
+        onTripChange(null);
+        resetLiveState();
+        setMode(pendingMode);
+        setPendingMode(null);
+    };
+
     // Helper: Reset live updates and candidates when inputs change significantly
     const resetLiveState = () => {
         setSharedEndpoints(null);
@@ -789,7 +816,7 @@ export const TripPlannerPanel = ({
                         <button
                             key={m.id}
                             type="button"
-                            onClick={() => setMode(m.id)}
+                            onClick={() => requestMode(m.id)}
                             aria-pressed={mode === m.id}
                             className={clsx(
                                 "flex-1 rounded-lg py-1.5 text-[11px] font-bold transition-colors",
@@ -803,6 +830,30 @@ export const TripPlannerPanel = ({
                     ))}
                     </div>
                 </div>
+
+                {pendingMode && (
+                    <div className="mb-2 shrink-0 rounded-xl border border-crimson/40 bg-crimson/10 px-3 py-2.5">
+                        <p className="text-[11px] leading-snug text-neutral-200">
+                            Switching to Next Bus Out clears your planned trip.
+                        </p>
+                        <div className="mt-2 flex gap-2">
+                            <button
+                                type="button"
+                                onClick={confirmModeSwitch}
+                                className="flex-1 rounded-lg bg-crimson py-1.5 text-[11px] font-bold text-white transition-colors hover:bg-crimson-dark"
+                            >
+                                Clear and switch
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setPendingMode(null)}
+                                className="flex-1 rounded-lg bg-neutral-800 py-1.5 text-[11px] font-bold text-neutral-300 transition-colors hover:text-white"
+                            >
+                                Keep trip
+                            </button>
+                        </div>
+                    </div>
+                )}
 
                 {mode === 'next' && (
                     <NextBusPanel
