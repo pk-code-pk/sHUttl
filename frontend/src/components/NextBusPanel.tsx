@@ -63,8 +63,16 @@ interface DeparturesResponse {
 
 interface NextBusPanelProps {
     systemId: number | undefined;
-    /** Draws the selected departure's route and downstream stops on the map. */
-    onFocusDeparture?: (departure: Departure | null) => void;
+    /**
+     * Plan a trip from a departure's boarding stop to one of its onward stops.
+     *
+     * Next Bus Out deliberately owns none of what happens next. Choosing a
+     * destination hands the pair to the trip planner, so the itinerary, the
+     * route drawn on the map, the endpoint markers, the map framing and the
+     * live refresh are all the Plan Trip code path rather than a second
+     * implementation of it that would drift.
+     */
+    onPlanFromDeparture?: (originStopId: string, destStopId: string) => void;
 }
 
 const REFRESH_MS = 15000;
@@ -82,10 +90,11 @@ function formatWalk(minutes: number, meters: number): string {
     return `${m} min walk`;
 }
 
-export const NextBusPanel = ({ systemId, onFocusDeparture }: NextBusPanelProps) => {
-    // Which row is open. Selecting one both expands its stop list and asks the
-    // map to draw the route, because "when does it come" and "where does it go"
-    // are the same question for someone who does not already know the route.
+export const NextBusPanel = ({ systemId, onPlanFromDeparture }: NextBusPanelProps) => {
+    // Which row is open. Expanding a departure lists where that bus goes, and
+    // each of those stops is a destination you can plan to — "when does it
+    // come" and "where does it go" are the same question for someone who does
+    // not already know the route.
     const [openKey, setOpenKey] = useState<string | null>(null);
     const [data, setData] = useState<DeparturesResponse | null>(null);
     const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
@@ -190,10 +199,8 @@ export const NextBusPanel = ({ systemId, onFocusDeparture }: NextBusPanelProps) 
 
     const keyFor = (d: Departure, i: number) => `${d.route_id}-${d.stop.id}-${i}`;
 
-    const toggleRow = (d: Departure, key: string) => {
-        const next = openKey === key ? null : key;
-        setOpenKey(next);
-        onFocusDeparture?.(next ? d : null);
+    const toggleRow = (key: string) => {
+        setOpenKey(openKey === key ? null : key);
     };
 
     return (
@@ -306,7 +313,8 @@ export const NextBusPanel = ({ systemId, onFocusDeparture }: NextBusPanelProps) 
                             key={key}
                             departure={d}
                             open={openKey === key}
-                            onClick={() => toggleRow(d, key)}
+                            onClick={() => toggleRow(key)}
+                            onPlanTo={onPlanFromDeparture}
                         />
                     );
                 })}
@@ -324,7 +332,8 @@ export const NextBusPanel = ({ systemId, onFocusDeparture }: NextBusPanelProps) 
                                     departure={d}
                                     dimmed
                                     open={openKey === key}
-                                    onClick={() => toggleRow(d, key)}
+                                    onClick={() => toggleRow(key)}
+                                    onPlanTo={onPlanFromDeparture}
                                 />
                             );
                         })}
@@ -340,11 +349,13 @@ const DepartureRow = ({
     dimmed = false,
     open = false,
     onClick,
+    onPlanTo,
 }: {
     departure: Departure;
     dimmed?: boolean;
     open?: boolean;
     onClick?: () => void;
+    onPlanTo?: (originStopId: string, destStopId: string) => void;
 }) => (
     <motion.div
         initial={{ opacity: 0, y: 4 }}
@@ -424,23 +435,31 @@ const DepartureRow = ({
                             <p className="py-1 text-[10px] text-neutral-500">
                                 Onward stops unavailable for this route.
                             </p>
+                        ) : !onPlanTo ? (
+                            <p className="pb-1 text-[10px] text-neutral-500">Stops on this run</p>
                         ) : (
-                            <ol className="space-y-1">
+                            <ol className="space-y-0.5">
                                 {d.to_stops.map((t) => (
-                                    <li key={t.id} className="flex items-center gap-2">
-                                        <span
-                                            className="h-1.5 w-1.5 shrink-0 rounded-full"
-                                            style={{ backgroundColor: d.color ?? '#525252' }}
-                                        />
-                                        <span className="min-w-0 flex-1 truncate text-[11px] text-neutral-300">
-                                            {t.name}
-                                        </span>
-                                        <span className="shrink-0 text-[10px] tabular-nums text-neutral-500">
-                                            {t.arrives_at}
-                                        </span>
-                                        <span className="w-12 shrink-0 text-right text-[10px] tabular-nums text-neutral-400">
-                                            {Math.round(t.minutes)} min
-                                        </span>
+                                    <li key={t.id}>
+                                        <button
+                                            type="button"
+                                            onClick={() => onPlanTo?.(d.stop.id, t.id)}
+                                            className="flex w-full items-center gap-2 rounded-md px-1 py-1 text-left transition-colors hover:bg-white/5"
+                                        >
+                                            <span
+                                                className="h-1.5 w-1.5 shrink-0 rounded-full"
+                                                style={{ backgroundColor: d.color ?? '#525252' }}
+                                            />
+                                            <span className="min-w-0 flex-1 truncate text-[11px] text-neutral-300">
+                                                {t.name}
+                                            </span>
+                                            <span className="shrink-0 text-[10px] tabular-nums text-neutral-500">
+                                                {t.arrives_at}
+                                            </span>
+                                            <span className="w-12 shrink-0 text-right text-[10px] tabular-nums text-neutral-400">
+                                                {Math.round(t.minutes)} min
+                                            </span>
+                                        </button>
                                     </li>
                                 ))}
                             </ol>

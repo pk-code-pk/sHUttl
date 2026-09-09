@@ -12,7 +12,7 @@ import { formatEtaSeconds } from "../utils/time";
 import logo from "../assets/logo.svg";
 import { API_BASE_URL } from "@/config";
 import { describeFailure, getLocation } from "@/lib/geolocation";
-import { NextBusPanel, type Departure } from "./NextBusPanel";
+import { NextBusPanel } from "./NextBusPanel";
 import {
     buildTripUrl,
     copyToClipboard,
@@ -33,8 +33,6 @@ interface TripPlannerPanelProps {
     trip: TripResponse | null;
     onTripChange: (trip: TripResponse | null) => void;
     onUserLocationChange?: (location: { lat: number; lng: number } | null) => void;
-    /** Forwarded from Next Bus Out so the map can draw the chosen departure. */
-    onFocusDeparture?: (departure: Departure | null) => void;
 }
 
 interface StopOption {
@@ -148,8 +146,7 @@ export const TripPlannerPanel = ({
     system,
     trip,
     onTripChange,
-    onUserLocationChange,
-    onFocusDeparture
+    onUserLocationChange
 }: TripPlannerPanelProps) => {
     const [stops, setStops] = useState<StopOption[]>([]);
     const [loadingStops, setLoadingStops] = useState(false);
@@ -421,7 +418,10 @@ export const TripPlannerPanel = ({
         });
     };
 
-    const handlePlanTrip = async () => {
+    // `pair` lets a caller plan a specific origin/destination straight away.
+    // Next Bus Out uses it: setting the state and then calling would read the
+    // previous values, since state updates are not applied synchronously.
+    const handlePlanTrip = async (pair?: { originStopId: string; destStopId: string }) => {
         setError(null);
 
         if (!system?.id) {
@@ -429,15 +429,18 @@ export const TripPlannerPanel = ({
             return;
         }
 
+        const effectiveOriginStopId = pair?.originStopId ?? originStopId;
+        const effectiveDestStopId = pair?.destStopId ?? destStopId;
+
         // Determine origin coordinates
         let originLat: number | null = null;
         let originLng: number | null = null;
 
-        if (originUseCurrentLocation && originCoords) {
+        if (!pair && originUseCurrentLocation && originCoords) {
             originLat = originCoords.lat;
             originLng = originCoords.lng;
-        } else if (originStopId) {
-            const stop = findStopById(originStopId);
+        } else if (effectiveOriginStopId) {
+            const stop = findStopById(effectiveOriginStopId);
             if (stop) {
                 originLat = stop.lat;
                 originLng = stop.lng;
@@ -448,8 +451,8 @@ export const TripPlannerPanel = ({
         let destLat: number | null = null;
         let destLng: number | null = null;
 
-        if (destStopId) {
-            const stop = findStopById(destStopId);
+        if (effectiveDestStopId) {
+            const stop = findStopById(effectiveDestStopId);
             if (stop) {
                 destLat = stop.lat;
                 destLng = stop.lng;
@@ -512,11 +515,11 @@ export const TripPlannerPanel = ({
             // planning a trip is not a navigation, and stacking history
             // entries would make Back walk through every plan attempt.
             const endpoints = {
-                origin: originStopId
-                    ? { stopId: originStopId }
+                origin: effectiveOriginStopId
+                    ? { stopId: effectiveOriginStopId }
                     : { coords: { lat: originLat, lng: originLng } },
-                destination: destStopId
-                    ? { stopId: destStopId }
+                destination: effectiveDestStopId
+                    ? { stopId: effectiveDestStopId }
                     : { coords: { lat: destLat, lng: destLng } },
             };
             setSharedEndpoints(endpoints);
@@ -572,6 +575,21 @@ export const TripPlannerPanel = ({
         // The ref guard is what makes the auto-plan fire exactly once.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [system?.id, stops, originStopId, destStopId, originCoords]);
+
+    const planFromDeparture = (originStopId: string, destStopId: string) => {
+        const origin = findStopById(originStopId);
+        const dest = findStopById(destStopId);
+        if (!origin || !dest) return;
+
+        setOriginUseCurrentLocation(false);
+        setOriginCoords(null);
+        setOriginStopId(originStopId);
+        setOriginQuery(origin.name);
+        setDestStopId(destStopId);
+        setDestQuery(dest.name);
+        setMode('plan');
+        void handlePlanTrip({ originStopId, destStopId });
+    };
 
     // Helper: Reset live updates and candidates when inputs change significantly
     const resetLiveState = () => {
@@ -760,7 +778,7 @@ export const TripPlannerPanel = ({
                 {mode === 'next' && (
                     <NextBusPanel
                         systemId={system?.id}
-                        onFocusDeparture={onFocusDeparture}
+                        onPlanFromDeparture={planFromDeparture}
                     />
                 )}
 
@@ -1023,7 +1041,7 @@ export const TripPlannerPanel = ({
                     </button>
 
                     <motion.button
-                        onClick={handlePlanTrip}
+                        onClick={() => void handlePlanTrip()}
                         disabled={planning || !system || (!originStopId && !originUseCurrentLocation) || !destStopId}
                         whileTap={{ scale: 0.98 }}
                         animate={error ? { x: [0, -4, 4, -4, 4, 0] } : {}}

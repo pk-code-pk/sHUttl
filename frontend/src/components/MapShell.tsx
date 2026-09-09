@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { MapContainer, TileLayer, Popup, Polyline, useMap, Marker, CircleMarker } from 'react-leaflet';
+import { MapContainer, TileLayer, Popup, Polyline, useMap, Marker } from 'react-leaflet';
 import { Navigation as NavigationIcon, Settings } from 'lucide-react';
 import clsx from 'clsx';
 import L from 'leaflet';
@@ -24,53 +24,9 @@ interface MapShellProps {
     systemId: number | null;
     trip: TripResponse | null;
     userLocation?: { lat: number; lng: number } | null;
-    /** A departure selected in Next Bus Out: its route is emphasised, the
-     * other routes dimmed, and the map fitted to where that bus goes. */
-    focusDeparture?: FocusDeparture | null;
-}
-
-export interface FocusDeparture {
-    route_id: string;
-    color: string | null;
-    stop: { id: string; name: string; lat: number; lng: number };
-    to_stops: { id: string; name: string; lat: number; lng: number; arrives_at: string }[];
 }
 
 
-/** Index of the polyline vertex nearest a point. Squared degrees is fine for
- * ordering over a 3 km campus. */
-function nearestVertex(path: { lat: number; lng: number }[], lat: number, lng: number): number {
-    let best = 0;
-    let bestD = Infinity;
-    for (let i = 0; i < path.length; i++) {
-        const d = (path[i].lat - lat) ** 2 + (path[i].lng - lng) ** 2;
-        if (d < bestD) { bestD = d; best = i; }
-    }
-    return best;
-}
-
-/**
- * The stretch of route between two points, following travel direction.
- *
- * Fitting the whole loop is the wrong framing: Allston Loop runs from Allston
- * to the Quad, so fitting all of it zooms out until nothing is legible. What
- * matters is the part you would actually ride, so the path is cut from the
- * boarding stop to the last onward stop — wrapping past the end of the loop
- * when the ride does.
- */
-function slicePath(
-    path: { lat: number; lng: number }[],
-    from: { lat: number; lng: number },
-    to: { lat: number; lng: number },
-): { lat: number; lng: number }[] {
-    if (path.length < 2) return path;
-    const a = nearestVertex(path, from.lat, from.lng);
-    const b = nearestVertex(path, to.lat, to.lng);
-    if (a === b) return path;
-    if (a < b) return path.slice(a, b + 1);
-    // Wraps past the end of the loop.
-    return [...path.slice(a), ...path.slice(0, b + 1)];
-}
 
 function computeTripBounds(trip: TripResponse | null): L.LatLngBounds | null {
     if (!trip) return null;
@@ -188,7 +144,7 @@ function MapController({
     return null;
 }
 
-export const MapShell = ({ systemId, trip, userLocation, focusDeparture }: MapShellProps) => {
+export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
     const [stops, setStops] = useState<Stop[]>([]);
     const [vehicles, setVehicles] = useState<Vehicle[]>([]);
     const [routes, setRoutes] = useState<RoutePath[]>([]);
@@ -220,42 +176,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusDeparture }: MapSh
 
     const tripBounds = useMemo(() => computeTripBounds(trip), [trip]);
 
-    // Geometry of the selected route, and the portion of it the rider would
-    // travel. Route paths are fetched on selection, so both are null for the
-    // first render or two.
-    const focusFullPath = useMemo(() => {
-        if (!focusDeparture) return null;
-        const r = routes.find((x) => x.route_id === focusDeparture.route_id);
-        return r?.path?.length ? r.path : null;
-    }, [focusDeparture, routes]);
-
-    const focusRoutePath = useMemo(() => {
-        if (!focusDeparture || !focusFullPath) return null;
-        const last = focusDeparture.to_stops[focusDeparture.to_stops.length - 1];
-        if (!last) return focusFullPath;
-        return slicePath(focusFullPath, focusDeparture.stop, last);
-    }, [focusDeparture, focusFullPath]);
-
-    // Fit to the stretch being ridden, so the whole drawn path is on screen
-    // without zooming out to a loop the rider is not taking. Falls back to the
-    // stops until geometry arrives, so the map frames something immediately.
-    const focusBounds = useMemo(() => {
-        if (!focusDeparture) return null;
-
-        if (focusRoutePath) {
-            return L.latLngBounds(
-                focusRoutePath.map((p) => [p.lat, p.lng] as [number, number]),
-            );
-        }
-
-        const pts: [number, number][] = [
-            [focusDeparture.stop.lat, focusDeparture.stop.lng],
-            ...focusDeparture.to_stops.map((t) => [t.lat, t.lng] as [number, number]),
-        ];
-        return pts.length ? L.latLngBounds(pts) : null;
-    }, [focusDeparture, focusRoutePath]);
-
-    const activeTripBounds = focusBounds ?? tripBounds;
+    const activeTripBounds = tripBounds;
     const [mapInstance, setMapInstance] = useState<L.Map | null>(null);
 
     // Stop Icon with larger hitbox (white default)
@@ -351,14 +272,9 @@ export const MapShell = ({ systemId, trip, userLocation, focusDeparture }: MapSh
         };
     }, [systemId]);
 
-    // Route geometry is needed either when the user asks for all routes, or
-    // when a single departure is selected and we need to draw just that one.
-    // A boolean rather than the departure object, so selecting a different
-    // departure does not refetch every route.
-    const needRoutes = showRoutes || Boolean(focusDeparture);
 
     useEffect(() => {
-        if (!systemId || !needRoutes) {
+        if (!systemId || !showRoutes) {
             // eslint-disable-next-line react-hooks/set-state-in-effect
             setRoutes([]);
             return;
@@ -376,7 +292,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusDeparture }: MapSh
                 setRoutesError(true);
             })
             .finally(() => setLoadingRoutes(false));
-    }, [systemId, needRoutes]);
+    }, [systemId, showRoutes]);
 
     // Initialize route visibility when routes load
     useEffect(() => {
@@ -437,19 +353,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusDeparture }: MapSh
     }, [stops]);
 
     // Compute trip key for smart centering
-    const tripKey = useMemo(() => {
-        // Keyed on the focused departure when one is selected, so choosing a
-        // different departure re-fits the map instead of being treated as the
-        // same view.
-        if (focusDeparture) {
-            // The path suffix matters: route geometry loads after the
-            // selection, and without it the fit would stay on the provisional
-            // stops-only bounds and never widen to the full route.
-            const stage = focusRoutePath ? 'path' : 'stops';
-            return `focus:${focusDeparture.route_id}:${focusDeparture.stop.id}:${stage}`;
-        }
-        return computeTripKey(trip);
-    }, [trip, focusDeparture, focusRoutePath]);
+    const tripKey = useMemo(() => computeTripKey(trip), [trip]);
 
     // Auto-off "Show Routes" on first trip only
     const previousTripRef = useRef<TripResponse | null>(null);
@@ -520,45 +424,13 @@ export const MapShell = ({ systemId, trip, userLocation, focusDeparture }: MapSh
                         {...(MAP_SUBDOMAINS ? { subdomains: MAP_SUBDOMAINS } : {})}
                     />
 
-                    {/* Route polylines (glowing). With a departure selected,
-                        its route stays bright and the others drop back so the
-                        one you are being told about is legible.
-
-                        It draws even with "Show Routes" off: being told a bus
-                        is coming is not useful without seeing where it goes.
-                        The stretch being ridden is solid; the rest of the loop
-                        is a thin line for context, not a glow. */}
-                    {focusDeparture && focusFullPath && (() => {
-                        const r = routes.find((x) => x.route_id === focusDeparture.route_id);
-                        const color = r?.color || focusDeparture.color || '#a51c30';
-                        const rest: LatLngExpression[] = focusFullPath.map((p) => [p.lat, p.lng]);
-                        const ridden: LatLngExpression[] = (focusRoutePath ?? focusFullPath)
-                            .map((p) => [p.lat, p.lng]);
-                        return (
-                            <>
-                                <Polyline
-                                    positions={rest}
-                                    pathOptions={{ color, weight: 2, opacity: 0.3 }}
-                                />
-                                <Polyline
-                                    positions={ridden}
-                                    pathOptions={{ color, weight: 5, opacity: 1 }}
-                                />
-                            </>
-                        );
-                    })()}
-
+                    {/* Route polylines, one solid line each. */}
                     {showRoutes &&
                         routes.filter((r) => routeVisibility[r.route_id] !== false).map((r) => {
                             if (!r.path || r.path.length === 0) return null;
-                            // Already drawn above, at full emphasis.
-                            if (focusDeparture?.route_id === r.route_id) return null;
 
                             const positions: LatLngExpression[] = r.path.map((p) => [p.lat, p.lng]);
                             const color = r.color || '#a51c30'; // fallback to harvard crimson if missing
-
-                            // Other routes recede while a departure is selected.
-                            const dimmed = Boolean(focusDeparture);
 
                             // One solid line per route. The translucent glow
                             // underlay that used to sit beneath every route
@@ -572,52 +444,11 @@ export const MapShell = ({ systemId, trip, userLocation, focusDeparture }: MapSh
                                     pathOptions={{
                                         color,
                                         weight: 4,
-                                        opacity: dimmed ? 0.25 : 1,
+                                        opacity: 1,
                                     }}
                                 />
                             );
                         })}
-
-                    {/* Downstream stops of the selected departure, labelled with
-                        the time the bus is expected to reach each one. */}
-                    {focusDeparture && focusDeparture.to_stops.map((t, i) => (
-                        <CircleMarker
-                            key={`focus-${t.id}-${i}`}
-                            center={[t.lat, t.lng]}
-                            radius={5}
-                            pathOptions={{
-                                color: focusDeparture.color ?? '#a51c30',
-                                fillColor: '#0a0a0a',
-                                fillOpacity: 1,
-                                weight: 2.5,
-                            }}
-                        >
-                            <Popup>
-                                <div className="text-[11px] font-semibold">{t.name}</div>
-                                <div className="text-[10px] opacity-70">arrives ~{t.arrives_at}</div>
-                            </Popup>
-                        </CircleMarker>
-                    ))}
-
-                    {/* Where you would board. */}
-                    {focusDeparture && (
-                        <CircleMarker
-                            center={[focusDeparture.stop.lat, focusDeparture.stop.lng]}
-                            radius={8}
-                            pathOptions={{
-                                color: '#ffffff',
-                                fillColor: focusDeparture.color ?? '#a51c30',
-                                fillOpacity: 1,
-                                weight: 3,
-                            }}
-                        >
-                            <Popup>
-                                <div className="text-[11px] font-semibold">
-                                    Board at {focusDeparture.stop.name}
-                                </div>
-                            </Popup>
-                        </CircleMarker>
-                    )}
 
                     {/* Planned trip path, solid in the route colour. This drew
                         a 14px translucent layer under a 5px core, both running
