@@ -11,6 +11,7 @@ import {
 import { formatEtaSeconds } from "../utils/time";
 import logo from "../assets/logo.svg";
 import { API_BASE_URL } from "@/config";
+import { describeFailure, getLocation } from "@/lib/geolocation";
 import { NextBusPanel, type Departure } from "./NextBusPanel";
 import {
     buildTripUrl,
@@ -396,37 +397,28 @@ export const TripPlannerPanel = ({
         stops.find((s) => s.id.toString() === id.toString());
 
     const handleUseCurrentLocation = () => {
-        if (!navigator.geolocation) {
-            setLocationError('Geolocation is not supported by this browser.');
-            return;
-        }
-
         setLocationError(null);
         setLocating(true);
 
-        navigator.geolocation.getCurrentPosition(
-            (pos) => {
-                const { latitude, longitude } = pos.coords;
-                const coords = { lat: latitude, lng: longitude };
-                setOriginCoords(coords);
+        // force: this is an explicit tap, so it should override the cache and
+        // the failure cooldown — the user may have just enabled Location
+        // Services. Shares one request with Next Bus Out either way.
+        void getLocation(true).then((result) => {
+            setLocating(false);
+            if (result.coords) {
+                setOriginCoords(result.coords);
                 setOriginUseCurrentLocation(true);
                 setOriginQuery('Current location');
                 setOriginStopId('');
-                setLocating(false);
-                onUserLocationChange?.(coords);
+                onUserLocationChange?.(result.coords);
                 resetLiveState();
-            },
-            (err) => {
-                console.error(err);
-                setLocationError('Could not get your location.');
-                setLocating(false);
-            },
-            {
-                enableHighAccuracy: true,
-                timeout: 10000,
-                maximumAge: 10000,
+                return;
             }
-        );
+            if (result.failure) {
+                // Same wording as Next Bus Out: one cause, one explanation.
+                setLocationError(describeFailure(result.failure));
+            }
+        });
     };
 
     const handlePlanTrip = async () => {

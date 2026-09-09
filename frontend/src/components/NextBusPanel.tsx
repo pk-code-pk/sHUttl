@@ -18,6 +18,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { ChevronDown, Footprints, LocateFixed, MapPin, RefreshCw, TriangleAlert } from 'lucide-react';
 import clsx from 'clsx';
 import { API_BASE_URL } from '@/config';
+import { describeFailure, getLocation } from '@/lib/geolocation';
 
 interface DepartureStop {
     id: string;
@@ -102,44 +103,26 @@ export const NextBusPanel = ({ systemId, onFocusDeparture }: NextBusPanelProps) 
     const [manualStopId, setManualStopId] = useState('');
     const [showStopPicker, setShowStopPicker] = useState(false);
 
-    const locate = useCallback(() => {
-        if (!navigator.geolocation) {
-            setError('This browser cannot share your location.');
-            return;
-        }
+    // Location comes from the shared cache in lib/geolocation, not a direct
+    // getCurrentPosition call. This panel unmounts whenever the user switches
+    // to Plan Trip, so asking on every mount meant every mode toggle hit
+    // CoreLocation again — doubled by StrictMode in development, which is what
+    // produced runs of identical kCLErrorLocationUnknown lines.
+    const locate = useCallback((force = false) => {
         setLocating(true);
         setError(null);
-        navigator.geolocation.getCurrentPosition(
-            (pos) => {
-                const next = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-                coordsRef.current = next;
-                setCoords(next);
-                setLocating(false);
-            },
-            (err) => {
-                setLocating(false);
-                // Distinguish the causes, because the fix differs: denied is a
-                // browser prompt, unavailable is usually the OS withholding
-                // location from the browser entirely, and neither is helped by
-                // a generic "could not get your location".
-                if (err.code === err.PERMISSION_DENIED) {
-                    setError('Location permission denied. Allow it, or pick a stop below.');
-                } else if (err.code === err.TIMEOUT) {
-                    setError('Location is taking too long. Pick a stop below instead.');
-                } else {
-                    setError(
-                        'Your browser could not determine your location. On macOS, ' +
-                        'enable Location Services for it in System Settings — or just ' +
-                        'pick a stop below.',
-                    );
-                }
+        void getLocation(force).then((result) => {
+            setLocating(false);
+            if (result.coords) {
+                coordsRef.current = result.coords;
+                setCoords(result.coords);
+                return;
+            }
+            if (result.failure) {
+                setError(describeFailure(result.failure));
                 setShowStopPicker(true);
-            },
-            // High accuracy is not worth much here: stops are hundreds of
-            // metres apart, and requesting it makes failures more likely on
-            // desktops with no GPS.
-            { enableHighAccuracy: false, timeout: 8000, maximumAge: 60000 },
-        );
+            }
+        });
     }, []);
 
     // Ask on mount: the whole point of this mode is that it needs no input.
@@ -237,7 +220,7 @@ export const NextBusPanel = ({ systemId, onFocusDeparture }: NextBusPanelProps) 
                 </button>
                 <button
                     type="button"
-                    onClick={() => (coords ? void fetchDepartures() : locate())}
+                    onClick={() => (coords ? void fetchDepartures() : locate(true))}
                     aria-label="Refresh departures"
                     className="rounded-full bg-neutral-800/50 p-1.5 text-neutral-400 hover:bg-neutral-800 hover:text-white transition-colors"
                 >
@@ -252,7 +235,7 @@ export const NextBusPanel = ({ systemId, onFocusDeparture }: NextBusPanelProps) 
                         <p className="text-[10px] leading-relaxed text-amber-200">{error}</p>
                         <button
                             type="button"
-                            onClick={locate}
+                            onClick={() => locate(true)}
                             className="mt-1 text-[10px] font-bold uppercase tracking-wider text-amber-300 hover:text-amber-100"
                         >
                             Try again
