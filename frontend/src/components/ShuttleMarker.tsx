@@ -1,13 +1,32 @@
-import { useEffect, useMemo, useRef } from "react";
-import { Marker } from "react-leaflet";
-import type L from "leaflet";
-import { bearingDeg, lerp, makeVehicleIcon } from "./mapUtils";
+import { useEffect, useRef } from "react";
+import { Marker, type MarkerInstance } from "react-map-gl/maplibre";
+import { ARROW_PATH, NEUTRAL_ROUTE_COLOR, bearingDeg, lerp } from "./mapUtils";
 import type { Vehicle } from "./types";
 
 /** Ease in and out. A vehicle that starts and stops abruptly reads as a
  * teleport even when the path between is interpolated. */
 const easeInOut = (t: number) => (t < 0.5 ? 2 * t * t : 1 - (1 - t) * (1 - t) * 2);
 
+const SIZE = 32;
+
+/**
+ * A vehicle marker: a solid arrow in its route's colour.
+ *
+ * Filled with the route colour, not outlined in it. An earlier version gave
+ * every bus a white body with a coloured ring, on the theory that a shared
+ * body would read as one fleet — it read as nine white darts instead, and the
+ * thing that identifies a bus was reduced to a 2px edge. The grouped route
+ * palette does that job properly.
+ *
+ * The dark outline is load-bearing: a bus sits on a route line of its own
+ * colour, so without it the arrow dissolves into the line it is travelling
+ * along.
+ *
+ * Position and heading are both animated over the poll interval. Position is
+ * pushed straight to the MapLibre marker each frame rather than through React
+ * state — sixty renders a second per bus for a coordinate change is the wrong
+ * tool. Heading is a CSS transition on the inner element.
+ */
 export function ShuttleMarker({
     v,
     // Matched to the vehicle poll interval, not shorter than it. At 1.2s
@@ -19,17 +38,13 @@ export function ShuttleMarker({
     v: Vehicle & { lat: number; lng: number };
     durationMs?: number;
 }) {
-    const markerRef = useRef<L.Marker>(null);
+    const markerRef = useRef<MarkerInstance>(null);
+    const innerRef = useRef<HTMLDivElement>(null);
     const prevPosRef = useRef<[number, number] | null>(null);
     const rafRef = useRef<number | null>(null);
     // Unwrapped heading: kept as a continuous value rather than 0-360 so that
     // crossing north turns by 2 degrees instead of spinning 358 the long way.
     const rotRef = useRef<number | null>(null);
-
-    // The icon is rebuilt only when the colour changes. Rotation is applied to
-    // the element's transform instead, because regenerating the icon HTML every
-    // frame would reparse an SVG per vehicle per frame.
-    const icon = useMemo(() => makeVehicleIcon(0, v.color), [v.color]);
 
     useEffect(() => {
         const marker = markerRef.current;
@@ -57,20 +72,17 @@ export function ShuttleMarker({
             rotRef.current += delta;
         }
 
-        const rotation = rotRef.current;
-        const el = marker.getElement()?.querySelector<HTMLElement>(".vehicle-marker-inner");
+        const el = innerRef.current;
         if (el) {
-            // The CSS transition on this element interpolates the turn; the
-            // position is interpolated below. Both run over the same window.
             el.style.transitionDuration = `${durationMs}ms`;
-            el.style.transform = `rotate(${rotation}deg)`;
+            el.style.transform = `rotate(${rotRef.current}deg)`;
         }
 
         const start = performance.now();
         const tick = (now: number) => {
             const t = Math.min(1, (now - start) / durationMs);
             const e = easeInOut(t);
-            marker.setLatLng([lerp(prev[0], next[0], e), lerp(prev[1], next[1], e)]);
+            marker.setLngLat([lerp(prev[1], next[1], e), lerp(prev[0], next[0], e)]);
             if (t < 1) rafRef.current = requestAnimationFrame(tick);
         };
         rafRef.current = requestAnimationFrame(tick);
@@ -78,7 +90,28 @@ export function ShuttleMarker({
         return () => {
             if (rafRef.current) cancelAnimationFrame(rafRef.current);
         };
-    }, [v.lat, v.lng, v.heading, v.color, durationMs]);
+    }, [v.lat, v.lng, v.heading, durationMs]);
 
-    return <Marker ref={markerRef} position={[v.lat, v.lng]} icon={icon} zIndexOffset={1000} />;
+    const color = v.color || NEUTRAL_ROUTE_COLOR;
+
+    return (
+        <Marker ref={markerRef} longitude={v.lng} latitude={v.lat} anchor="center" style={{ zIndex: 10 }}>
+            <div
+                ref={innerRef}
+                className="vehicle-marker-inner"
+                style={{ width: SIZE, height: SIZE, transformOrigin: '50% 50%' }}
+            >
+                <svg width={SIZE} height={SIZE} viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+                    <path
+                        d={ARROW_PATH}
+                        fill={color}
+                        stroke="#0b0f17"
+                        strokeWidth={5}
+                        strokeLinejoin="round"
+                        paintOrder="stroke"
+                    />
+                </svg>
+            </div>
+        </Marker>
+    );
 }

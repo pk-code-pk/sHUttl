@@ -33,65 +33,22 @@
 }
 
 /* Map Styles */
-/* Belt and braces on top of the import order: whatever is behind an unloaded
-   tile must be dark, because that is what a zoom or a pan onto new ground
-   shows for as long as the fetch takes. Leaflet ships #ddd here. */
-.leaflet-container,
-.leaflet-container .leaflet-pane,
-.leaflet-tile-container {
+/* Whatever shows behind the canvas before the style paints must be dark, or
+   the first frame flashes light. The light basemap gets a light ground for
+   the same reason in the other direction. */
+.maplibregl-map,
+.maplibregl-canvas-container {
   background-color: #0b0f17;
 }
-/* Light basemap: the ground behind an unplaced tile must be light too, or a
-   pan shows black squares under a pale map. */
-.map-light .leaflet-container,
-.map-light .leaflet-container .leaflet-pane,
-.map-light .leaflet-tile-container {
+.map-light .maplibregl-map,
+.map-light .maplibregl-canvas-container {
   background-color: #e8e8e6;
 }
 
-/* Darkening the basemap.
-
-   Esri's Dark Gray Canvas is still too light against crimson chrome and the
-   route colours, so the tiles are dimmed and desaturated in place.
-
-   Two earlier attempts are worth not repeating. A `filter` on
-   `.leaflet-tile-pane` was blamed for stops sliding during zoom and removed;
-   the sliding had a different cause (see the marker-container note below) and
-   came back without it. It was replaced by a full-container overlay div at
-   z-index 250, on the reasoning that it would sit above the tile pane (200)
-   and below markers (600) — but those panes are children of
-   `.leaflet-map-pane`, which is itself z-index 400, so the overlay painted
-   behind the entire map and darkened nothing at all.
-
-   Filtering the tile images themselves avoids both traps. Each tile is an
-   independent `img`, so there is no pane-level stacking context, nothing for
-   the marker layer to be measured against, and no iOS compositing path that
-   drops a filter applied to a transformed pane. Measured at 1 px of
-   marker-to-tile slip through a zoom, the same as an unstyled Leaflet map. */
-/* Scoped to the fallback provider. CARTO Dark Matter is dark out of the box
-   and darkening it again crushes the street detail; MapShell adds this class
-   only when config says the tiles need it. */
-.map-tiles-dim .leaflet-tile {
-  filter: brightness(0.62) saturate(0.72);
-}
-/* Leaflet positions marker icons itself, with `position: absolute` and a
-   translate3d per marker. These container classes are handed to L.divIcon as
-   the icon's className, so a `position` declared here lands on the same
-   element and — at equal specificity, from a stylesheet imported after
-   Leaflet's — wins.
-
-   `position: relative` was set here to make the container a containing block
-   for the absolutely-positioned dot inside it. It did that, and also dropped
-   every marker into normal flow: the marker pane stopped being a zero-sized
-   anchor at the map origin and became a real 14x336 box, which moved its
-   transform-origin from `0 0` to its own centre. During a zoom the pane then
-   scaled about a different point than the tile layer did, and the stops slid
-   across the basemap — measured at 112 px on one wheel notch, against 0-1 px
-   for the same map with Leaflet's own positioning left alone.
-
-   Leaflet's `position: absolute` is a containing block just as well, so the
-   dot still centres. Do not set `position` on these three classes. */
-
+/* Markers. MapLibre positions each marker's wrapper (.maplibregl-marker)
+   itself; the classes below style the element inside it and must not set
+   `position` — an earlier Leaflet build did, and the markers fell into flow
+   and slid across the map on every zoom. */
 /* Stop marker hitbox: a large, easily tapped square around a small dot. */
 .stop-marker-container {
   width: 28px;
@@ -382,12 +339,10 @@ body {
 .trip-endpoint-container:hover .trip-endpoint-dot {
   transform: translate(-50%, -50%) scale(1.2);
 }
-/* Leaflet's attribution ships as near-white on a light ground. On a dark map
-   it was the brightest element on the screen, brighter than the crimson
-   chrome and the routes, sitting in the corner where nothing should draw the
-   eye. Attribution has to stay legible and the links clickable, so this dims
-   rather than hides it. */
-.leaflet-control-attribution {
+/* Attribution. Ships as near-white on a light ground; on a dark map it was
+   the brightest element on screen. Dimmed, not hidden — it has to stay
+   legible and the links clickable. */
+.maplibregl-ctrl-attrib {
   background: rgba(10, 10, 10, 0.72) !important;
   backdrop-filter: blur(6px);
   border-top-left-radius: 6px;
@@ -395,13 +350,34 @@ body {
   font-size: 10px !important;
   padding: 2px 6px !important;
 }
-.leaflet-control-attribution a {
+.maplibregl-ctrl-attrib a {
   color: rgba(255, 255, 255, 0.55) !important;
 }
-.leaflet-control-attribution a:hover {
+.maplibregl-ctrl-attrib a:hover {
   color: rgba(255, 255, 255, 0.85) !important;
 }
-/* Leaflet's inline flag/logo SVG carries its own colours. */
-.leaflet-control-attribution svg {
-  opacity: 0.45;
+.maplibregl-ctrl-attrib.maplibregl-compact-show .maplibregl-ctrl-attrib-inner {
+  color: rgba(255, 255, 255, 0.55);
 }
+.maplibregl-ctrl-attrib-button {
+  filter: invert(1) opacity(0.5);
+}
+.maplibregl-ctrl-bottom-right {
+  /* Clear of the desktop control row and the byline. */
+  z-index: 5;
+}
+
+/* Popups, on the app's own surface rather than MapLibre's white card. */
+.maplibregl-popup-content {
+  background: rgba(23, 23, 23, 0.96);
+  color: #f5f5f5;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 10px 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  font-family: inherit;
+}
+.maplibregl-popup-anchor-bottom .maplibregl-popup-tip { border-top-color: rgba(23, 23, 23, 0.96); }
+.maplibregl-popup-anchor-top .maplibregl-popup-tip { border-bottom-color: rgba(23, 23, 23, 0.96); }
+.maplibregl-popup-anchor-left .maplibregl-popup-tip { border-right-color: rgba(23, 23, 23, 0.96); }
+.maplibregl-popup-anchor-right .maplibregl-popup-tip { border-left-color: rgba(23, 23, 23, 0.96); }

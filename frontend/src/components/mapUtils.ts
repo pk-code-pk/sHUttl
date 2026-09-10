@@ -1,15 +1,14 @@
-import L from "leaflet";
-
+/** Initial bearing from one point to another, in degrees clockwise from north. */
 export function bearingDeg(from: [number, number], to: [number, number]) {
-  const [lat1, lon1] = from.map((x) => (x * Math.PI) / 180);
-  const [lat2, lon2] = to.map((x) => (x * Math.PI) / 180);
-  const dLon = lon2 - lon1;
-  const y = Math.sin(dLon) * Math.cos(lat2);
-  const x =
-    Math.cos(lat1) * Math.sin(lat2) -
-    Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
-  const brng = (Math.atan2(y, x) * 180) / Math.PI;
-  return (brng + 360) % 360;
+    const [lat1, lon1] = from.map((d) => (d * Math.PI) / 180);
+    const [lat2, lon2] = to.map((d) => (d * Math.PI) / 180);
+    const dLon = lon2 - lon1;
+    const y = Math.sin(dLon) * Math.cos(lat2);
+    const x =
+        Math.cos(lat1) * Math.sin(lat2) -
+        Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+    const brng = Math.atan2(y, x);
+    return ((brng * 180) / Math.PI + 360) % 360;
 }
 
 export const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
@@ -40,45 +39,22 @@ export function relativeLuminance(color: string | null | undefined): number | nu
     return 0.2126 * lin((n >> 16) & 255) + 0.7152 * lin((n >> 8) & 255) + 0.0722 * lin(n & 255);
 }
 
-/**
- * A vehicle marker: a solid arrow in its route's colour.
- *
- * Filled with the route colour, not outlined in it. An earlier version gave
- * every bus a white body with a coloured ring, on the theory that a shared
- * body would read as one fleet — it read as nine white darts instead, and the
- * thing that identifies a bus was reduced to a 2px edge. The grouped route
- * palette does that job properly: two amber buses are visibly going the same
- * way without making the marker do the work.
- *
- * The dark outline is load-bearing: a bus sits on a route line of its own
- * colour, so without it the arrow dissolves into the line it is travelling
- * along.
- *
- */
-// The arrowhead.
-const ARROW = "M32 9 L53 51 L32 41 L11 51 Z";
+/** The vehicle arrowhead, in a 64-unit box. Drawn by ShuttleMarker. */
+export const ARROW_PATH = 'M32 9 L53 51 L32 41 L11 51 Z';
 
-export function makeVehicleIcon(rotationDeg: number, color: string | null | undefined) {
-    const routeColor = color || "#93a3b5";
-    const size = 32;
-    const half = size / 2;
+/** Fallback when a route carries no colour: the app's grey, not a random hue. */
+export const NEUTRAL_ROUTE_COLOR = '#93a3b5';
 
-    return L.divIcon({
-        className: "vehicle-marker",
-        iconSize: [size, size],
-        iconAnchor: [half, half],
-        html: `
-      <div class="vehicle-marker-inner" style="
-        width:${size}px;height:${size}px;
-        transform: rotate(${rotationDeg}deg);
-        transform-origin: 50% 50%;
-      ">
-        <svg width="${size}" height="${size}" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
-          <path d="${ARROW}"
-                fill="${routeColor}" stroke="#0b0f17" stroke-width="5"
-                stroke-linejoin="round" paint-order="stroke" />
-        </svg>
-      </div>
-    `,
-    });
+/** Axis-aligned bounds of a set of [lng, lat] points as [west, south, east,
+ * north] — the order MapLibre wants — or null for an empty set. */
+export function bboxOf(points: [number, number][]): [number, number, number, number] | null {
+    if (points.length === 0) return null;
+    let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
+    for (const [lng, lat] of points) {
+        if (lng < w) w = lng;
+        if (lng > e) e = lng;
+        if (lat < s) s = lat;
+        if (lat > n) n = lat;
+    }
+    return [w, s, e, n];
 }

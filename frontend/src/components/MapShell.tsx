@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { MapContainer, TileLayer, Popup, Polyline, useMap, Marker } from 'react-leaflet';
+import Map, { Layer, Marker, Popup, Source, type MapRef } from 'react-map-gl/maplibre';
+import type { LngLatBoundsLike } from 'maplibre-gl';
 import { Moon, Navigation as NavigationIcon, Route as RouteIcon, Settings, Sun, X } from 'lucide-react';
 import clsx from 'clsx';
-import L from 'leaflet';
-import type { LatLngExpression } from 'leaflet';
 import { ShuttleMarker } from './ShuttleMarker';
-import { relativeLuminance } from './mapUtils';
 import { buttonVariants, cn } from './ui/styles';
+import { NEUTRAL_ROUTE_COLOR, bboxOf, relativeLuminance } from './mapUtils';
 import type { Stop, Vehicle, RoutePath, TripResponse, TripSegment } from './types';
-import { API_BASE_URL, MAP_ATTRIBUTION, MAP_MAX_NATIVE_ZOOM, MAP_MAX_ZOOM, MAP_SUBDOMAINS, MAP_TILE_URL, MAP_TILE_URL_LIGHT, MAP_TILES_NEED_DIM } from '@/config';
+import { API_BASE_URL, MAP_MAX_ZOOM, MAP_MIN_ZOOM, MAP_STYLE_DARK, MAP_STYLE_LIGHT } from '@/config';
 
 /** The read-only status pill, shared by the mobile top bar and the desktop
  * bottom bar. They had drifted to different grounds, paddings and text sizes
@@ -19,24 +18,14 @@ const STATUS_PILL =
     'bg-neutral-900/85 px-3.5 text-[11px] font-medium leading-none text-neutral-300 ' +
     'shadow-lg backdrop-blur-md';
 
-/** "1 bus", "2 buses", "0 buses".
- *
- * The two status pills said "1 bus" on mobile and "1 vehicles" on desktop:
- * different nouns for the same number, and each wrong on one side of one.
- * One helper so both read the same and neither can drift again. */
+/** "1 bus", "2 buses", "0 buses". One helper so the two status pills cannot
+ * drift apart again. */
 const busCount = (n: number) => `${n} ${n === 1 ? 'bus' : 'buses'}`;
 
-// Fallback color palette for routes without a defined color
-const FALLBACK_ROUTE_COLORS = [
-    '#ef4444', // red
-    '#22c55e', // green
-    '#3b82f6', // blue
-    '#f59e0b', // amber
-    '#a855f7', // purple
-    '#14b8a6', // teal
-    '#f97316', // orange
-    '#ec4899', // pink
-];
+// Fallback palette for trip segments whose route carries no colour.
+const FALLBACK_ROUTE_COLORS = ['#ef4444', '#22c55e', '#3b82f6', '#f59e0b', '#a855f7', '#14b8a6', '#f97316', '#ec4899'];
+
+type Bbox = [number, number, number, number];
 
 interface MapShellProps {
     systemId: number | null;
@@ -48,147 +37,53 @@ interface MapShellProps {
      * at that point — the rider is still deciding — so there is no trip to
      * draw, but the useful thing to see is the route that bus runs. It goes
      * through the same bounds-and-key path a trip does rather than a second
-     * focus implementation; Next Bus Out had one of those and it drifted out
-     * of step with the planner, which is why it was removed. */
+     * focus implementation. */
     focusRouteId?: string | null;
 }
 
-
-
 /* Route ids arrive from two endpoints — /routes and /departures — and the
-   backend has already been bitten once by comparing them case-sensitively,
-   which reported every route dead. Compared loosely here for the same reason. */
+   backend has already been bitten once by comparing them case-sensitively.
+   Compared loosely here for the same reason. */
 const sameRoute = (a: string | null | undefined, b: string | null | undefined) =>
     a != null && b != null && String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
 
-function computeTripBounds(trip: TripResponse | null): L.LatLngBounds | null {
+function tripBbox(trip: TripResponse | null): Bbox | null {
     if (!trip) return null;
-
     const pts: [number, number][] = [];
-
     const o = trip.origin.nearest_stop;
     const d = trip.destination.nearest_stop;
-    if (o) pts.push([o.lat, o.lng]);
-    if (d) pts.push([d.lat, d.lng]);
-
+    if (o) pts.push([o.lng, o.lat]);
+    if (d) pts.push([d.lng, d.lat]);
     for (const segment of trip.segments ?? []) {
-        for (const s of segment.stops ?? []) {
-            pts.push([s.lat, s.lng]);
-        }
+        for (const s of segment.stops ?? []) pts.push([s.lng, s.lat]);
+        for (const p of segment.polyline ?? []) pts.push([p.lng, p.lat]);
     }
-
-    if (pts.length === 0) return null;
-
-    return L.latLngBounds(pts);
+    return bboxOf(pts);
 }
 
-// Compute a unique key for a trip based on system and endpoints
-function computeTripKey(trip: TripResponse | null): string | null {
+function tripKeyOf(trip: TripResponse | null): string | null {
     if (!trip) return null;
-    const systemId = trip.system_id;
-    const originId = trip.origin?.nearest_stop?.id ?? '';
-    const destId = trip.destination?.nearest_stop?.id ?? '';
-    return `${systemId}:${originId}:${destId}`;
+    return `${trip.system_id}:${trip.origin?.nearest_stop?.id ?? ''}:${trip.destination?.nearest_stop?.id ?? ''}`;
 }
 
-// Separate component to safely use useMap()
-function MapController({
-    systemId,
-    systemBounds,
-    activeTripBounds,
-    tripKey,
-    setMap,
-    onZoom,
-}: {
-    systemId: number | null;
-    systemBounds: L.LatLngBounds | null;
-    activeTripBounds: L.LatLngBounds | null;
-    tripKey: string | null;
-    setMap: (map: L.Map) => void;
-    onZoom: (zoom: number) => void;
-}) {
-    const map = useMap();
-
-    useEffect(() => {
-        if (map) setMap(map);
-    }, [map, setMap]);
-
-    // Report the zoom so line weights can follow it (see routeWeight).
-    useEffect(() => {
-        if (!map) return;
-        const report = () => onZoom(map.getZoom());
-        report();
-        map.on('zoomend', report);
-        return () => { map.off('zoomend', report); };
-    }, [map, onZoom]);
-
-    // The bottom sheet covers roughly the lower 45% of the screen on mobile,
-    // and Leaflet fits to the whole container — so a symmetric fit puts the
-    // bottom of the bounds underneath the panel. Reserve that space instead,
-    // or half of every fitted route is hidden behind the UI.
-    const fitOptions = useCallback((): L.FitBoundsOptions => {
-        const isNarrow = window.innerWidth < 768;
-        // maxZoom keeps a fit on a short ride from slamming into the deepest
-        // zoom, where the upscaled basemap is blurriest and the surroundings
-        // are lost. A two-stop hop frames at neighbourhood scale, not doorstep.
-        const common = { maxZoom: Math.min(MAP_MAX_NATIVE_ZOOM, 16) };
-        return isNarrow
-            ? {
-                  ...common,
-                  paddingTopLeft: [30, 40],
-                  paddingBottomRight: [30, Math.round(window.innerHeight * 0.48)],
-              }
-            : { ...common, paddingTopLeft: [430, 60], paddingBottomRight: [60, 60] };
-    }, []);
-
-    // Fit the whole network on launch, so the opening view shows every route
-    // and every bus in service rather than an arbitrary crop.
-    const hasInitialSystemFit = useRef(false);
-    useEffect(() => {
-        if (map && systemBounds && !hasInitialSystemFit.current) {
-            map.fitBounds(systemBounds, fitOptions());
-            hasInitialSystemFit.current = true;
-        }
-    }, [map, systemBounds, fitOptions]);
-
-    // Reset the initial fit on a system change only. Keying this on the bounds
-    // object would refit the map every time the bounds are recomputed, which
-    // now happens on each vehicle poll — the map would snap back while
-    // someone was panning it.
-    useEffect(() => {
-        hasInitialSystemFit.current = false;
-    }, [systemId]);
-
-    // Trip / departure centering, and the return trip back to the overview.
-    const lastCenteredTripKey = useRef<string | null>(null);
-    useEffect(() => {
-        if (!map) return;
-
-        if (activeTripBounds && tripKey) {
-            // Only recentre when this is a different trip or departure than
-            // last time, so live updates do not fight the user's panning.
-            if (tripKey !== lastCenteredTripKey.current) {
-                map.fitBounds(activeTripBounds, fitOptions());
-                lastCenteredTripKey.current = tripKey;
-            }
-            return;
-        }
-
-        // Nothing selected any more. If something was, deselecting is a request
-        // to see the whole network again — otherwise the map stays zoomed into
-        // wherever the last route happened to go.
-        if (lastCenteredTripKey.current !== null) {
-            lastCenteredTripKey.current = null;
-            if (systemBounds) {
-                map.fitBounds(systemBounds, fitOptions());
-            }
-        }
-    }, [map, activeTripBounds, tripKey, systemBounds, fitOptions]);
-
-    return null;
+/** Padding that keeps a fitted view clear of the UI. The bottom sheet covers
+ * roughly the lower 45% of the screen on mobile and the panel the left 424px
+ * on desktop; fitting to the whole viewport would put half of every route
+ * behind them. maxZoom keeps a two-stop hop at neighbourhood scale rather than
+ * doorstep. */
+function fitOptions() {
+    const narrow = window.innerWidth < 768;
+    return narrow
+        ? { padding: { top: 40, left: 30, right: 30, bottom: Math.round(window.innerHeight * 0.48) }, maxZoom: 16, duration: 650 }
+        : { padding: { top: 60, left: 430, right: 60, bottom: 60 }, maxZoom: 16, duration: 650 };
 }
+
+const toLngLatBounds = (b: Bbox): LngLatBoundsLike => [[b[0], b[1]], [b[2], b[3]]];
 
 export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShellProps) => {
+    const mapRef = useRef<MapRef>(null);
+    const [mapReady, setMapReady] = useState(false);
+
     const [stops, setStops] = useState<Stop[]>([]);
     const [vehicles, setVehicles] = useState<Vehicle[]>([]);
     const [routes, setRoutes] = useState<RoutePath[]>([]);
@@ -199,46 +94,11 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
     const [routesError, setRoutesError] = useState(false);
     const [routeVisibility, setRouteVisibility] = useState<Record<string, boolean>>({});
     const [showRouteSettings, setShowRouteSettings] = useState(false);
+    const [selectedStop, setSelectedStop] = useState<Stop | null>(null);
     const routeSettingsRef = useRef<HTMLDivElement>(null);
 
-    const [systemBounds, setSystemBounds] = useState<L.LatLngBounds | null>(null);
-    // The launch/overview view. Stops define the network, but a bus can sit
-    // just outside their envelope — north of the Quad, or out past Barry's
-    // Corner — so vehicles are folded in to guarantee every bus in service is
-    // on screen.
-    const overviewBounds = useMemo(() => {
-        if (!systemBounds) return null;
-        if (vehicles.length === 0) return systemBounds;
-        const b = L.latLngBounds(systemBounds.getSouthWest(), systemBounds.getNorthEast());
-        for (const v of vehicles) {
-            if (typeof v.lat === 'number' && typeof v.lng === 'number') {
-                b.extend([v.lat, v.lng]);
-            }
-        }
-        return b;
-    }, [systemBounds, vehicles]);
-
-    const tripBounds = useMemo(() => computeTripBounds(trip), [trip]);
-
-    const focusRoute = useMemo(
-        () => (focusRouteId ? routes.find((r) => sameRoute(r.route_id, focusRouteId)) ?? null : null),
-        [routes, focusRouteId],
-    );
-
-    const focusRouteBounds = useMemo(() => {
-        const path = focusRoute?.path;
-        if (!path?.length) return null;
-        return L.latLngBounds(path.map((p) => [p.lat, p.lng] as [number, number]));
-    }, [focusRoute]);
-
-    // A planned trip wins: it is the more specific answer, and it is what the
-    // rider asked for last.
-    const activeTripBounds = tripBounds ?? focusRouteBounds;
-    const [mapInstance, setMapInstance] = useState<L.Map | null>(null);
-    const [zoom, setZoom] = useState(15);
-
-    // Basemap ground: dark by default, light on request. Only the tiles
-    // change — chrome and route colours stay — and the choice is remembered.
+    // Basemap ground: dark by default, light on request. Only the style
+    // changes — chrome and route colours stay — and the choice is remembered.
     const [basemap, setBasemap] = useState<'dark' | 'light'>(() => {
         try { return localStorage.getItem('shuttl:basemap') === 'light' ? 'light' : 'dark'; }
         catch { return 'dark'; }
@@ -252,117 +112,41 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
     }, []);
     const isLight = basemap === 'light';
 
-    // Line weight follows zoom. Leaflet animates a zoom by CSS-scaling the
-    // overlay pane, so a 4px line is already 8px on screen by the end of a
-    // one-level zoom in — the map grew and the line grew with it. If it then
-    // redraws at 4px it visibly snaps thin; if it redraws at 8px the
-    // animation lands exactly where it was heading and nothing pops. So the
-    // weight doubles per level around z16, the working zoom. Clamped so it
-    // stays a line at either extreme; the clamp is the only place a snap can
-    // still occur, at the ends of the zoom range, where it is small.
-    const routeWeight = useCallback(
-        (base: number) => Math.min(base * 2.2, Math.max(base * 0.5, base * 2 ** (zoom - 16))),
-        [zoom],
-    );
-
-    // Stop Icon with larger hitbox (white default)
-    const stopIcon = useMemo(() => L.divIcon({
-        className: 'stop-marker-container',
-        html: `<div class="stop-marker-dot"></div>`,
-        iconSize: [28, 28],
-        iconAnchor: [14, 14],
-    }), []);
-
-    // White pulsing icon for trip origin/destination stops (larger, radar glow)
-    const tripEndpointIcon = useMemo(() => L.divIcon({
-        className: 'trip-endpoint-container',
-        html: `<div class="trip-endpoint-dot"></div>`,
-        iconSize: [40, 40],
-        iconAnchor: [20, 20],
-    }), []);
-
-    // Blue pulsing icon for user's current location
-    const userLocationIcon = useMemo(() => L.divIcon({
-        className: 'user-location-container',
-        html: `<div class="user-location-dot"></div>`,
-        iconSize: [24, 24],
-        iconAnchor: [12, 12],
-    }), []);
-
-    // Get origin/destination stop IDs from trip for special styling
-    const tripStopIds = useMemo(() => {
-        if (!trip) return new Set<string | number>();
-        const ids = new Set<string | number>();
-        if (trip.origin?.nearest_stop?.id) ids.add(trip.origin.nearest_stop.id);
-        if (trip.destination?.nearest_stop?.id) ids.add(trip.destination.nearest_stop.id);
-        return ids;
-    }, [trip]);
+    // ------------------------------------------------------------------ data
 
     useEffect(() => {
         if (!systemId) {
             // eslint-disable-next-line react-hooks/set-state-in-effect
             setStops([]);
-            // eslint-disable-next-line react-hooks/set-state-in-effect
             setVehicles([]);
-            // eslint-disable-next-line react-hooks/set-state-in-effect
             setRoutes([]);
             return;
         }
         setLoading(true);
         fetch(`${API_BASE_URL}/stops?system_id=${systemId}`)
             .then((res) => res.json())
-            .then((data: Stop[]) => {
-                setStops(data);
-                if (data.length > 0) {
-                    const points = data.map((s) => [s.lat, s.lng] as [number, number]);
-                    setSystemBounds(L.latLngBounds(points));
-                }
-            })
-            .catch((err) => console.error("Failed to fetch stops", err))
+            .then((data: Stop[]) => setStops(Array.isArray(data) ? data : []))
+            .catch((err) => console.error('Failed to fetch stops', err))
             .finally(() => setLoading(false));
     }, [systemId]);
 
-    // Poll vehicles every few seconds
+    // Poll vehicles every few seconds.
     useEffect(() => {
-        if (!systemId) {
-            // eslint-disable-next-line react-hooks/set-state-in-effect
-            setVehicles([]);
-            return;
-        }
-
+        if (!systemId) return;
         let cancelled = false;
-
         const fetchVehicles = () => {
             fetch(`${API_BASE_URL}/vehicles?system_id=${systemId}`)
-                .then((res) => {
-                    if (!res.ok) throw new Error();
-                    return res.json();
-                })
-                .then((data) => {
-                    if (!cancelled) {
-                        setVehicles(data);
-                        setVehiclesError(false);
-                    }
-                })
-                .catch(() => {
-                    if (!cancelled) setVehiclesError(true);
-                });
+                .then((res) => { if (!res.ok) throw new Error(); return res.json(); })
+                .then((data) => { if (!cancelled) { setVehicles(Array.isArray(data) ? data : []); setVehiclesError(false); } })
+                .catch(() => { if (!cancelled) setVehiclesError(true); });
         };
-
         fetchVehicles();
         const id = setInterval(fetchVehicles, 3000);
-
-        return () => {
-            cancelled = true;
-            clearInterval(id);
-        };
+        return () => { cancelled = true; clearInterval(id); };
     }, [systemId]);
 
-
     // Geometry is needed whenever anything wants to draw a route: the Show
-    // Routes toggle, or a single focused route. Fetching only for the toggle
-    // meant a focused route had no path to draw and nothing to frame, because
-    // `showRoutes` starts off.
+    // Routes toggle, or a single focused route.
     const needRoutes = showRoutes || Boolean(focusRouteId);
     useEffect(() => {
         if (!systemId || !needRoutes) {
@@ -370,47 +154,30 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
             setRoutes([]);
             return;
         }
-
         setLoadingRoutes(true);
         fetch(`${API_BASE_URL}/route_paths?system_id=${systemId}`)
             .then((res) => res.json())
-            .then((data: RoutePath[]) => {
-                setRoutes(Array.isArray(data) ? data : []);
-                setRoutesError(false);
-            })
-            .catch(() => {
-                setRoutes([]);
-                setRoutesError(true);
-            })
+            .then((data: RoutePath[]) => { setRoutes(Array.isArray(data) ? data : []); setRoutesError(false); })
+            .catch(() => { setRoutes([]); setRoutesError(true); })
             .finally(() => setLoadingRoutes(false));
     }, [systemId, needRoutes]);
 
-    // Initialize route visibility when routes load
     useEffect(() => {
-        if (routes.length > 0) {
-            // eslint-disable-next-line react-hooks/set-state-in-effect
-            setRouteVisibility(prev => {
-                const next = { ...prev };
-                for (const r of routes) {
-                    if (!(r.route_id in next)) {
-                        next[r.route_id] = true;
-                    }
-                }
-                return next;
-            });
-        }
+        if (routes.length === 0) return;
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setRouteVisibility((prev) => {
+            const next = { ...prev };
+            for (const r of routes) if (!(r.route_id in next)) next[r.route_id] = true;
+            return next;
+        });
     }, [routes]);
 
-    // Close route settings on outside click
+    // Close the filter on outside click.
     useEffect(() => {
         if (!showRouteSettings) return;
         const handler = (e: MouseEvent) => {
             const target = e.target as HTMLElement;
-            if (
-                routeSettingsRef.current &&
-                !routeSettingsRef.current.contains(target) &&
-                !target.closest('[data-route-settings-trigger]')
-            ) {
+            if (routeSettingsRef.current && !routeSettingsRef.current.contains(target) && !target.closest('[data-route-settings-trigger]')) {
                 setShowRouteSettings(false);
             }
         };
@@ -418,486 +185,382 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
         return () => document.removeEventListener('mousedown', handler);
     }, [showRouteSettings]);
 
-    const toggleRouteVisibility = (routeId: string) => {
-        setRouteVisibility(prev => ({
-            ...prev,
-            [routeId]: prev[routeId] === false,
-        }));
-    };
-
-    const handleRouteSettingsClick = () => {
-        if (!showRouteSettings && !showRoutes) {
-            setShowRoutes(true);
-        }
-        setShowRouteSettings(prev => !prev);
-    };
-
-    // Compute center from stops, fallback to Harvard if none
-    const center: LatLngExpression = useMemo(() => {
-        if (stops.length === 0) {
-            // Default: Harvard campus-ish
-            return [42.3736, -71.1097];
-        }
-        const avgLat = stops.reduce((sum, s) => sum + s.lat, 0) / stops.length;
-        const avgLng = stops.reduce((sum, s) => sum + s.lng, 0) / stops.length;
-        return [avgLat, avgLng];
-    }, [stops]);
-
-    // Compute trip key for smart centering
-    // The key is what tells MapController "this is a new thing to frame".
-    // A focused route needs one too, or expanding a departure would compute
-    // bounds that never get fitted.
-    const tripKey = useMemo(
-        () => computeTripKey(trip) ?? (focusRouteId ? `route:${focusRouteId}` : null),
-        [trip, focusRouteId],
-    );
-
-    // Auto-off "Show Routes" on first trip only
+    // Auto-off "Show Routes" the first time a trip is drawn, so the trip is
+    // the only line on the map.
     const previousTripRef = useRef<TripResponse | null>(null);
     const hasAutoDisabledRoutes = useRef(false);
     useEffect(() => {
         const hadTripBefore = previousTripRef.current !== null;
         const hasTripNow = trip !== null;
-
-        // If transitioning from no trip → first trip, auto-off showRoutes (once)
         if (!hadTripBefore && hasTripNow && showRoutes && !hasAutoDisabledRoutes.current) {
             setShowRoutes(false);
             hasAutoDisabledRoutes.current = true;
         }
-
         previousTripRef.current = trip;
     }, [trip, showRoutes]);
 
+    const toggleRouteVisibility = (routeId: string) =>
+        setRouteVisibility((prev) => ({ ...prev, [routeId]: prev[routeId] === false }));
 
+    const handleRouteSettingsClick = () => {
+        if (!showRouteSettings && !showRoutes) setShowRoutes(true);
+        setShowRouteSettings((prev) => !prev);
+    };
 
-    const tripPolylines = useMemo(() => {
-        if (!trip || !trip.segments || trip.segments.length === 0) return [];
+    // ---------------------------------------------------------------- bounds
 
-        return trip.segments.map((seg: TripSegment, idx: number) => {
-            let positions: LatLngExpression[];
+    const systemBbox = useMemo(() => bboxOf(stops.map((s) => [s.lng, s.lat] as [number, number])), [stops]);
 
-            if (seg.polyline && seg.polyline.length > 0) {
-                // Use the sliced GTFS shape polyline if available
-                positions = seg.polyline.map(p => [p.lat, p.lng] as [number, number]);
-            } else {
-                // Fallback to connecting stops
-                positions = (seg.stops || []).map(s => [s.lat, s.lng] as [number, number]);
+    // The launch/overview view. Stops define the network, but a bus can sit
+    // just outside their envelope, so vehicles are folded in to guarantee
+    // every bus in service is on screen.
+    const overviewBbox = useMemo<Bbox | null>(() => {
+        if (!systemBbox) return null;
+        const pts: [number, number][] = [[systemBbox[0], systemBbox[1]], [systemBbox[2], systemBbox[3]]];
+        for (const v of vehicles) if (typeof v.lat === 'number' && typeof v.lng === 'number') pts.push([v.lng, v.lat]);
+        return bboxOf(pts);
+    }, [systemBbox, vehicles]);
+
+    const focusRoute = useMemo(
+        () => (focusRouteId ? routes.find((r) => sameRoute(r.route_id, focusRouteId)) ?? null : null),
+        [routes, focusRouteId],
+    );
+    const focusRouteBbox = useMemo(
+        () => (focusRoute?.path?.length ? bboxOf(focusRoute.path.map((p) => [p.lng, p.lat] as [number, number])) : null),
+        [focusRoute],
+    );
+    const tripBox = useMemo(() => tripBbox(trip), [trip]);
+
+    // A planned trip wins: it is the more specific answer, and it is what the
+    // rider asked for last.
+    const activeBbox = tripBox ?? focusRouteBbox;
+    const activeKey = useMemo(
+        () => tripKeyOf(trip) ?? (focusRouteId ? `route:${focusRouteId}` : null),
+        [trip, focusRouteId],
+    );
+
+    // Fit the whole network on launch, once per system.
+    const hasInitialFit = useRef(false);
+    useEffect(() => { hasInitialFit.current = false; }, [systemId]);
+    useEffect(() => {
+        const map = mapRef.current;
+        if (!map || !mapReady || !overviewBbox || hasInitialFit.current) return;
+        map.fitBounds(toLngLatBounds(overviewBbox), { ...fitOptions(), duration: 0 });
+        hasInitialFit.current = true;
+    }, [mapReady, overviewBbox]);
+
+    // Trip / departure framing, and the return to the overview.
+    const lastFramedKey = useRef<string | null>(null);
+    useEffect(() => {
+        const map = mapRef.current;
+        if (!map || !mapReady) return;
+        if (activeBbox && activeKey) {
+            // Only reframe for a different trip or departure, so live updates
+            // do not fight the user's panning.
+            if (activeKey !== lastFramedKey.current) {
+                map.fitBounds(toLngLatBounds(activeBbox), fitOptions());
+                lastFramedKey.current = activeKey;
             }
+            return;
+        }
+        // Nothing selected any more. If something was, deselecting is a request
+        // to see the whole network again.
+        if (lastFramedKey.current !== null) {
+            lastFramedKey.current = null;
+            if (overviewBbox) map.fitBounds(toLngLatBounds(overviewBbox), fitOptions());
+        }
+    }, [mapReady, activeBbox, activeKey, overviewBbox]);
 
-            // Always use segment's route color with pulsing animation
-            const color = seg.color || FALLBACK_ROUTE_COLORS[idx % FALLBACK_ROUTE_COLORS.length];
+    const recenter = () => {
+        const map = mapRef.current;
+        if (!map) return;
+        const target = activeBbox ?? overviewBbox;
+        if (target) map.fitBounds(toLngLatBounds(target), fitOptions());
+    };
 
-            return { positions, color, idx };
+    // ------------------------------------------------------------- geometry
+
+    // Which routes draw: all visible ones when Show Routes is on; otherwise
+    // only the focused route. Being told a bus is coming is not useful without
+    // seeing where it goes, so the focused route draws whether or not the
+    // toggle is on.
+    //
+    // How they draw: with no focus, every route at the same weight. With a
+    // focus, that route is heavier and the rest step back thin and translucent.
+    // Once a trip is planned on top, the trip line takes over and the route
+    // drops to a thin context line underneath.
+    //
+    // Draw order is stacking order, and routes share roads: light colours
+    // first as ground, saturated last as figure, so crimson sits on cream where
+    // they overlap. Luminance, not a route list, so the rule survives a palette
+    // change. The focused route always draws last.
+    const routesGeoJson = useMemo(() => {
+        const features = routes
+            .filter((r) => {
+                if (!r.path?.length) return false;
+                const isFocus = focusRoute != null && sameRoute(r.route_id, focusRoute.route_id);
+                return isFocus || (showRoutes && routeVisibility[r.route_id] !== false);
+            })
+            .sort((a, b) => {
+                const af = focusRoute != null && sameRoute(a.route_id, focusRoute.route_id);
+                const bf = focusRoute != null && sameRoute(b.route_id, focusRoute.route_id);
+                if (af !== bf) return af ? 1 : -1;
+                return (relativeLuminance(b.color) ?? 0) - (relativeLuminance(a.color) ?? 0);
+            })
+            .map((r, order) => {
+                const isFocus = focusRoute != null && sameRoute(r.route_id, focusRoute.route_id);
+                let weight = 4, opacity = 1;
+                if (focusRoute) {
+                    if (!isFocus) { weight = 3; opacity = 0.3; }
+                    else if (trip) { weight = 2; opacity = 0.4; }
+                    else { weight = 5; }
+                }
+                return {
+                    type: 'Feature' as const,
+                    properties: { color: r.color || NEUTRAL_ROUTE_COLOR, weight, opacity, order },
+                    geometry: { type: 'LineString' as const, coordinates: r.path.map((p) => [p.lng, p.lat]) },
+                };
+            });
+        return { type: 'FeatureCollection' as const, features };
+    }, [routes, focusRoute, showRoutes, routeVisibility, trip]);
+
+    const tripGeoJson = useMemo(() => {
+        const segments = trip?.segments ?? [];
+        const features = segments.map((seg: TripSegment, idx: number) => {
+            const pts = seg.polyline?.length ? seg.polyline : (seg.stops ?? []);
+            return {
+                type: 'Feature' as const,
+                properties: { color: seg.color || FALLBACK_ROUTE_COLORS[idx % FALLBACK_ROUTE_COLORS.length], weight: 6, opacity: 1, order: idx },
+                geometry: { type: 'LineString' as const, coordinates: pts.map((p) => [p.lng, p.lat]) },
+            };
         });
+        return { type: 'FeatureCollection' as const, features };
     }, [trip]);
 
+    const tripStopIds = useMemo(() => {
+        const ids = new Set<string | number>();
+        if (trip?.origin?.nearest_stop?.id) ids.add(trip.origin.nearest_stop.id);
+        if (trip?.destination?.nearest_stop?.id) ids.add(trip.destination.nearest_stop.id);
+        return ids;
+    }, [trip]);
+
+    // Line width follows zoom gently — a touch thinner zoomed out, a touch
+    // heavier at building scale — and is otherwise the weight the feature
+    // asks for. Rendered by the GPU every frame, so there is nothing to snap.
+    const lineWidth = [
+        'interpolate', ['linear'], ['zoom'],
+        13, ['*', ['get', 'weight'], 0.6],
+        16, ['get', 'weight'],
+        19, ['*', ['get', 'weight'], 1.5],
+    ];
+
+    // ------------------------------------------------------------------- ui
+
     return (
-        <div className={cn('relative h-full w-full bg-neutral-900', MAP_TILES_NEED_DIM && !isLight && 'map-tiles-dim', isLight && 'map-light')}>
+        <div className={cn('relative h-full w-full bg-neutral-900', isLight && 'map-light')}>
             {systemId ? (
-                <MapContainer
+                <Map
                     key={systemId}
-                    center={center}
-                    zoom={15}
+                    ref={mapRef}
+                    mapStyle={isLight ? MAP_STYLE_LIGHT : MAP_STYLE_DARK}
+                    initialViewState={{ longitude: -71.1167, latitude: 42.3736, zoom: 14 }}
+                    minZoom={MAP_MIN_ZOOM}
                     maxZoom={MAP_MAX_ZOOM}
-                    className="h-full w-full bg-neutral-900"
-                    scrollWheelZoom={true}
-                    zoomControl={false}
-                    // Cached tiles still fade in from transparent over 200 ms
-                    // by default, which looks like a network load on every
-                    // zoom even when nothing was fetched — measured: 30 tiles
-                    // per zoom step, all from cache, 0 bytes, and still a
-                    // visible fade. With the campus preloaded there is nothing
-                    // to hide behind a fade, so tiles appear the instant they
-                    // are placed.
-                    fadeAnimation={false}
+                    // North-up. Rotation and pitch add nothing to a campus
+                    // shuttle map and a two-finger gesture that rotates by
+                    // accident is a map you cannot read.
+                    dragRotate={false}
+                    pitchWithRotate={false}
+                    touchPitch={false}
+                    attributionControl={{ compact: true }}
+                    // MapLibre reports style, tile and WebGL failures as map
+                    // events, not console errors. Without this a broken
+                    // basemap is a silent dark rectangle.
+                    onError={(e) => console.error('[map]', e.error?.message ?? e.error ?? e)}
+                    style={{ width: '100%', height: '100%' }}
+                    onLoad={(e) => {
+                        e.target.touchZoomRotate.disableRotation();
+                        // Dev only: a handle for poking the live map from the
+                        // console or a test harness. Stripped from production.
+                        if (import.meta.env.DEV) (window as unknown as { __map?: unknown }).__map = e.target;
+                        setMapReady(true);
+                    }}
                 >
-                    <MapController
-                        systemId={systemId}
-                        systemBounds={overviewBounds}
-                        activeTripBounds={activeTripBounds}
-                        tripKey={tripKey}
-                        setMap={setMapInstance}
-                        onZoom={setZoom}
-                    />
-
-                    {/* Basemap. Provider is configurable; see config.ts for why
-                        the CARTO URL that used to be hardcoded here had to go. */}
-                    <TileLayer
-                        key={basemap}
-                        attribution={MAP_ATTRIBUTION}
-                        url={isLight ? MAP_TILE_URL_LIGHT : MAP_TILE_URL}
-                        maxZoom={MAP_MAX_ZOOM}
-                        // Keep a wide ring of offscreen tiles alive. Leaflet
-                        // prunes to 2 screens by default, so panning walked
-                        // straight onto tiles that had been thrown away and had
-                        // to be refetched — the gaps are what flashed. Six is
-                        // the whole campus at working zooms, which is small
-                        // enough to just hold.
-                        keepBuffer={6}
-                        // updateWhenZooming is deliberately left on. Turning it
-                        // off stops the layer loading the new level during a
-                        // zoom, so Leaflet stretches the old tiles to fill —
-                        // measured at 256px scaled to 909 — while the markers
-                        // move to their true projected positions. The stops
-                        // then visibly slide against the map. A brief gap is
-                        // a far smaller fault than the whole basemap drifting
-                        // out from under the pins.
-                        // Request tiles with CORS. Leaflet's img tiles are
-                        // no-cors by default, which makes every response
-                        // opaque: status 0, ok false, headers unreadable. The
-                        // tile-cache worker then cannot tell a real tile from
-                        // Esri's light "not available" placeholder, and cannot
-                        // even see that the fetch succeeded. Esri serves
-                        // Access-Control-Allow-Origin, so asking for CORS costs
-                        // nothing and makes the responses inspectable.
-                        crossOrigin="anonymous"
-                        maxNativeZoom={MAP_MAX_NATIVE_ZOOM}
-                        {...(MAP_SUBDOMAINS ? { subdomains: MAP_SUBDOMAINS } : {})}
-                    />
-
-                    {/* Route polylines, one solid line each.
-
-                        Which routes draw: all visible ones when Show Routes is
-                        on; otherwise only the focused route, if there is one.
-                        Being told a bus is coming is not useful without seeing
-                        where it goes, so the focused route draws whether or
-                        not the toggle is on.
-
-                        How they draw: with no focus, every route is a solid
-                        4px line. With a focus, that route is heavier and the
-                        rest step back to thin and translucent, so the one you
-                        tapped is the one you read. Once a trip is planned on
-                        top of it the trip line takes over and the route drops
-                        to a thin context line underneath — the whole loop for
-                        orientation, the ridden stretch in bold.
-
-                        The translucent glow underlay that used to sit beneath
-                        every route muddied adjacent routes into a haze; the
-                        colour carries its own brightness now. */}
-                    {routes
-                        .filter((r) => {
-                            const isFocus = focusRoute != null && sameRoute(r.route_id, focusRoute.route_id);
-                            if (isFocus) return true;
-                            return showRoutes && routeVisibility[r.route_id] !== false;
-                        })
-                        // Draw order is stacking order, and routes share roads:
-                        // AL, XSEC and QSTA run the same Allston corridor. Light
-                        // colours draw first as ground and saturated ones last
-                        // as figure, so crimson sits on cream where they overlap
-                        // rather than under it. Luminance, not a route list, so
-                        // the rule survives a palette change. The focused route
-                        // always draws last regardless.
-                        .sort((a, b) => {
-                            const af = focusRoute != null && sameRoute(a.route_id, focusRoute.route_id);
-                            const bf = focusRoute != null && sameRoute(b.route_id, focusRoute.route_id);
-                            if (af !== bf) return af ? 1 : -1;
-                            return (relativeLuminance(b.color) ?? 0) - (relativeLuminance(a.color) ?? 0);
-                        })
-                        .map((r) => {
-                            if (!r.path || r.path.length === 0) return null;
-
-                            const positions: LatLngExpression[] = r.path.map((p) => [p.lat, p.lng]);
-                            const color = r.color || '#a51c30';
-                            const isFocus = focusRoute != null && sameRoute(r.route_id, focusRoute.route_id);
-
-                            let weight = 4;
-                            let opacity = 1;
-                            if (focusRoute) {
-                                if (!isFocus) { weight = 3; opacity = 0.3; }
-                                else if (trip) { weight = 2; opacity = 0.4; }
-                                else { weight = 5; }
-                            }
-
-                            return (
-                                <Polyline
-                                    key={r.route_id}
-                                    positions={positions}
-                                    pathOptions={{ color, weight: routeWeight(weight), opacity }}
-                                />
-                            );
-                        })}
-
-                    {/* Planned trip path, solid in the route colour. This drew
-                        a 14px translucent layer under a 5px core, both running
-                        an opacity animation — the pulse read as a glow and made
-                        the colour look washed out at every point in the cycle. */}
-                    {tripPolylines.map((line) => (
-                        <Polyline
-                            key={`trip-${line.idx}`}
-                            positions={line.positions}
-                            pathOptions={{
-                                color: line.color,
-                                weight: routeWeight(6),
-                                opacity: 1,
-                            }}
+                    {/* Route lines. One source, one layer; per-feature colour,
+                        weight and opacity from properties, draw order from
+                        line-sort-key. */}
+                    <Source id="routes" type="geojson" data={routesGeoJson}>
+                        <Layer
+                            id="routes-line"
+                            type="line"
+                            layout={{ 'line-cap': 'round', 'line-join': 'round', 'line-sort-key': ['get', 'order'] }}
+                            paint={{ 'line-color': ['get', 'color'], 'line-width': lineWidth as never, 'line-opacity': ['get', 'opacity'] }}
                         />
-                    ))}
+                    </Source>
 
-                    {/* Stops: Glowing Dots with larger hitboxes */}
+                    {/* Planned trip, solid in the route colour, above the routes. */}
+                    <Source id="trip" type="geojson" data={tripGeoJson}>
+                        <Layer
+                            id="trip-line"
+                            type="line"
+                            layout={{ 'line-cap': 'round', 'line-join': 'round', 'line-sort-key': ['get', 'order'] }}
+                            paint={{ 'line-color': ['get', 'color'], 'line-width': lineWidth as never, 'line-opacity': ['get', 'opacity'] }}
+                        />
+                    </Source>
+
+                    {/* Stops: dots with a generous tap target. */}
                     {stops.map((stop) => {
                         const isTripStop = tripStopIds.has(stop.id);
                         return (
                             <Marker
                                 key={stop.id}
-                                position={[stop.lat, stop.lng]}
-                                icon={isTripStop ? tripEndpointIcon : stopIcon}
-                                zIndexOffset={isTripStop ? 100 : 0}
+                                longitude={stop.lng}
+                                latitude={stop.lat}
+                                anchor="center"
+                                style={{ zIndex: isTripStop ? 5 : 1 }}
+                                onClick={(e) => { e.originalEvent.stopPropagation(); setSelectedStop(stop); }}
                             >
-                                <Popup>
-                                    <div className="text-sm text-neutral-800">
-                                        <div className="font-semibold">{stop.name}</div>
-                                        <div className="text-xs text-neutral-500">
-                                            Stop ID: {stop.id}
-                                        </div>
-                                    </div>
-                                </Popup>
+                                {isTripStop
+                                    ? <div className="trip-endpoint-container"><div className="trip-endpoint-dot" /></div>
+                                    : <div className="stop-marker-container"><div className="stop-marker-dot" /></div>}
                             </Marker>
                         );
                     })}
 
-                    {/* User's current location marker */}
-                    {userLocation && (
-                        <Marker
-                            position={[userLocation.lat, userLocation.lng]}
-                            icon={userLocationIcon}
-                            zIndexOffset={200}
+                    {selectedStop && (
+                        <Popup
+                            longitude={selectedStop.lng}
+                            latitude={selectedStop.lat}
+                            anchor="bottom"
+                            offset={14}
+                            closeButton={false}
+                            onClose={() => setSelectedStop(null)}
                         >
-                            <Popup>
-                                <div className="text-sm text-neutral-800 font-medium">
-                                    Your Location
-                                </div>
-                            </Popup>
+                            <div className="text-sm">
+                                <div className="font-semibold text-white">{selectedStop.name}</div>
+                                <div className="text-xs text-neutral-400">Stop ID: {selectedStop.id}</div>
+                            </div>
+                        </Popup>
+                    )}
+
+                    {userLocation && (
+                        <Marker longitude={userLocation.lng} latitude={userLocation.lat} anchor="center" style={{ zIndex: 6 }}>
+                            <div className="user-location-container"><div className="user-location-dot" /></div>
                         </Marker>
                     )}
 
-                    {/* Vehicles with Smooth Animation */}
                     {vehicles
-                        .filter((v): v is Vehicle & { lat: number; lng: number } => v.lat !== null && v.lng !== null)
-                        .map((v) => (
-                            <ShuttleMarker key={v.id} v={v} durationMs={3000} />
-                        ))}
-                </MapContainer>
+                        .filter((v): v is Vehicle & { lat: number; lng: number } => typeof v.lat === 'number' && typeof v.lng === 'number')
+                        .map((v) => <ShuttleMarker key={v.id} v={v} durationMs={3000} />)}
+                </Map>
             ) : (
-                <div className="flex h-full w-full items-center justify-center text-neutral-500">
-                    <p>Select a system to view map</p>
+                <div className="flex h-full w-full items-center justify-center text-neutral-400">
+                    Select a system to view map
                 </div>
             )}
 
-            {/* 
-              Map Controls Container 
-              
-              MOBILE LAYOUT:
-              - Fixed at top (top-4)
-              - Flex row, space-between
-              - Symmetrical elements
-              
-              DESKTOP LAYOUT (md:):
-              - Absolute at bottom (bottom-8)
-              - Recenter button separate at bottom-32
-            */}
-
-            {/* 1. Mobile Top Bar Container (Hidden on Desktop) */}
-            <div className="
-                md:hidden
-                fixed top-4 inset-x-4 z-[1000]
-                grid grid-cols-[1fr_auto_1fr] items-center
-                pointer-events-none
-            ">
-                {/* Left: Status Pill */}
+            {/* 1. Mobile Top Bar (hidden on desktop) */}
+            <div className="md:hidden fixed top-4 inset-x-4 z-[1000] grid grid-cols-[1fr_auto_1fr] items-center pointer-events-none">
                 <div className={cn(STATUS_PILL, 'justify-self-start pointer-events-auto min-w-[32px]')}>
                     {systemId
-                        ? loading
-                            ? '…'
-                            // Bus count only. "24 stops • 5 buses" clipped to
-                            // "24 stops • 5 buse" at 375px, and the stop
-                            // count never changes — the buses are the news.
-                            : <span className="whitespace-nowrap">{busCount(vehicles.length)}</span>
+                        ? loading ? '…' : <span className="whitespace-nowrap">{busCount(vehicles.length)}</span>
                         : 'Select system'}
                 </div>
 
-                {/* Center: Recenter + Route Settings Buttons */}
                 {systemId ? (
                     <div className="pointer-events-auto flex items-center gap-1.5">
-                        <button
-                            type="button"
-                            onClick={() => {
-                                if (!mapInstance) return;
-                                if (activeTripBounds) {
-                                    mapInstance.fitBounds(activeTripBounds, { padding: [80, 80] });
-                                } else if (overviewBounds) {
-                                    mapInstance.fitBounds(overviewBounds, { padding: [50, 50] });
-                                }
-                            }}
-                            className={cn(buttonVariants({ variant: 'overlay', size: 'icon' }), 'text-white')}
-                            aria-label="Recenter map"
-                        >
+                        <button type="button" onClick={recenter} className={cn(buttonVariants({ variant: 'overlay', size: 'icon' }), 'text-white')} aria-label="Recenter map">
                             <NavigationIcon size={14} className="fill-current -translate-x-[1px] translate-y-[1px]" />
                         </button>
                         <button
                             type="button"
                             data-route-settings-trigger
                             onClick={handleRouteSettingsClick}
-                            className={buttonVariants({
-                                variant: showRouteSettings ? 'selected' : 'overlay',
-                                size: 'icon',
-                            })}
+                            className={buttonVariants({ variant: showRouteSettings ? 'selected' : 'overlay', size: 'icon' })}
                             aria-label="Filter routes"
                         >
                             <Settings size={14} />
                         </button>
-                        <button
-                            type="button"
-                            onClick={toggleBasemap}
-                            className={buttonVariants({ variant: 'overlay', size: 'icon' })}
-                            aria-label={isLight ? 'Switch to dark map' : 'Switch to light map'}
-                        >
+                        <button type="button" onClick={toggleBasemap} className={buttonVariants({ variant: 'overlay', size: 'icon' })} aria-label={isLight ? 'Switch to dark map' : 'Switch to light map'}>
                             {isLight ? <Moon size={14} /> : <Sun size={14} />}
                         </button>
                     </div>
                 ) : <div />}
 
-                {/* Right: Show Routes Toggle */}
-                {/* Icon, not a label: five controls share a 375px bar, and
-                    the label version was the one that did not fit. Same
-                    selected/overlay states as the desktop pill. */}
                 <button
                     type="button"
                     onClick={() => setShowRoutes((prev) => !prev)}
                     aria-pressed={showRoutes}
                     aria-label={showRoutes ? 'Hide routes' : 'Show routes'}
-                    className={cn(
-                        buttonVariants({ variant: showRoutes ? 'selected' : 'overlay', size: 'icon' }),
-                        'justify-self-end pointer-events-auto',
-                    )}
+                    className={cn(buttonVariants({ variant: showRoutes ? 'selected' : 'overlay', size: 'icon' }), 'justify-self-end pointer-events-auto')}
                 >
                     <RouteIcon size={14} />
                 </button>
             </div>
 
-
-            {/* 2. Desktop Bottom Controls (Hidden on Mobile) */}
-            {/* Centred in the map area to the right of the 400px panel (plus
-                its 24px gutter), not in the full width: centred in the full
-                width, the row landed under the panel at tablet widths whenever
-                the departure list was long. Wraps rather than overflows if the
-                map area is narrow. */}
+            {/* 2. Desktop bottom controls (hidden on mobile). Centred in the map
+                area beside the 400px panel, not the full width — centred in the
+                full width they landed under the panel at tablet widths. */}
             <div className="hidden md:flex pointer-events-none absolute bottom-8 left-[424px] right-0 flex-row flex-wrap items-center justify-center gap-3 px-6 z-[1000]">
-                {/* Route toggle button */}
-                <div className="pointer-events-auto order-2 md:order-1">
+                <div className="pointer-events-auto">
                     <button
                         type="button"
                         onClick={() => setShowRoutes((prev) => !prev)}
-                        className={cn(
-                            buttonVariants({ variant: showRoutes ? 'selected' : 'overlay', size: 'md' }),
-                            'rounded-full',
-                        )}
+                        className={cn(buttonVariants({ variant: showRoutes ? 'selected' : 'overlay', size: 'md' }), 'rounded-full')}
                     >
                         {showRoutes ? 'Hide Routes' : 'Show Routes'}
-                        {loadingRoutes && showRoutes && (
-                            <div className="h-3 w-3 animate-spin rounded-full border-2 border-white/25 border-t-white" />
-                        )}
+                        {loadingRoutes && showRoutes && <div className="h-3 w-3 animate-spin rounded-full border-2 border-white/25 border-t-white" />}
                     </button>
                 </div>
-
-                {/* Route Settings Button */}
-                <div className="pointer-events-auto order-2 md:order-2">
+                <div className="pointer-events-auto">
                     <button
                         type="button"
                         data-route-settings-trigger
                         onClick={handleRouteSettingsClick}
-                        className={cn(
-                            buttonVariants({ variant: showRouteSettings ? 'selected' : 'overlay', size: 'md' }),
-                            'rounded-full',
-                        )}
+                        className={cn(buttonVariants({ variant: showRouteSettings ? 'selected' : 'overlay', size: 'md' }), 'rounded-full')}
                     >
                         <Settings size={12} />
-                        {/* Named "Filter", not "Routes". It sat next to a
-                            "Show Routes" toggle doing an unrelated job, and two
-                            buttons a thumb apart called Routes and Show Routes
-                            gave no way to guess which did what. */}
                         <span>Filter</span>
                     </button>
                 </div>
-
-                {/* Basemap toggle */}
-                <div className="pointer-events-auto order-2 md:order-2">
-                    <button
-                        type="button"
-                        onClick={toggleBasemap}
-                        className={buttonVariants({ variant: 'overlay', size: 'icon' })}
-                        aria-label={isLight ? 'Switch to dark map' : 'Switch to light map'}
-                        title={isLight ? 'Dark map' : 'Light map'}
-                    >
+                <div className="pointer-events-auto">
+                    <button type="button" onClick={toggleBasemap} className={buttonVariants({ variant: 'overlay', size: 'icon' })} aria-label={isLight ? 'Switch to dark map' : 'Switch to light map'} title={isLight ? 'Dark map' : 'Light map'}>
                         {isLight ? <Moon size={13} /> : <Sun size={13} />}
                     </button>
                 </div>
-
-                {/* Status pill */}
-                <div className="pointer-events-none order-1 md:order-3 flex flex-col items-center gap-1.5">
+                <div className="pointer-events-none flex flex-col items-center gap-1.5">
                     <div className={STATUS_PILL}>
-                        {systemId
-                            ? loading
-                                ? 'Loading stops…'
-                                : `${stops.length} stops • ${busCount(vehicles.length)}`
-                            : 'Select a system to begin'}
+                        {systemId ? (loading ? 'Loading stops…' : `${stops.length} stops • ${busCount(vehicles.length)}`) : 'Select a system to begin'}
                     </div>
-                    {/* Was yellow — the app's only use of it, and a third
-                        accent beside crimson and the route colours. Crimson
-                        already means "attention" everywhere else here. */}
                     {(vehiclesError || routesError) && (
                         <p className="animate-pulse-subtle rounded-full border border-crimson-mid/40 bg-crimson-deep/30 px-3 py-1 text-[10px] font-medium text-crimson-light backdrop-blur-sm">
-                            {vehiclesError && routesError
-                                ? 'Real-time data unavailable'
-                                : vehiclesError
-                                    ? 'Vehicle tracking unavailable'
-                                    : 'Route information unavailable'}
+                            {vehiclesError && routesError ? 'Real-time data unavailable' : vehiclesError ? 'Vehicle tracking unavailable' : 'Route information unavailable'}
                         </p>
                     )}
                 </div>
             </div>
 
-            {/* Desktop Recenter Button (Hidden on Mobile) */}
+            {/* Desktop Recenter */}
             {systemId && (
                 <button
                     type="button"
                     title="Recenter visible area"
-                    onClick={() => {
-                        if (!mapInstance) return;
-                        if (activeTripBounds) {
-                            mapInstance.fitBounds(activeTripBounds, { padding: [80, 80] });
-                        } else if (overviewBounds) {
-                            mapInstance.fitBounds(overviewBounds, { padding: [50, 50] });
-                        }
-                    }}
-                    className={cn(
-                        buttonVariants({ variant: 'overlay', size: 'md' }),
-                        'pointer-events-auto absolute right-6 bottom-32 z-[1000] hidden rounded-full shadow-xl md:flex',
-                    )}
+                    onClick={recenter}
+                    className={cn(buttonVariants({ variant: 'overlay', size: 'md' }), 'pointer-events-auto absolute right-6 bottom-32 z-[1000] hidden rounded-full shadow-xl md:flex')}
                 >
                     Recenter
                 </button>
             )}
 
-            {/* Route Settings Panel */}
+            {/* Route filter */}
             {showRouteSettings && (
                 <div
                     ref={routeSettingsRef}
                     className="fixed z-[1001] top-16 left-4 right-4 md:absolute md:top-auto md:bottom-24 md:left-1/2 md:-translate-x-1/2 md:w-72 md:right-auto rounded-xl bg-black/80 backdrop-blur-xl border border-white/10 shadow-2xl p-3 max-h-[60vh] overflow-y-auto"
                 >
                     <div className="mb-2 flex items-center justify-between px-1">
-                        {/* Every other section label in the app is a small,
-                            bold, tracked cap line — FROM, TO, ITINERARY,
-                            DEPARTURES FROM. This one alone was sentence case at
-                            a different size and weight. */}
-                        <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-500">
-                            Filter routes
-                        </span>
-                        <button
-                            type="button"
-                            onClick={() => setShowRouteSettings(false)}
-                            aria-label="Close route filter"
-                            className={buttonVariants({ variant: 'ghost', size: 'iconSm' })}
-                        >
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-500">Filter routes</span>
+                        <button type="button" onClick={() => setShowRouteSettings(false)} aria-label="Close route filter" className={buttonVariants({ variant: 'ghost', size: 'iconSm' })}>
                             <X size={12} />
                         </button>
                     </div>
@@ -910,51 +573,19 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
                         <p className="text-[11px] text-neutral-500 py-2 px-1">No routes available</p>
                     ) : (
                         <div className="space-y-0.5">
-                            {routes.map(r => {
+                            {routes.map((r) => {
                                 const isVisible = routeVisibility[r.route_id] !== false;
                                 const color = r.color || '#a51c30';
                                 return (
-                                    <button
-                                        key={r.route_id}
-                                        type="button"
-                                        onClick={() => toggleRouteVisibility(r.route_id)}
-                                        className="flex items-center gap-2.5 w-full py-2 px-2 rounded-lg hover:bg-white/5 transition-colors"
-                                    >
-                                        <div
-                                            className="h-2.5 w-2.5 rounded-full flex-shrink-0"
-                                            style={{
-                                                backgroundColor: isVisible ? color : 'transparent',
-                                                border: isVisible ? 'none' : `2px solid ${color}`,
-                                            }}
-                                        />
-                                        <span className={clsx(
-                                            'text-[11px] flex-1 text-left truncate transition-colors',
-                                            isVisible ? 'text-neutral-200' : 'text-neutral-500'
-                                        )}>
+                                    <button key={r.route_id} type="button" onClick={() => toggleRouteVisibility(r.route_id)} className="flex items-center gap-2.5 w-full py-2 px-2 rounded-lg hover:bg-white/5 transition-colors">
+                                        <div className="h-2.5 w-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: isVisible ? color : 'transparent', border: isVisible ? 'none' : `2px solid ${color}` }} />
+                                        <span className={clsx('text-[11px] flex-1 text-left truncate transition-colors', isVisible ? 'text-neutral-200' : 'text-neutral-500')}>
                                             {r.route_name || r.short_name || `Route ${r.route_id}`}
                                         </span>
-                                        {/* Nine routes are on by default, so nine
-                                            switches are lit at once. A bright
-                                            crimson track and a bright crimson
-                                            knob made the panel a column of red
-                                            and drowned out the route colour dot
-                                            beside it, which is the part worth
-                                            reading. On is carried by the knob's
-                                            position and a quiet deep-crimson
-                                            track; the knob is white so it stays
-                                            the crisp part at 14px. */}
-                                        <div className={clsx(
-                                            'flex h-5 w-9 flex-shrink-0 items-center rounded-full border px-0.5 transition-colors duration-200',
-                                            isVisible
-                                                ? 'border-crimson-mid/60 bg-crimson-deep/60'
-                                                : 'border-white/5 bg-neutral-700'
-                                        )}>
-                                            <div className={clsx(
-                                                'h-3.5 w-3.5 rounded-full transition-transform duration-200',
-                                                isVisible
-                                                    ? 'translate-x-[14px] bg-white'
-                                                    : 'translate-x-0 bg-neutral-400'
-                                            )} />
+                                        {/* Quiet track, white knob: nine of these are on by default and a
+                                            bright crimson track drowned out the route colour dot beside it. */}
+                                        <div className={clsx('flex h-5 w-9 flex-shrink-0 items-center rounded-full border px-0.5 transition-colors duration-200', isVisible ? 'border-crimson-mid/60 bg-crimson-deep/60' : 'border-white/5 bg-neutral-700')}>
+                                            <div className={clsx('h-3.5 w-3.5 rounded-full transition-transform duration-200', isVisible ? 'translate-x-[14px] bg-white' : 'translate-x-0 bg-neutral-400')} />
                                         </div>
                                     </button>
                                 );

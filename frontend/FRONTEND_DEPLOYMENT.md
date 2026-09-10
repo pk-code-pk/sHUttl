@@ -18,11 +18,9 @@
 3. Environment Variables:
    - Add `VITE_API_BASE_URL` and set it to your deployed backend URL, for example:
      `https://crimson-shuttle-backend.onrender.com`.
-   - Add `VITE_MAP_API_KEY` with a CARTO API key (free tier at carto.com). This
-     selects the Dark Matter basemap with native tiles to z20 and retina @2x.
-     Without it the frontend falls back to Esri's keyless Dark Gray Canvas,
-     which stops at z16 and has no retina tiles — it works, it just looks
-     like the old map.
+   - The basemap needs no key: it is a MapLibre GL vector style from CARTO
+     (Dark Matter / Positron). `VITE_MAP_STYLE_DARK` / `VITE_MAP_STYLE_LIGHT`
+     override the style URLs if you ever want a different provider.
 
 4. Deploy.
 
