@@ -51,8 +51,8 @@
    and slid across the map on every zoom. */
 /* Stop marker hitbox: a large, easily tapped square around a small dot. */
 .stop-marker-container {
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   cursor: pointer;
 }
 
@@ -62,13 +62,19 @@
   position: absolute;
   top: 50%;
   left: 50%;
-  width: 8px;
-  height: 8px;
+  width: 11px;
+  height: 11px;
   transform: translate(-50%, -50%);
   border-radius: 9999px;
+  /* White on the dark map, black on the light one: a stop is a mark on the
+     ground, and it should be the ink colour for whatever ground it is on. */
   background: #f9fafb;
-  border: 1.5px solid rgba(0, 0, 0, 0.55);
+  border: 2px solid rgba(0, 0, 0, 0.6);
   transition: transform 0.15s ease-out;
+}
+.map-light .stop-marker-dot {
+  background: #111111;
+  border-color: rgba(255, 255, 255, 0.75);
 }
 
 .stop-marker-container:hover .stop-marker-dot {
@@ -381,3 +387,16 @@ body {
 .maplibregl-popup-anchor-top .maplibregl-popup-tip { border-bottom-color: rgba(23, 23, 23, 0.96); }
 .maplibregl-popup-anchor-left .maplibregl-popup-tip { border-right-color: rgba(23, 23, 23, 0.96); }
 .maplibregl-popup-anchor-right .maplibregl-popup-tip { border-left-color: rgba(23, 23, 23, 0.96); }
+
+/* Little pointer under a vehicle label. */
+.vehicle-label-tip {
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  width: 10px;
+  height: 10px;
+  transform: translate(-50%, -55%) rotate(45deg);
+  background: rgba(23, 23, 23, 0.95);
+  border-right: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}

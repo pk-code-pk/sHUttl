@@ -1,13 +1,16 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Marker, type MarkerInstance } from "react-map-gl/maplibre";
-import { ARROW_PATH, NEUTRAL_ROUTE_COLOR, bearingDeg, lerp } from "./mapUtils";
+import { ARROW_PATH, NEUTRAL_ROUTE_COLOR, bearingDeg, lerp, textOnRouteColor } from "./mapUtils";
 import type { Vehicle } from "./types";
 
 /** Ease in and out. A vehicle that starts and stops abruptly reads as a
  * teleport even when the path between is interpolated. */
 const easeInOut = (t: number) => (t < 0.5 ? 2 * t * t : 1 - (1 - t) * (1 - t) * 2);
 
-const SIZE = 32;
+// 40px: the 32px arrow was legible but a poor tap target, and it is now also
+// the thing you tap to find out which bus this is.
+const SIZE = 40;
+
 
 /**
  * A vehicle marker: a solid arrow in its route's colour.
@@ -40,6 +43,19 @@ export function ShuttleMarker({
 }) {
     const markerRef = useRef<MarkerInstance>(null);
     const innerRef = useRef<HTMLDivElement>(null);
+    // Tap a bus to learn which one it is. The label is a child of the marker
+    // element rather than a map popup, so it rides along with the animated
+    // position for free and needs no binding to the map. Closes on a tap
+    // anywhere else.
+    const [open, setOpen] = useState(false);
+    const rootRef = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        if (!open) return;
+        const away = (e: PointerEvent) => { if (!rootRef.current?.contains(e.target as Node)) setOpen(false); };
+        document.addEventListener('pointerdown', away, true);
+        return () => document.removeEventListener('pointerdown', away, true);
+    }, [open]);
+
     const prevPosRef = useRef<[number, number] | null>(null);
     const rafRef = useRef<number | null>(null);
     // Unwrapped heading: kept as a continuous value rather than 0-360 so that
@@ -94,23 +110,54 @@ export function ShuttleMarker({
 
     const color = v.color || NEUTRAL_ROUTE_COLOR;
 
+    const code = v.route_id ? String(v.route_id) : '';
+    const name = v.route_name || code || 'Unknown route';
+
     return (
-        <Marker ref={markerRef} longitude={v.lng} latitude={v.lat} anchor="center" style={{ zIndex: 10 }}>
-            <div
-                ref={innerRef}
-                className="vehicle-marker-inner"
-                style={{ width: SIZE, height: SIZE, transformOrigin: '50% 50%' }}
-            >
-                <svg width={SIZE} height={SIZE} viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
-                    <path
-                        d={ARROW_PATH}
-                        fill={color}
-                        stroke="#0b0f17"
-                        strokeWidth={5}
-                        strokeLinejoin="round"
-                        paintOrder="stroke"
-                    />
-                </svg>
+        <Marker ref={markerRef} longitude={v.lng} latitude={v.lat} anchor="center" style={{ zIndex: open ? 20 : 10 }}>
+            <div ref={rootRef} className="relative" style={{ width: SIZE, height: SIZE }}>
+                <button
+                    type="button"
+                    aria-label={`${name}, shuttle ${v.id}`}
+                    aria-expanded={open}
+                    onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}
+                    className="block h-full w-full cursor-pointer bg-transparent p-0"
+                >
+                    <div
+                        ref={innerRef}
+                        className="vehicle-marker-inner"
+                        style={{ width: SIZE, height: SIZE, transformOrigin: '50% 50%' }}
+                    >
+                        <svg width={SIZE} height={SIZE} viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+                            <path
+                                d={ARROW_PATH}
+                                fill={color}
+                                stroke="#0b0f17"
+                                strokeWidth={5}
+                                strokeLinejoin="round"
+                                paintOrder="stroke"
+                            />
+                        </svg>
+                    </div>
+                </button>
+
+                {open && (
+                    <div
+                        role="tooltip"
+                        className="vehicle-label absolute left-1/2 bottom-full mb-2 -translate-x-1/2 whitespace-nowrap rounded-xl border border-white/10 bg-neutral-900/95 px-3 py-2 text-sm shadow-2xl backdrop-blur-md"
+                    >
+                        <div className="flex items-center gap-2">
+                            {code && (
+                                <span className="rounded-md px-1.5 py-0.5 text-[10px] font-black" style={{ backgroundColor: color, color: textOnRouteColor(v.color) }}>
+                                    {code}
+                                </span>
+                            )}
+                            <span className="font-semibold text-white">{name}</span>
+                        </div>
+                        <div className="mt-0.5 text-xs text-neutral-400">Shuttle #{String(v.id)}</div>
+                        <div className="vehicle-label-tip" />
+                    </div>
+                )}
             </div>
         </Marker>
     );
