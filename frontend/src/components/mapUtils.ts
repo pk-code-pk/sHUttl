@@ -15,26 +15,22 @@ export function bearingDeg(from: [number, number], to: [number, number]) {
 export const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 
 /**
- * A vehicle marker: one light arrow, ringed in its route's colour.
+ * A vehicle marker: a solid arrow in its route's colour.
  *
- * Filling the whole arrow with the route colour made nine differently-coloured
- * darts on one map — the buses read as nine unrelated things rather than one
- * fleet, and against a darkened basemap the muted fills lost contrast exactly
- * where a moving vehicle most needs it.
+ * Filled with the route colour, not outlined in it. An earlier version gave
+ * every bus a white body with a coloured ring, on the theory that a shared
+ * body would read as one fleet — it read as nine white darts instead, and the
+ * thing that identifies a bus was reduced to a 2px edge. The grouped route
+ * palette does that job properly: two amber buses are visibly going the same
+ * way without making the marker do the work.
  *
- * Inverting it fixes both. A near-white body is the same for every bus, so they
- * read as one system and stay the brightest moving thing on the map; the route
- * colour moves to a ring around it, which is enough to identify at a glance
- * while agreeing with the app's dark-and-crimson surfaces rather than competing
- * with them. It matches the route line the bus is travelling along, so a bus
- * and its route still visibly belong together.
- *
- * The outer dark edge is what keeps a light arrow legible over the lighter
- * patches of basemap — road fills and the river.
+ * The dark outline is the only other element and it is load-bearing: a bus
+ * sits on a route line of its own colour, so without it the arrow dissolves
+ * into the line it is travelling along.
  */
 export function makeVehicleIcon(rotationDeg: number, color: string | null | undefined) {
-    const routeColor = color || "#d4737f";
-    const size = 34;
+    const routeColor = color || "#93a3b5";
+    const size = 32;
     const half = size / 2;
 
     return L.divIcon({
@@ -48,18 +44,9 @@ export function makeVehicleIcon(rotationDeg: number, color: string | null | unde
         transform-origin: 50% 50%;
       ">
         <svg width="${size}" height="${size}" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
-          <!-- Painted outward: dark separator, route ring, light body. Drawing
-               them as three strokes of the same path keeps them concentric,
-               which hand-offsetting three outlines would not. -->
-          <path d="M32 8 L54 52 L32 41 L10 52 Z" fill="none"
-                stroke="#0b0f17" stroke-width="9"
-                stroke-linejoin="round" stroke-linecap="round" />
-          <path d="M32 8 L54 52 L32 41 L10 52 Z" fill="none"
-                stroke="${routeColor}" stroke-width="6"
-                stroke-linejoin="round" stroke-linecap="round" />
-          <path d="M32 8 L54 52 L32 41 L10 52 Z"
-                fill="#eef1f5" stroke="#eef1f5" stroke-width="1.5"
-                stroke-linejoin="round" stroke-linecap="round" />
+          <path d="M32 9 L53 51 L32 41 L11 51 Z"
+                fill="${routeColor}" stroke="#0b0f17" stroke-width="5"
+                stroke-linejoin="round" paint-order="stroke" />
         </svg>
       </div>
     `,

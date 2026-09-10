@@ -621,32 +621,39 @@ def _pick_project(payload: dict) -> dict:
 # reads as black, and Quad Express and Quad Yard Express are both #136D1C —
 # the same dark green for two different routes, which no legend can fix.
 #
-# These are the only colours on screen that are not grey or crimson, so they
-# are chosen to sit inside that style rather than against it: muted, near-equal
-# in lightness, warm on one side and cool on the other, with Allston Loop kept
-# red so the busiest route agrees with the app's accent.
+# The replacement is grouped by where a route goes rather than assigned hue by
+# hue. Harvard's network is really three corridors out of the Square, so the
+# colours say that: one hue family per corridor, and lightness separating the
+# routes inside it.
 #
-# Two constraints set the values:
+#     across the river to Allston   warm amber
+#     north to the Quad             blue
+#     around Cambridge and the river  teal
+#     overnight                     neutral slate
 #
-#   Lightness has a floor — this is the mistake Harvard's own palette makes.
-#   Below roughly L* 50 a 4px line disappears into the dark basemap.
+# Three families and a neutral, instead of nine unrelated hues. A rider reading
+# the map learns something from the colour before reading any label — two amber
+# lines are going the same way — and the set stays quiet enough on a dark
+# basemap that the interface's crimson is still the loudest thing on screen,
+# which is what nine saturated hues took away.
 #
-#   Chroma stays restrained. Nine full-brightness hues is a rainbow: every line
-#   shouts, none looks like it belongs to the same product, and the crimson
-#   interface ends up competing with all of them.
-#
-# Hue tracks the operator's where theirs was meaningful, so riders who know
-# "the purple one" still recognise it.
+# Lightness has a floor throughout: below roughly L* 55 a 4px line disappears
+# into the basemap, which is the mistake Harvard's own palette makes. The
+# within-family steps stay above it, so the darkest blue is still legible.
 ROUTE_COLOR_OVERRIDES = {
-    "AL": "#C04B42",    # brick red — agrees with the crimson accent
-    "XSEC": "#BE7B3C",  # ochre
-    "QYE": "#8C9A3E",   # olive, kept green-leaning so it separates from XSEC
-    "QSTA": "#55935C",  # green
-    "QE": "#3F8A8A",    # teal — was identical to QYE
-    "ME": "#4374B0",    # steel blue
-    "QSEC": "#7360A8",  # indigo violet, as theirs was purple
-    "AC": "#A25C88",    # plum, close to their magenta
-    "OVNT": "#6E7A8C",  # slate — the quiet overnight route
+    # Across the river to Allston.
+    "AL": "#E08A4F",    # Allston Loop, the busiest — the family's anchor
+    "XSEC": "#EFB683",  # SEC Express, lighter
+    "QSTA": "#C26A38",  # Quad Stadium, deeper
+    # North to the Quad.
+    "QE": "#74AEE0",    # Quad Express
+    "QSEC": "#4E88C8",  # Quad SEC
+    "QYE": "#3E6DAE",   # Quad Yard Express
+    # Cambridge and the river houses.
+    "AC": "#4FA89B",    # All Cambridge
+    "ME": "#85C7BA",    # Mather Express
+    # Runs when nothing else does.
+    "OVNT": "#93A3B5",  # Overnight
 }
 
 
