@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MapContainer, TileLayer, Popup, Polyline, useMap, Marker } from 'react-leaflet';
-import { Moon, Navigation as NavigationIcon, Settings, Sun, X } from 'lucide-react';
+import { Moon, Navigation as NavigationIcon, Route as RouteIcon, Settings, Sun, X } from 'lucide-react';
 import clsx from 'clsx';
 import L from 'leaflet';
 import type { LatLngExpression } from 'leaflet';
@@ -708,7 +708,10 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
                     {systemId
                         ? loading
                             ? '…'
-                            : <span className="whitespace-nowrap">{stops.length} stops • {busCount(vehicles.length)}</span>
+                            // Bus count only. "24 stops • 5 buses" clipped to
+                            // "24 stops • 5 buse" at 375px, and the stop
+                            // count never changes — the buses are the news.
+                            : <span className="whitespace-nowrap">{busCount(vehicles.length)}</span>
                         : 'Select system'}
                 </div>
 
@@ -754,21 +757,31 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
                 ) : <div />}
 
                 {/* Right: Show Routes Toggle */}
+                {/* Icon, not a label: five controls share a 375px bar, and
+                    the label version was the one that did not fit. Same
+                    selected/overlay states as the desktop pill. */}
                 <button
                     type="button"
                     onClick={() => setShowRoutes((prev) => !prev)}
+                    aria-pressed={showRoutes}
+                    aria-label={showRoutes ? 'Hide routes' : 'Show routes'}
                     className={cn(
-                        buttonVariants({ variant: showRoutes ? 'selected' : 'overlay', size: 'md' }),
-                        'justify-self-end pointer-events-auto min-w-[32px]',
+                        buttonVariants({ variant: showRoutes ? 'selected' : 'overlay', size: 'icon' }),
+                        'justify-self-end pointer-events-auto',
                     )}
                 >
-                    {showRoutes ? 'Hide Routes' : 'Show Routes'}
+                    <RouteIcon size={14} />
                 </button>
             </div>
 
 
             {/* 2. Desktop Bottom Controls (Hidden on Mobile) */}
-            <div className="hidden md:flex pointer-events-none absolute bottom-8 inset-x-0 flex-col md:flex-row items-center justify-center gap-3 px-6 z-[1000]">
+            {/* Centred in the map area to the right of the 400px panel (plus
+                its 24px gutter), not in the full width: centred in the full
+                width, the row landed under the panel at tablet widths whenever
+                the departure list was long. Wraps rather than overflows if the
+                map area is narrow. */}
+            <div className="hidden md:flex pointer-events-none absolute bottom-8 left-[424px] right-0 flex-row flex-wrap items-center justify-center gap-3 px-6 z-[1000]">
                 {/* Route toggle button */}
                 <div className="pointer-events-auto order-2 md:order-1">
                     <button
