@@ -648,10 +648,9 @@ ROUTE_COLOR_OVERRIDES = {
     # crimson — the mid tone from the frontend's token set, the same hairline
     # that outlines an expanded departure — rather than a lifted version of
     # it. The rest are pitched to the same depth so nothing on the map is
-    # brighter than the accent. Legibility on the dark ground comes from the
-    # dark outline on each arrow and the lit ring around it, not from the
-    # fill; a 4px line at this depth still reads because the basemap is
-    # near-black.
+    # brighter than the accent. A line at this depth still reads because the
+    # basemap is near-black; the arrows carry a dark outline for the same
+    # reason.
     #
     # "Navy" is a steel blue: true navy is charcoal on charcoal.
     #

@@ -54,18 +54,8 @@ export function relativeLuminance(color: string | null | undefined): number | nu
  * colour, so without it the arrow dissolves into the line it is travelling
  * along.
  *
- * Around the arrow, following its shape, sits a lit outline in the route
- * colour — the idea of the crimson ring on an expanded departure, animated,
- * and traced along the arrowhead rather than a circle around it. Three strokes
- * of the same path, drawn under the arrow so the dark outline stays crisp:
- * a wide, faint one that blurs into a glow; a dim full outline as the track;
- * and a bright dash that travels round the perimeter (stroke-dashoffset — the
- * path is ~140 units long, the dash 40). This is what makes a darker palette
- * workable: the outline supplies the eye-catch the fill no longer has to.
- * Motion lives in CSS (.vehicle-marker-sweep); only the colour is set here.
  */
-// The arrowhead. Perimeter ≈ 140.4 units (two long edges of 46.96, two
-// short of 23.26); the sweep's dash pattern is sized against that.
+// The arrowhead.
 const ARROW = "M32 9 L53 51 L32 41 L11 51 Z";
 
 export function makeVehicleIcon(rotationDeg: number, color: string | null | undefined) {
@@ -83,11 +73,7 @@ export function makeVehicleIcon(rotationDeg: number, color: string | null | unde
         transform: rotate(${rotationDeg}deg);
         transform-origin: 50% 50%;
       ">
-        <svg width="${size}" height="${size}" viewBox="-8 -8 80 80" overflow="visible"
-             xmlns="http://www.w3.org/2000/svg" style="--route:${routeColor}">
-          <path class="vehicle-marker-glow"  d="${ARROW}" />
-          <path class="vehicle-marker-track" d="${ARROW}" />
-          <path class="vehicle-marker-sweep" d="${ARROW}" />
+        <svg width="${size}" height="${size}" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
           <path d="${ARROW}"
                 fill="${routeColor}" stroke="#0b0f17" stroke-width="5"
                 stroke-linejoin="round" paint-order="stroke" />
