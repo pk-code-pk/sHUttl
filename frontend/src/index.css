@@ -398,3 +398,21 @@ body {
 .leaflet-control-attribution svg {
   opacity: 0.45;
 }
+
+/* Routes during a zoom.
+
+   Leaflet animates a zoom by CSS-scaling the whole overlay pane for 250 ms
+   and then redrawing at the new zoom. Strokes scale with it, so every route
+   line fattens to double width and snaps back — on every notch of the wheel.
+   The strokes cannot be held constant while the pane is being transformed
+   (vector-effect does not see a CSS transform on the SVG root), so the choice
+   is stretch or hide. Hide, as a fade: the lines drop out over the first
+   frames of the zoom and return once the pane has settled. The markers are
+   left alone — they translate correctly through the animation, measured. */
+.leaflet-overlay-pane {
+  transition: opacity 180ms ease-out;
+}
+.leaflet-zoom-anim .leaflet-overlay-pane {
+  opacity: 0;
+  transition: opacity 80ms ease-in;
+}
