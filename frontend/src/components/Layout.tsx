@@ -16,12 +16,20 @@ interface LayoutProps {
 
 export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
     const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
+    // Route Next Bus Out has expanded, for the map to draw and frame. Lifted
+    // here because the panel and the map are siblings.
+    const [focusRouteId, setFocusRouteId] = useState<string | null>(null);
 
     return (
         <div className="fixed inset-0 md:relative md:w-full md:h-[100dvh] overflow-hidden bg-neutral-950 overscroll-none">
             {/* Background Map - fills entire screen */}
             <div className="absolute inset-0 z-0">
-                <MapShell systemId={system?.id ?? null} trip={trip} userLocation={userLocation} />
+                <MapShell
+                    systemId={system?.id ?? null}
+                    trip={trip}
+                    userLocation={userLocation}
+                    focusRouteId={focusRouteId}
+                />
             </div>
 
             {/* 
@@ -55,6 +63,7 @@ export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
                         trip={trip}
                         onTripChange={onTripChange}
                         onUserLocationChange={setUserLocation}
+                        onFocusRouteChange={setFocusRouteId}
                     />
                 </div>
 

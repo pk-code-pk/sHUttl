@@ -61,7 +61,10 @@
    the marker layer to be measured against, and no iOS compositing path that
    drops a filter applied to a transformed pane. Measured at 1 px of
    marker-to-tile slip through a zoom, the same as an unstyled Leaflet map. */
-.leaflet-tile {
+/* Scoped to the fallback provider. CARTO Dark Matter is dark out of the box
+   and darkening it again crushes the street detail; MapShell adds this class
+   only when config says the tiles need it. */
+.map-tiles-dim .leaflet-tile {
   filter: brightness(0.62) saturate(0.72);
 }
 /* Leaflet positions marker icons itself, with `position: absolute` and a

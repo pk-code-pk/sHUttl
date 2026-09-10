@@ -641,19 +641,26 @@ def _pick_project(payload: dict) -> dict:
 # into the basemap, which is the mistake Harvard's own palette makes. The
 # within-family steps stay above it, so the darkest blue is still legible.
 ROUTE_COLOR_OVERRIDES = {
-    # Across the river to Allston.
-    "AL": "#E08A4F",    # Allston Loop, the busiest — the family's anchor
-    "XSEC": "#EFB683",  # SEC Express, lighter
-    "QSTA": "#C26A38",  # Quad Stadium, deeper
+    # Colours that sit with crimson on a charcoal map: the accent itself for
+    # the flagship route, then cream, tan, teal, navy, forest, olive and warm
+    # grey around it. Grouped by corridor so routes that share a road share a
+    # family, and a rider learns "warm = Allston, cool = Quad" without a
+    # legend.
+    #
+    # Two liberties with the reference palette, both for legibility on a dark
+    # ground: the crimson is lifted from the UI token so a 5px line reads at
+    # full strength, and "navy" is a steel blue — true navy is charcoal on
+    # charcoal.
+    #
+    # Across the river to Allston. AL is the route most riders take most
+    # often, so it gets the app's own colour.
+    "AL": "#C93B50", "XSEC": "#EADFC8", "QSTA": "#C8A576",
     # North to the Quad.
-    "QE": "#74AEE0",    # Quad Express
-    "QSEC": "#4E88C8",  # Quad SEC
-    "QYE": "#3E6DAE",   # Quad Yard Express
+    "QE": "#3EA69F", "QSEC": "#83CBC4", "QYE": "#6C8CB5",
     # Cambridge and the river houses.
-    "AC": "#4FA89B",    # All Cambridge
-    "ME": "#85C7BA",    # Mather Express
+    "AC": "#5B9A67", "ME": "#A3AB5F",
     # Runs when nothing else does.
-    "OVNT": "#93A3B5",  # Overnight
+    "OVNT": "#A19A8E",
 }
 
 

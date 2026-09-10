@@ -14,6 +14,32 @@ export function bearingDeg(from: [number, number], to: [number, number]) {
 
 export const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 
+/** Text colour for a label sitting on a route-coloured fill.
+ *
+ * The palette runs from crimson to cream, and white text on a cream badge is
+ * not text. Relative luminance (WCAG) picks near-black above ~0.45 and white
+ * below; the threshold is set so the mid-tones — teal, olive, warm grey —
+ * keep white, and only the genuinely light fills (cream, light teal, tan)
+ * flip to dark. Returns white for anything unparseable. */
+export function textOnRouteColor(color: string | null | undefined): string {
+    const L = relativeLuminance(color);
+    return L != null && L > 0.45 ? '#111111' : '#ffffff';
+}
+
+/** WCAG relative luminance of a #rrggbb colour, 0 (black) to 1 (white).
+ * null for anything unparseable. */
+export function relativeLuminance(color: string | null | undefined): number | null {
+    if (!color) return null;
+    const m = /^#?([0-9a-f]{6})$/i.exec(color.trim());
+    if (!m) return null;
+    const n = parseInt(m[1], 16);
+    const lin = (c: number) => {
+        const v = c / 255;
+        return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+    };
+    return 0.2126 * lin((n >> 16) & 255) + 0.7152 * lin((n >> 8) & 255) + 0.0722 * lin(n & 255);
+}
+
 /**
  * A vehicle marker: a solid arrow in its route's colour.
  *

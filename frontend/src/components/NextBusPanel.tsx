@@ -19,6 +19,7 @@ import { ChevronDown, Footprints, LocateFixed, MapPin, RefreshCw, TriangleAlert 
 import clsx from 'clsx';
 import { API_BASE_URL } from '@/config';
 import { describeFailure, getLocation } from '@/lib/geolocation';
+import { textOnRouteColor } from './mapUtils';
 import { Alert, AlertActions, AlertContent, AlertDescription, AlertIcon } from './ui/Alert';
 import { buttonVariants, cn } from './ui/styles';
 
@@ -201,14 +202,16 @@ export const NextBusPanel = ({ systemId, onShowOnMap }: NextBusPanelProps) => {
         const opening = openKey !== key;
         setOpenKey(opening ? key : null);
 
-        // Expanding only lists where the bus goes; the map waits for a
-        // destination. Opening a row used to draw the run automatically by
-        // treating its last onward stop as the destination, which is wrong on
-        // a loop: XSEC's run ends at Kennedy School (Northbound), about 100 m
-        // from where you board it, so the map correctly drew a 100 m stub.
-        // Picking any single stop from the list as "the destination" is a guess
-        // either way, and the rider is about to make that choice explicitly.
-        if (!opening) onShowOnMap?.(d.stop.id, null);
+        // Expanding a row shows the route this bus runs on the map, framed.
+        // No destination is passed, so nothing is planned yet — the rider
+        // picks that from the list below, and only then does a trip draw.
+        //
+        // The route, not a guessed trip: an earlier version drew the run to
+        // the last onward stop on expand, which is wrong on a loop. XSEC's run
+        // ends at Kennedy School (Northbound), about 100 m from where you
+        // board it, so the map correctly drew a 100 m stub. Showing the whole
+        // route sidesteps the guess. Collapsing clears it.
+        onShowOnMap?.(d.stop.id, null, opening ? d.route_id : undefined);
     };
 
     return (
@@ -390,8 +393,8 @@ const DepartureRow = ({
         >
             <div className="flex items-center gap-2.5">
                 <span
-                    className="shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-black text-white"
-                    style={{ backgroundColor: d.color ?? '#525252' }}
+                    className="shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-black"
+                    style={{ backgroundColor: d.color ?? '#525252', color: textOnRouteColor(d.color) }}
                 >
                     {d.short_name ?? d.route_id}
                 </span>

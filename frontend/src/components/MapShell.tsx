@@ -5,9 +5,10 @@ import clsx from 'clsx';
 import L from 'leaflet';
 import type { LatLngExpression } from 'leaflet';
 import { ShuttleMarker } from './ShuttleMarker';
+import { relativeLuminance } from './mapUtils';
 import { buttonVariants, cn } from './ui/styles';
 import type { Stop, Vehicle, RoutePath, TripResponse, TripSegment } from './types';
-import { API_BASE_URL, MAP_ATTRIBUTION, MAP_MAX_NATIVE_ZOOM, MAP_MAX_ZOOM, MAP_SUBDOMAINS, MAP_TILE_URL } from '@/config';
+import { API_BASE_URL, MAP_ATTRIBUTION, MAP_MAX_NATIVE_ZOOM, MAP_MAX_ZOOM, MAP_SUBDOMAINS, MAP_TILE_URL, MAP_TILES_NEED_DIM } from '@/config';
 
 /** The read-only status pill, shared by the mobile top bar and the desktop
  * bottom bar. They had drifted to different grounds, paddings and text sizes
@@ -41,9 +42,24 @@ interface MapShellProps {
     systemId: number | null;
     trip: TripResponse | null;
     userLocation?: { lat: number; lng: number } | null;
+    /** A route to show and frame on its own, with no trip planned yet.
+     *
+     * Expanding a departure in Next Bus Out sets this. There is no destination
+     * at that point — the rider is still deciding — so there is no trip to
+     * draw, but the useful thing to see is the route that bus runs. It goes
+     * through the same bounds-and-key path a trip does rather than a second
+     * focus implementation; Next Bus Out had one of those and it drifted out
+     * of step with the planner, which is why it was removed. */
+    focusRouteId?: string | null;
 }
 
 
+
+/* Route ids arrive from two endpoints — /routes and /departures — and the
+   backend has already been bitten once by comparing them case-sensitively,
+   which reported every route dead. Compared loosely here for the same reason. */
+const sameRoute = (a: string | null | undefined, b: string | null | undefined) =>
+    a != null && b != null && String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
 
 function computeTripBounds(trip: TripResponse | null): L.LatLngBounds | null {
     if (!trip) return null;
@@ -161,7 +177,7 @@ function MapController({
     return null;
 }
 
-export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
+export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShellProps) => {
     const [stops, setStops] = useState<Stop[]>([]);
     const [vehicles, setVehicles] = useState<Vehicle[]>([]);
     const [routes, setRoutes] = useState<RoutePath[]>([]);
@@ -193,7 +209,20 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
 
     const tripBounds = useMemo(() => computeTripBounds(trip), [trip]);
 
-    const activeTripBounds = tripBounds;
+    const focusRoute = useMemo(
+        () => (focusRouteId ? routes.find((r) => sameRoute(r.route_id, focusRouteId)) ?? null : null),
+        [routes, focusRouteId],
+    );
+
+    const focusRouteBounds = useMemo(() => {
+        const path = focusRoute?.path;
+        if (!path?.length) return null;
+        return L.latLngBounds(path.map((p) => [p.lat, p.lng] as [number, number]));
+    }, [focusRoute]);
+
+    // A planned trip wins: it is the more specific answer, and it is what the
+    // rider asked for last.
+    const activeTripBounds = tripBounds ?? focusRouteBounds;
     const [mapInstance, setMapInstance] = useState<L.Map | null>(null);
 
     // Stop Icon with larger hitbox (white default)
@@ -290,8 +319,13 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
     }, [systemId]);
 
 
+    // Geometry is needed whenever anything wants to draw a route: the Show
+    // Routes toggle, or a single focused route. Fetching only for the toggle
+    // meant a focused route had no path to draw and nothing to frame, because
+    // `showRoutes` starts off.
+    const needRoutes = showRoutes || Boolean(focusRouteId);
     useEffect(() => {
-        if (!systemId || !showRoutes) {
+        if (!systemId || !needRoutes) {
             // eslint-disable-next-line react-hooks/set-state-in-effect
             setRoutes([]);
             return;
@@ -309,7 +343,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                 setRoutesError(true);
             })
             .finally(() => setLoadingRoutes(false));
-    }, [systemId, showRoutes]);
+    }, [systemId, needRoutes]);
 
     // Initialize route visibility when routes load
     useEffect(() => {
@@ -370,7 +404,13 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
     }, [stops]);
 
     // Compute trip key for smart centering
-    const tripKey = useMemo(() => computeTripKey(trip), [trip]);
+    // The key is what tells MapController "this is a new thing to frame".
+    // A focused route needs one too, or expanding a departure would compute
+    // bounds that never get fitted.
+    const tripKey = useMemo(
+        () => computeTripKey(trip) ?? (focusRouteId ? `route:${focusRouteId}` : null),
+        [trip, focusRouteId],
+    );
 
     // Auto-off "Show Routes" on first trip only
     const previousTripRef = useRef<TripResponse | null>(null);
@@ -412,7 +452,7 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
     }, [trip]);
 
     return (
-        <div className="relative h-full w-full bg-neutral-900">
+        <div className={cn('relative h-full w-full bg-neutral-900', MAP_TILES_NEED_DIM && 'map-tiles-dim')}>
             {systemId ? (
                 <MapContainer
                     key={systemId}
@@ -465,28 +505,64 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                         {...(MAP_SUBDOMAINS ? { subdomains: MAP_SUBDOMAINS } : {})}
                     />
 
-                    {/* Route polylines, one solid line each. */}
-                    {showRoutes &&
-                        routes.filter((r) => routeVisibility[r.route_id] !== false).map((r) => {
+                    {/* Route polylines, one solid line each.
+
+                        Which routes draw: all visible ones when Show Routes is
+                        on; otherwise only the focused route, if there is one.
+                        Being told a bus is coming is not useful without seeing
+                        where it goes, so the focused route draws whether or
+                        not the toggle is on.
+
+                        How they draw: with no focus, every route is a solid
+                        4px line. With a focus, that route is heavier and the
+                        rest step back to thin and translucent, so the one you
+                        tapped is the one you read. Once a trip is planned on
+                        top of it the trip line takes over and the route drops
+                        to a thin context line underneath — the whole loop for
+                        orientation, the ridden stretch in bold.
+
+                        The translucent glow underlay that used to sit beneath
+                        every route muddied adjacent routes into a haze; the
+                        colour carries its own brightness now. */}
+                    {routes
+                        .filter((r) => {
+                            const isFocus = focusRoute != null && sameRoute(r.route_id, focusRoute.route_id);
+                            if (isFocus) return true;
+                            return showRoutes && routeVisibility[r.route_id] !== false;
+                        })
+                        // Draw order is stacking order, and routes share roads:
+                        // AL, XSEC and QSTA run the same Allston corridor. Light
+                        // colours draw first as ground and saturated ones last
+                        // as figure, so crimson sits on cream where they overlap
+                        // rather than under it. Luminance, not a route list, so
+                        // the rule survives a palette change. The focused route
+                        // always draws last regardless.
+                        .sort((a, b) => {
+                            const af = focusRoute != null && sameRoute(a.route_id, focusRoute.route_id);
+                            const bf = focusRoute != null && sameRoute(b.route_id, focusRoute.route_id);
+                            if (af !== bf) return af ? 1 : -1;
+                            return (relativeLuminance(b.color) ?? 0) - (relativeLuminance(a.color) ?? 0);
+                        })
+                        .map((r) => {
                             if (!r.path || r.path.length === 0) return null;
 
                             const positions: LatLngExpression[] = r.path.map((p) => [p.lat, p.lng]);
-                            const color = r.color || '#a51c30'; // fallback to harvard crimson if missing
+                            const color = r.color || '#a51c30';
+                            const isFocus = focusRoute != null && sameRoute(r.route_id, focusRoute.route_id);
 
-                            // One solid line per route. The translucent glow
-                            // underlay that used to sit beneath every route
-                            // muddied adjacent routes into a haze and made the
-                            // colours read washed out; brightness now comes
-                            // from the colour itself.
+                            let weight = 4;
+                            let opacity = 1;
+                            if (focusRoute) {
+                                if (!isFocus) { weight = 3; opacity = 0.3; }
+                                else if (trip) { weight = 2; opacity = 0.4; }
+                                else { weight = 5; }
+                            }
+
                             return (
                                 <Polyline
                                     key={r.route_id}
                                     positions={positions}
-                                    pathOptions={{
-                                        color,
-                                        weight: 4,
-                                        opacity: 1,
-                                    }}
+                                    pathOptions={{ color, weight, opacity }}
                                 />
                             );
                         })}

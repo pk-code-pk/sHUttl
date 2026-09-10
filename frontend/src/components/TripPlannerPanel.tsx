@@ -40,6 +40,11 @@ interface TripPlannerPanelProps {
     trip: TripResponse | null;
     onTripChange: (trip: TripResponse | null) => void;
     onUserLocationChange?: (location: { lat: number; lng: number } | null) => void;
+    /** The route Next Bus Out wants shown and framed on the map, or null.
+     * Set when a departure row is expanded; cleared on collapse or on leaving
+     * the mode. MapShell draws and frames it through the same path a trip
+     * takes, so there is one focus mechanism, not two. */
+    onFocusRouteChange?: (routeId: string | null) => void;
 }
 
 interface StopOption {
@@ -165,7 +170,8 @@ export const TripPlannerPanel = ({
     system,
     trip,
     onTripChange,
-    onUserLocationChange
+    onUserLocationChange,
+    onFocusRouteChange,
 }: TripPlannerPanelProps) => {
     const [stops, setStops] = useState<StopOption[]>([]);
     const [loadingStops, setLoadingStops] = useState(false);
@@ -574,9 +580,15 @@ export const TripPlannerPanel = ({
         destStopId: string | null,
         routeId?: string,
     ) => {
+        // No destination yet: the rider has expanded a departure and is
+        // looking at where it goes. Clear any trip and show the route itself,
+        // framed — no destination is guessed. (Planning to the last onward
+        // stop automatically was tried and is wrong on a loop: XSEC's run ends
+        // ~100 m from where you board it, so the map drew a 100 m stub.)
         if (!destStopId) {
             onTripChange(null);
             resetLiveState();
+            onFocusRouteChange?.(routeId ?? null);
             return;
         }
 
@@ -590,6 +602,9 @@ export const TripPlannerPanel = ({
         setOriginQuery(origin.name);
         setDestStopId(destStopId);
         setDestQuery(dest.name);
+        // Keep the route under the trip as context: the loop thin, the
+        // ridden stretch bold. MapShell handles the weights.
+        onFocusRouteChange?.(routeId ?? null);
         void handlePlanTrip({ originStopId, destStopId, routeId });
     };
 
@@ -603,6 +618,7 @@ export const TripPlannerPanel = ({
             return;
         }
         setPendingMode(null);
+        onFocusRouteChange?.(null);
         setMode(next);
     };
 
@@ -610,6 +626,7 @@ export const TripPlannerPanel = ({
         if (!pendingMode) return;
         onTripChange(null);
         resetLiveState();
+        onFocusRouteChange?.(null);
         setMode(pendingMode);
         setPendingMode(null);
     };

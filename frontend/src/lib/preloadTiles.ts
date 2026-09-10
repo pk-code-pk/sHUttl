@@ -17,15 +17,23 @@
  * tiles actually on screen or with the API calls that populate the panel.
  */
 
-import { MAP_MAX_NATIVE_ZOOM, MAP_TILE_URL } from '@/config';
+import { MAP_MAX_NATIVE_ZOOM, MAP_SUBDOMAINS, MAP_TILE_URL } from '@/config';
 
 // The stops span roughly 42.363–42.382 N and -71.128 – -71.114 W. This is that
 // with enough margin to cover a pan to the edge of campus in any direction.
 const BOUNDS = { south: 42.356, west: -71.135, north: 42.389, east: -71.105 };
 
 // Below z12 the whole campus is one tile and nobody zooms out that far in
-// practice; above the provider's native depth there is nothing new to fetch.
+// practice.
 const MIN_ZOOM = 12;
+
+// Deepest level to warm. Tile count quadruples per level: the campus box is
+// ~80 tiles through z16 and ~660 at z18 alone, and retina tiles are four
+// times the bytes. z16 is the working zoom for the overview and every trip
+// fit (MapController caps fits there), so it is where a blank tile would
+// actually be seen. Past it the provider's CDN serves on demand and
+// keepBuffer holds what has been fetched.
+const PRELOAD_MAX_ZOOM = Math.min(16, MAP_MAX_NATIVE_ZOOM);
 
 // Enough to be quick without saturating the connection the visible tiles and
 // the API are sharing.
@@ -47,20 +55,36 @@ function tileRange(zoom: number) {
     };
 }
 
+// A preload only helps if it produces the exact URL Leaflet will later ask
+// for; a near miss is a cache miss. Two substitutions have to match Leaflet's:
+//
+//   {r} is '@2x' on a retina screen — Leaflet decides by devicePixelRatio, so
+//   preloading the 1x tile on a phone warms a file the map never requests.
+//
+//   {s} is chosen per tile as subdomains[(x + y) % n], not a fixed letter.
+//   With 'abcd', a fixed 'a' warmed the right host for one tile in four.
+const RETINA_SUFFIX =
+    typeof window !== 'undefined' && window.devicePixelRatio > 1 ? '@2x' : '';
+
+function subdomainFor(x: number, y: number): string {
+    if (!MAP_SUBDOMAINS) return '';
+    return MAP_SUBDOMAINS[Math.abs(x + y) % MAP_SUBDOMAINS.length];
+}
+
 /** Fill the URL template. Providers differ in axis order, so both {x}/{y} and
  * the ArcGIS {z}/{y}/{x} form work from the same template. */
 function tileUrl(z: number, x: number, y: number): string {
     return MAP_TILE_URL
-        .replace('{s}', 'a')
+        .replace('{s}', subdomainFor(x, y))
         .replace('{z}', String(z))
         .replace('{x}', String(x))
         .replace('{y}', String(y))
-        .replace('{r}', '');
+        .replace('{r}', RETINA_SUFFIX);
 }
 
 function campusTileUrls(): string[] {
     const urls: string[] = [];
-    for (let z = MIN_ZOOM; z <= MAP_MAX_NATIVE_ZOOM; z++) {
+    for (let z = MIN_ZOOM; z <= PRELOAD_MAX_ZOOM; z++) {
         const { x0, x1, y0, y1 } = tileRange(z);
         for (let x = x0; x <= x1; x++) {
             for (let y = y0; y <= y1; y++) urls.push(tileUrl(z, x, y));
