@@ -428,11 +428,14 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                         // the whole campus at working zooms, which is small
                         // enough to just hold.
                         keepBuffer={6}
-                        // Do not swap tiles mid-zoom. Leaflet otherwise starts
-                        // loading the new level while the old one is still on
-                        // screen, and the half-loaded level is the worst of the
-                        // flashing.
-                        updateWhenZooming={false}
+                        // updateWhenZooming is deliberately left on. Turning it
+                        // off stops the layer loading the new level during a
+                        // zoom, so Leaflet stretches the old tiles to fill —
+                        // measured at 256px scaled to 909 — while the markers
+                        // move to their true projected positions. The stops
+                        // then visibly slide against the map. A brief gap is
+                        // a far smaller fault than the whole basemap drifting
+                        // out from under the pins.
                         // Cross-fading tiles in is what makes a fetch visible
                         // at all. Without it a tile appears when it is ready,
                         // over a ground already the right colour.
