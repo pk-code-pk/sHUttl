@@ -42,34 +42,48 @@
   background-color: #0b0f17;
 }
 
-/* Darkening the basemap without a CSS filter.
+/* Darkening the basemap.
 
-   A filter on the tile pane forces that layer to re-rasterise on every
-   transform. During a zoom the tile layer then lags a frame or two behind the
-   marker layer, which the eye reads as the stops sliding around over the map —
-   the more so on a phone, where the fill rate is lowest and the filter chain
-   is longest. The panes are in step to the pixel when measured after the
-   animation, so this only ever showed up in motion.
-   
-   A flat overlay costs the compositor nothing and cannot desync, because it is
-   not attached to the panes at all. It loses the desaturation the filter also
-   did, which the muted route palette no longer needs. */
-.map-dim {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  /* Above the tiles (200) and below the routes and markers (400+), so it
-     darkens the basemap alone. */
-  z-index: 250;
-  /* Tuned to land where brightness(0.6) did. Alpha compositing over a mid
-     grey is not the same curve as a brightness multiply, so this is higher
-     than the filter's figure would suggest. */
-  background: rgba(7, 11, 18, 0.62);
+   Esri's Dark Gray Canvas is still too light against crimson chrome and the
+   route colours, so the tiles are dimmed and desaturated in place.
+
+   Two earlier attempts are worth not repeating. A `filter` on
+   `.leaflet-tile-pane` was blamed for stops sliding during zoom and removed;
+   the sliding had a different cause (see the marker-container note below) and
+   came back without it. It was replaced by a full-container overlay div at
+   z-index 250, on the reasoning that it would sit above the tile pane (200)
+   and below markers (600) — but those panes are children of
+   `.leaflet-map-pane`, which is itself z-index 400, so the overlay painted
+   behind the entire map and darkened nothing at all.
+
+   Filtering the tile images themselves avoids both traps. Each tile is an
+   independent `img`, so there is no pane-level stacking context, nothing for
+   the marker layer to be measured against, and no iOS compositing path that
+   drops a filter applied to a transformed pane. Measured at 1 px of
+   marker-to-tile slip through a zoom, the same as an unstyled Leaflet map. */
+.leaflet-tile {
+  filter: brightness(0.62) saturate(0.72);
 }
+/* Leaflet positions marker icons itself, with `position: absolute` and a
+   translate3d per marker. These container classes are handed to L.divIcon as
+   the icon's className, so a `position` declared here lands on the same
+   element and — at equal specificity, from a stylesheet imported after
+   Leaflet's — wins.
 
-/* Stop Marker Hitbox - large clickable area */
+   `position: relative` was set here to make the container a containing block
+   for the absolutely-positioned dot inside it. It did that, and also dropped
+   every marker into normal flow: the marker pane stopped being a zero-sized
+   anchor at the map origin and became a real 14x336 box, which moved its
+   transform-origin from `0 0` to its own centre. During a zoom the pane then
+   scaled about a different point than the tile layer did, and the stops slid
+   across the basemap — measured at 112 px on one wheel notch, against 0-1 px
+   for the same map with Leaflet's own positioning left alone.
+
+   Leaflet's `position: absolute` is a containing block just as well, so the
+   dot still centres. Do not set `position` on these three classes. */
+
+/* Stop marker hitbox: a large, easily tapped square around a small dot. */
 .stop-marker-container {
-  position: relative;
   width: 28px;
   height: 28px;
   cursor: pointer;
@@ -152,7 +166,6 @@
 
 /* User location marker (blue pulsing dot) */
 .user-location-container {
-  position: relative;
   width: 24px;
   height: 24px;
   cursor: pointer;
@@ -295,7 +308,6 @@ body {
 /* Trip segment polyline pulsing animation */
 /* Trip endpoint markers (bright white with radar glow) */
 .trip-endpoint-container {
-  position: relative;
   width: 40px;
   height: 40px;
   cursor: pointer;
@@ -359,4 +371,27 @@ body {
 
 .trip-endpoint-container:hover .trip-endpoint-dot {
   transform: translate(-50%, -50%) scale(1.2);
+}
+/* Leaflet's attribution ships as near-white on a light ground. On a dark map
+   it was the brightest element on the screen, brighter than the crimson
+   chrome and the routes, sitting in the corner where nothing should draw the
+   eye. Attribution has to stay legible and the links clickable, so this dims
+   rather than hides it. */
+.leaflet-control-attribution {
+  background: rgba(10, 10, 10, 0.72) !important;
+  backdrop-filter: blur(6px);
+  border-top-left-radius: 6px;
+  color: rgba(255, 255, 255, 0.35) !important;
+  font-size: 10px !important;
+  padding: 2px 6px !important;
+}
+.leaflet-control-attribution a {
+  color: rgba(255, 255, 255, 0.55) !important;
+}
+.leaflet-control-attribution a:hover {
+  color: rgba(255, 255, 255, 0.85) !important;
+}
+/* Leaflet's inline flag/logo SVG carries its own colours. */
+.leaflet-control-attribution svg {
+  opacity: 0.45;
 }

@@ -58,9 +58,15 @@ export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
                     />
                 </div>
 
-                {/* Developer Footer - hidden on mobile bottom sheet mode to save space, visible on desktop */}
-                <div className="hidden md:block fixed bottom-2 left-1/2 -translate-x-1/2 pointer-events-none">
-                    <p className="pointer-events-auto bg-black/40 backdrop-blur-sm px-2 py-1 rounded text-[10px] text-white/50 font-medium">
+                {/* Byline. Desktop only — the mobile sheet needs the room.
+
+                    It used to be a chip, on its own dark ground with its own
+                    corner radius, sitting a few pixels under the control row
+                    and reading as a fourth button in it. A byline is the
+                    quietest thing on the screen, so it is set as plain text
+                    with no surface of its own. */}
+                <div className="pointer-events-none fixed bottom-2 left-1/2 hidden -translate-x-1/2 md:block">
+                    <p className="text-[10px] font-medium text-white/35">
                         Developed by Praneel Khiantani
                     </p>
                 </div>

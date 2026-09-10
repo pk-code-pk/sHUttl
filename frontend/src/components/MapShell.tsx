@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MapContainer, TileLayer, Popup, Polyline, useMap, Marker } from 'react-leaflet';
-import { Navigation as NavigationIcon, Settings } from 'lucide-react';
+import { Navigation as NavigationIcon, Settings, X } from 'lucide-react';
 import clsx from 'clsx';
 import L from 'leaflet';
 import type { LatLngExpression } from 'leaflet';
@@ -8,6 +8,22 @@ import { ShuttleMarker } from './ShuttleMarker';
 import { buttonVariants, cn } from './ui/styles';
 import type { Stop, Vehicle, RoutePath, TripResponse, TripSegment } from './types';
 import { API_BASE_URL, MAP_ATTRIBUTION, MAP_MAX_NATIVE_ZOOM, MAP_MAX_ZOOM, MAP_SUBDOMAINS, MAP_TILE_URL } from '@/config';
+
+/** The read-only status pill, shared by the mobile top bar and the desktop
+ * bottom bar. They had drifted to different grounds, paddings and text sizes
+ * while saying the same thing. It is not a Button — nothing here is
+ * clickable — so it carries the `overlay` variant's surface by hand. */
+const STATUS_PILL =
+    'flex h-9 items-center justify-center rounded-full border border-white/10 ' +
+    'bg-neutral-900/85 px-3.5 text-[11px] font-medium leading-none text-neutral-300 ' +
+    'shadow-lg backdrop-blur-md';
+
+/** "1 bus", "2 buses", "0 buses".
+ *
+ * The two status pills said "1 bus" on mobile and "1 vehicles" on desktop:
+ * different nouns for the same number, and each wrong on one side of one.
+ * One helper so both read the same and neither can drift again. */
+const busCount = (n: number) => `${n} ${n === 1 ? 'bus' : 'buses'}`;
 
 // Fallback color palette for routes without a defined color
 const FALLBACK_ROUTE_COLORS = [
@@ -417,10 +433,6 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
 
                     {/* Basemap. Provider is configurable; see config.ts for why
                         the CARTO URL that used to be hardcoded here had to go. */}
-                    {/* Darkens the basemap. A div rather than a filter on the
-                        tile pane — see .map-dim. */}
-                    <div className="map-dim" />
-
                     <TileLayer
                         attribution={MAP_ATTRIBUTION}
                         url={MAP_TILE_URL}
@@ -566,11 +578,11 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                 pointer-events-none
             ">
                 {/* Left: Status Pill */}
-                <div className="justify-self-start pointer-events-auto h-9 rounded-full bg-black/60 backdrop-blur-md px-3 py-1.5 text-[10px] font-medium leading-none text-neutral-300 border border-white/10 shadow-lg flex items-center justify-center min-w-[32px]">
+                <div className={cn(STATUS_PILL, 'justify-self-start pointer-events-auto min-w-[32px]')}>
                     {systemId
                         ? loading
-                            ? '...'
-                            : <span className="whitespace-nowrap">{stops.length} stops • {vehicles.length} bus</span>
+                            ? '…'
+                            : <span className="whitespace-nowrap">{stops.length} stops • {busCount(vehicles.length)}</span>
                         : 'Select system'}
                 </div>
 
@@ -596,13 +608,11 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                             type="button"
                             data-route-settings-trigger
                             onClick={handleRouteSettingsClick}
-                            className={clsx(
-                                'rounded-full w-9 h-9 flex items-center justify-center shadow-xl backdrop-blur-md border active:scale-95 transition-all',
-                                showRouteSettings
-                                    ? 'bg-crimson/25 border-crimson/60 text-white'
-                                    : 'bg-neutral-900/90 border-white/10 text-neutral-300 hover:bg-neutral-800'
-                            )}
-                            aria-label="Route settings"
+                            className={buttonVariants({
+                                variant: showRouteSettings ? 'selected' : 'overlay',
+                                size: 'icon',
+                            })}
+                            aria-label="Filter routes"
                         >
                             <Settings size={14} />
                         </button>
@@ -613,12 +623,9 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                 <button
                     type="button"
                     onClick={() => setShowRoutes((prev) => !prev)}
-                    className={clsx(
-                        'justify-self-end pointer-events-auto min-w-[32px]',
+                    className={cn(
                         buttonVariants({ variant: showRoutes ? 'selected' : 'overlay', size: 'md' }),
-                        showRoutes
-                            ? 'border-crimson/60 bg-crimson/25 text-white'
-                            : 'border-white/10 bg-black/60 text-neutral-300 hover:border-white/20'
+                        'justify-self-end pointer-events-auto min-w-[32px]',
                     )}
                 >
                     {showRoutes ? 'Hide Routes' : 'Show Routes'}
@@ -633,20 +640,15 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                     <button
                         type="button"
                         onClick={() => setShowRoutes((prev) => !prev)}
-                        className={[
-                            'rounded-full border px-4 py-2 text-xs font-medium transition-all backdrop-blur-md shadow-lg',
-                            showRoutes
-                                ? 'border-crimson/60 bg-crimson/25 text-white'
-                                : 'border-white/10 bg-black/60 text-neutral-300 hover:border-white/20',
-                        ].join(' ')}
+                        className={cn(
+                            buttonVariants({ variant: showRoutes ? 'selected' : 'overlay', size: 'md' }),
+                            'rounded-full',
+                        )}
                     >
-                        <div className="flex items-center gap-2">
-                            <div className={`h-1.5 w-1.5 rounded-full ${showRoutes ? 'bg-crimson' : 'bg-neutral-500'}`} />
-                            {showRoutes ? 'Hide Routes' : 'Show Routes'}
-                            {loadingRoutes && showRoutes && (
-                                <div className="h-3 w-3 animate-spin rounded-full border-2 border-crimson/30 border-t-crimson" />
-                            )}
-                        </div>
+                        {showRoutes ? 'Hide Routes' : 'Show Routes'}
+                        {loadingRoutes && showRoutes && (
+                            <div className="h-3 w-3 animate-spin rounded-full border-2 border-white/25 border-t-white" />
+                        )}
                     </button>
                 </div>
 
@@ -656,31 +658,34 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                         type="button"
                         data-route-settings-trigger
                         onClick={handleRouteSettingsClick}
-                        className={clsx(
-                            'rounded-full border px-3 py-2 text-xs font-medium transition-all backdrop-blur-md shadow-lg',
-                            showRouteSettings
-                                ? 'border-crimson/60 bg-crimson/25 text-white'
-                                : 'border-white/10 bg-black/60 text-neutral-300 hover:border-white/20'
+                        className={cn(
+                            buttonVariants({ variant: showRouteSettings ? 'selected' : 'overlay', size: 'md' }),
+                            'rounded-full',
                         )}
                     >
-                        <div className="flex items-center gap-2">
-                            <Settings size={12} />
-                            <span>Routes</span>
-                        </div>
+                        <Settings size={12} />
+                        {/* Named "Filter", not "Routes". It sat next to a
+                            "Show Routes" toggle doing an unrelated job, and two
+                            buttons a thumb apart called Routes and Show Routes
+                            gave no way to guess which did what. */}
+                        <span>Filter</span>
                     </button>
                 </div>
 
                 {/* Status pill */}
                 <div className="pointer-events-none order-1 md:order-3 flex flex-col items-center gap-1.5">
-                    <div className="rounded-full bg-black/60 backdrop-blur-md px-4 py-1.5 text-xs text-neutral-300 border border-white/10 shadow-lg">
+                    <div className={STATUS_PILL}>
                         {systemId
                             ? loading
                                 ? 'Loading stops…'
-                                : `${stops.length} stops • ${vehicles.length} vehicles`
+                                : `${stops.length} stops • ${busCount(vehicles.length)}`
                             : 'Select a system to begin'}
                     </div>
+                    {/* Was yellow — the app's only use of it, and a third
+                        accent beside crimson and the route colours. Crimson
+                        already means "attention" everywhere else here. */}
                     {(vehiclesError || routesError) && (
-                        <p className="text-[10px] text-yellow-500/90 font-medium bg-black/40 backdrop-blur-sm px-3 py-1 rounded-full border border-yellow-500/20 animate-pulse-subtle">
+                        <p className="animate-pulse-subtle rounded-full border border-crimson-mid/40 bg-crimson-deep/30 px-3 py-1 text-[10px] font-medium text-crimson-light backdrop-blur-sm">
                             {vehiclesError && routesError
                                 ? 'Real-time data unavailable'
                                 : vehiclesError
@@ -704,7 +709,10 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                             mapInstance.fitBounds(overviewBounds, { padding: [50, 50] });
                         }
                     }}
-                    className="hidden md:block pointer-events-auto absolute right-6 bottom-32 z-[1000] rounded-full bg-neutral-900/90 px-4 py-2 text-xs font-bold text-white shadow-xl backdrop-blur-md border border-white/10 hover:bg-neutral-800 transition-all active:scale-95"
+                    className={cn(
+                        buttonVariants({ variant: 'overlay', size: 'md' }),
+                        'pointer-events-auto absolute right-6 bottom-32 z-[1000] hidden rounded-full shadow-xl md:flex',
+                    )}
                 >
                     Recenter
                 </button>
@@ -716,14 +724,21 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                     ref={routeSettingsRef}
                     className="fixed z-[1001] top-16 left-4 right-4 md:absolute md:top-auto md:bottom-24 md:left-1/2 md:-translate-x-1/2 md:w-72 md:right-auto rounded-xl bg-black/80 backdrop-blur-xl border border-white/10 shadow-2xl p-3 max-h-[60vh] overflow-y-auto"
                 >
-                    <div className="flex items-center justify-between mb-2 px-1">
-                        <span className="text-xs font-semibold text-neutral-300">Routes</span>
+                    <div className="mb-2 flex items-center justify-between px-1">
+                        {/* Every other section label in the app is a small,
+                            bold, tracked cap line — FROM, TO, ITINERARY,
+                            DEPARTURES FROM. This one alone was sentence case at
+                            a different size and weight. */}
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-500">
+                            Filter routes
+                        </span>
                         <button
                             type="button"
                             onClick={() => setShowRouteSettings(false)}
-                            className="text-neutral-500 hover:text-neutral-300 text-xs transition-colors"
+                            aria-label="Close route filter"
+                            className={buttonVariants({ variant: 'ghost', size: 'iconSm' })}
                         >
-                            &#x2715;
+                            <X size={12} />
                         </button>
                     </div>
                     {loadingRoutes ? (
@@ -758,14 +773,26 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                                         )}>
                                             {r.route_name || r.short_name || `Route ${r.route_id}`}
                                         </span>
+                                        {/* Nine routes are on by default, so nine
+                                            switches are lit at once. A bright
+                                            crimson track and a bright crimson
+                                            knob made the panel a column of red
+                                            and drowned out the route colour dot
+                                            beside it, which is the part worth
+                                            reading. On is carried by the knob's
+                                            position and a quiet deep-crimson
+                                            track; the knob is white so it stays
+                                            the crisp part at 14px. */}
                                         <div className={clsx(
-                                            'h-5 w-9 rounded-full transition-all duration-200 flex items-center px-0.5 flex-shrink-0',
-                                            isVisible ? 'bg-crimson/30' : 'bg-neutral-700'
+                                            'flex h-5 w-9 flex-shrink-0 items-center rounded-full border px-0.5 transition-colors duration-200',
+                                            isVisible
+                                                ? 'border-crimson-mid/60 bg-crimson-deep/60'
+                                                : 'border-white/5 bg-neutral-700'
                                         )}>
                                             <div className={clsx(
-                                                'h-3.5 w-3.5 rounded-full transition-all duration-200',
+                                                'h-3.5 w-3.5 rounded-full transition-transform duration-200',
                                                 isVisible
-                                                    ? 'translate-x-[14px] bg-crimson'
+                                                    ? 'translate-x-[14px] bg-white'
                                                     : 'translate-x-0 bg-neutral-400'
                                             )} />
                                         </div>

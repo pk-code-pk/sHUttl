@@ -19,6 +19,8 @@ import { ChevronDown, Footprints, LocateFixed, MapPin, RefreshCw, TriangleAlert 
 import clsx from 'clsx';
 import { API_BASE_URL } from '@/config';
 import { describeFailure, getLocation } from '@/lib/geolocation';
+import { Alert, AlertActions, AlertContent, AlertDescription, AlertIcon } from './ui/Alert';
+import { buttonVariants, cn } from './ui/styles';
 
 interface DepartureStop {
     id: string;
@@ -227,7 +229,7 @@ export const NextBusPanel = ({ systemId, onShowOnMap }: NextBusPanelProps) => {
                     type="button"
                     onClick={() => setShowStopPicker((v) => !v)}
                     aria-label="Choose a stop manually"
-                    className="ml-auto mr-1 rounded-full bg-neutral-800/50 p-1.5 text-neutral-400 hover:bg-neutral-800 hover:text-white transition-colors"
+                    className={cn(buttonVariants({ variant: 'ghost', size: 'iconSm' }), 'ml-auto mr-1')}
                 >
                     <MapPin size={12} />
                 </button>
@@ -235,26 +237,34 @@ export const NextBusPanel = ({ systemId, onShowOnMap }: NextBusPanelProps) => {
                     type="button"
                     onClick={() => (coords ? void fetchDepartures() : locate(true))}
                     aria-label="Refresh departures"
-                    className="rounded-full bg-neutral-800/50 p-1.5 text-neutral-400 hover:bg-neutral-800 hover:text-white transition-colors"
+                    className={buttonVariants({ variant: 'ghost', size: 'iconSm' })}
                 >
                     <RefreshCw size={12} className={clsx(loading && 'animate-spin')} />
                 </button>
             </div>
 
+            {/* This was the app's only amber: an amber tint, an amber icon,
+                amber body text and an amber link, in a UI that is otherwise
+                grey with a single crimson accent. Alert already exists for
+                exactly this and carries the crimson warning treatment. */}
             {error && (
-                <div className="mb-2 flex items-start gap-2 rounded-lg bg-amber-500/10 px-2.5 py-2">
-                    <TriangleAlert size={12} className="mt-0.5 shrink-0 text-amber-400" />
-                    <div className="min-w-0">
-                        <p className="text-[10px] leading-relaxed text-amber-200">{error}</p>
-                        <button
-                            type="button"
-                            onClick={() => locate(true)}
-                            className="mt-1 text-[10px] font-bold uppercase tracking-wider text-amber-300 hover:text-amber-100"
-                        >
-                            Try again
-                        </button>
-                    </div>
-                </div>
+                <Alert variant="warning" className="mb-2">
+                    <AlertIcon>
+                        <TriangleAlert size={12} />
+                    </AlertIcon>
+                    <AlertContent>
+                        <AlertDescription>{error}</AlertDescription>
+                        <AlertActions>
+                            <button
+                                type="button"
+                                onClick={() => locate(true)}
+                                className={buttonVariants({ variant: 'secondary', size: 'sm' })}
+                            >
+                                Try again
+                            </button>
+                        </AlertActions>
+                    </AlertContent>
+                </Alert>
             )}
 
             {showStopPicker && (
@@ -296,9 +306,9 @@ export const NextBusPanel = ({ systemId, onShowOnMap }: NextBusPanelProps) => {
                         <button
                             type="button"
                             onClick={() => setShowStopPicker(true)}
-                            className="mt-2 text-[10px] font-bold uppercase tracking-wider text-crimson hover:text-white"
+                            className={cn(buttonVariants({ variant: 'secondary', size: 'sm' }), 'mt-2')}
                         >
-                            Or pick a stop
+                            Pick a stop
                         </button>
                     </div>
                 )}
