@@ -17,7 +17,7 @@
  * tiles actually on screen or with the API calls that populate the panel.
  */
 
-import { MAP_MAX_NATIVE_ZOOM, MAP_SUBDOMAINS, MAP_TILE_URL } from '@/config';
+import { MAP_MAX_NATIVE_ZOOM, MAP_MAX_ZOOM, MAP_SUBDOMAINS, MAP_TILE_URL } from '@/config';
 
 // The stops span roughly 42.363–42.382 N and -71.128 – -71.114 W. This is that
 // with enough margin to cover a pan to the edge of campus in any direction.
@@ -27,13 +27,16 @@ const BOUNDS = { south: 42.356, west: -71.135, north: 42.389, east: -71.105 };
 // practice.
 const MIN_ZOOM = 12;
 
-// Deepest level to warm. Tile count quadruples per level: the campus box is
-// ~80 tiles through z16 and ~660 at z18 alone, and retina tiles are four
-// times the bytes. z16 is the working zoom for the overview and every trip
-// fit (MapController caps fits there), so it is where a blank tile would
-// actually be seen. Past it the provider's CDN serves on demand and
-// keepBuffer holds what has been fetched.
-const PRELOAD_MAX_ZOOM = Math.min(16, MAP_MAX_NATIVE_ZOOM);
+// Deepest level to warm: everything the map can be zoomed to. Tile count
+// quadruples per level — ~80 tiles through z16, ~165 at z17, ~660 at z18 —
+// so the full set is ~900 tiles, about 10 MB at 1x and ~25 MB with retina
+// tiles. That is the price of a map that never shows a loading tile at any
+// zoom, and for a campus-sized area it is a one-time cost the provider then
+// caches for 180 days. Skipped past z16 when the browser reports the user
+// asked to save data.
+const saveData = typeof navigator !== 'undefined'
+    && (navigator as Navigator & { connection?: { saveData?: boolean } }).connection?.saveData === true;
+const PRELOAD_MAX_ZOOM = Math.min(saveData ? 16 : MAP_MAX_ZOOM, MAP_MAX_NATIVE_ZOOM);
 
 // Enough to be quick without saturating the connection the visible tiles and
 // the API are sharing.

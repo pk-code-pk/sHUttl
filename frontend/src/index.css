@@ -206,6 +206,48 @@
    this used to sit in cost most of the marker's area to chrome and made the
    arrow too small to read a heading from; the arrow now carries its own dark
    outline instead. Colour and shading are set per marker in mapUtils. */
+/* The lit outline around each bus, traced along the arrowhead. Three strokes
+   of the arrow path drawn under the arrow itself, so its dark outline stays
+   the crisp edge. Widths are in the SVG's 64-unit space (1 unit = 0.5px at
+   the 32px marker). The glow stroke sits under everything and is blurred
+   into softness; the track is the full perimeter, dim; the sweep is one
+   bright dash travelling round it. Animation is on stroke-dashoffset only —
+   no layout, no repaint of anything but this path — and there are at most
+   ten buses on screen. */
+.vehicle-marker-glow,
+.vehicle-marker-track,
+.vehicle-marker-sweep {
+  /* Not the route colour itself — a light tinted toward it. White at 70 %
+     keeps it reading as light on the arrow rather than a neon copy of the
+     arrow, while still telling the routes apart at a glance. */
+  --tint: color-mix(in srgb, #ffffff 70%, var(--route));
+  fill: none;
+  stroke: var(--tint);
+  stroke-linejoin: round;
+}
+.vehicle-marker-glow {
+  stroke-width: 14;
+  opacity: 0.22;
+  filter: blur(3px);
+}
+.vehicle-marker-track {
+  stroke-width: 8;
+  opacity: 0.28;
+}
+.vehicle-marker-sweep {
+  stroke-width: 8;
+  stroke-linecap: round;
+  stroke-dasharray: 40 100.4;
+  opacity: 0.85;
+  animation: vehicle-sweep 2.4s linear infinite;
+}
+@keyframes vehicle-sweep {
+  to { stroke-dashoffset: -140.4; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .vehicle-marker-sweep { animation: none; }
+}
+
 .vehicle-marker-inner {
   display: flex;
   align-items: center;
@@ -397,22 +439,4 @@ body {
 /* Leaflet's inline flag/logo SVG carries its own colours. */
 .leaflet-control-attribution svg {
   opacity: 0.45;
-}
-
-/* Routes during a zoom.
-
-   Leaflet animates a zoom by CSS-scaling the whole overlay pane for 250 ms
-   and then redrawing at the new zoom. Strokes scale with it, so every route
-   line fattens to double width and snaps back — on every notch of the wheel.
-   The strokes cannot be held constant while the pane is being transformed
-   (vector-effect does not see a CSS transform on the SVG root), so the choice
-   is stretch or hide. Hide, as a fade: the lines drop out over the first
-   frames of the zoom and return once the pane has settled. The markers are
-   left alone — they translate correctly through the animation, measured. */
-.leaflet-overlay-pane {
-  transition: opacity 180ms ease-out;
-}
-.leaflet-zoom-anim .leaflet-overlay-pane {
-  opacity: 0;
-  transition: opacity 80ms ease-in;
 }

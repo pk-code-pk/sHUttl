@@ -77,7 +77,9 @@ const MAP_MAX_NATIVE_ZOOM = Number(
 // enough to separate stop pairs ~30 m apart (Barry's Corner northbound and
 // southbound are unclickable at z16) while stopping before the blur gets
 // embarrassing.
-const MAP_MAX_ZOOM = Number(import.meta.env.VITE_MAP_MAX_ZOOM ?? (usingCarto ? 19 : 18))
+// 18, not the provider's 20: every zoomable level is preloaded so no tile
+// ever loads on screen, and z19 alone is ~2,600 tiles for the campus box.
+const MAP_MAX_ZOOM = Number(import.meta.env.VITE_MAP_MAX_ZOOM ?? 18)
 
 // Only OSM-lineage URLs use {s}; passing subdomains to a provider that does
 // not expect them produces broken requests.

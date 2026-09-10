@@ -641,26 +641,28 @@ def _pick_project(payload: dict) -> dict:
 # into the basemap, which is the mistake Harvard's own palette makes. The
 # within-family steps stay above it, so the darkest blue is still legible.
 ROUTE_COLOR_OVERRIDES = {
-    # Colours that sit with crimson on a charcoal map: the accent itself for
-    # the flagship route, then cream, tan, teal, navy, forest, olive and warm
-    # grey around it. Grouped by corridor so routes that share a road share a
-    # family, and a rider learns "warm = Allston, cool = Quad" without a
-    # legend.
+    # Colours that sit with crimson on a charcoal map, grouped by corridor so
+    # routes that share a road share a family: warm = Allston, cool = Quad.
     #
-    # Two liberties with the reference palette, both for legibility on a dark
-    # ground: the crimson is lifted from the UI token so a 5px line reads at
-    # full strength, and "navy" is a steel blue — true navy is charcoal on
-    # charcoal.
+    # AL is the route most riders take most often, so it gets the UI's own
+    # crimson — the mid tone from the frontend's token set, the same hairline
+    # that outlines an expanded departure — rather than a lifted version of
+    # it. The rest are pitched to the same depth so nothing on the map is
+    # brighter than the accent. Legibility on the dark ground comes from the
+    # dark outline on each arrow and the lit ring around it, not from the
+    # fill; a 4px line at this depth still reads because the basemap is
+    # near-black.
     #
-    # Across the river to Allston. AL is the route most riders take most
-    # often, so it gets the app's own colour.
-    "AL": "#C93B50", "XSEC": "#EADFC8", "QSTA": "#C8A576",
+    # "Navy" is a steel blue: true navy is charcoal on charcoal.
+    #
+    # Across the river to Allston.
+    "AL": "#A5233A", "XSEC": "#CFC2A6", "QSTA": "#A8875C",
     # North to the Quad.
-    "QE": "#3EA69F", "QSEC": "#83CBC4", "QYE": "#6C8CB5",
+    "QE": "#2F857F", "QSEC": "#5FA8A1", "QYE": "#52708F",
     # Cambridge and the river houses.
-    "AC": "#5B9A67", "ME": "#A3AB5F",
+    "AC": "#457A50", "ME": "#858C47",
     # Runs when nothing else does.
-    "OVNT": "#A19A8E",
+    "OVNT": "#7F796F",
 }
 
 

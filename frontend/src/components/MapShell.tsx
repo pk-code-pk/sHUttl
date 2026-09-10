@@ -98,18 +98,29 @@ function MapController({
     activeTripBounds,
     tripKey,
     setMap,
+    onZoom,
 }: {
     systemId: number | null;
     systemBounds: L.LatLngBounds | null;
     activeTripBounds: L.LatLngBounds | null;
     tripKey: string | null;
     setMap: (map: L.Map) => void;
+    onZoom: (zoom: number) => void;
 }) {
     const map = useMap();
 
     useEffect(() => {
         if (map) setMap(map);
     }, [map, setMap]);
+
+    // Report the zoom so line weights can follow it (see routeWeight).
+    useEffect(() => {
+        if (!map) return;
+        const report = () => onZoom(map.getZoom());
+        report();
+        map.on('zoomend', report);
+        return () => { map.off('zoomend', report); };
+    }, [map, onZoom]);
 
     // The bottom sheet covers roughly the lower 45% of the screen on mobile,
     // and Leaflet fits to the whole container — so a symmetric fit puts the
@@ -224,6 +235,20 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
     // rider asked for last.
     const activeTripBounds = tripBounds ?? focusRouteBounds;
     const [mapInstance, setMapInstance] = useState<L.Map | null>(null);
+    const [zoom, setZoom] = useState(15);
+
+    // Line weight follows zoom. Leaflet animates a zoom by CSS-scaling the
+    // overlay pane, so a 4px line is already 8px on screen by the end of a
+    // one-level zoom in — the map grew and the line grew with it. If it then
+    // redraws at 4px it visibly snaps thin; if it redraws at 8px the
+    // animation lands exactly where it was heading and nothing pops. So the
+    // weight doubles per level around z16, the working zoom. Clamped so it
+    // stays a line at either extreme; the clamp is the only place a snap can
+    // still occur, at the ends of the zoom range, where it is small.
+    const routeWeight = useCallback(
+        (base: number) => Math.min(base * 2.2, Math.max(base * 0.5, base * 2 ** (zoom - 16))),
+        [zoom],
+    );
 
     // Stop Icon with larger hitbox (white default)
     const stopIcon = useMemo(() => L.divIcon({
@@ -462,6 +487,14 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
                     className="h-full w-full bg-neutral-900"
                     scrollWheelZoom={true}
                     zoomControl={false}
+                    // Cached tiles still fade in from transparent over 200 ms
+                    // by default, which looks like a network load on every
+                    // zoom even when nothing was fetched — measured: 30 tiles
+                    // per zoom step, all from cache, 0 bytes, and still a
+                    // visible fade. With the campus preloaded there is nothing
+                    // to hide behind a fade, so tiles appear the instant they
+                    // are placed.
+                    fadeAnimation={false}
                 >
                     <MapController
                         systemId={systemId}
@@ -469,6 +502,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
                         activeTripBounds={activeTripBounds}
                         tripKey={tripKey}
                         setMap={setMapInstance}
+                        onZoom={setZoom}
                     />
 
                     {/* Basemap. Provider is configurable; see config.ts for why
@@ -562,7 +596,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
                                 <Polyline
                                     key={r.route_id}
                                     positions={positions}
-                                    pathOptions={{ color, weight, opacity }}
+                                    pathOptions={{ color, weight: routeWeight(weight), opacity }}
                                 />
                             );
                         })}
@@ -577,7 +611,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
                             positions={line.positions}
                             pathOptions={{
                                 color: line.color,
-                                weight: 6,
+                                weight: routeWeight(6),
                                 opacity: 1,
                             }}
                         />
