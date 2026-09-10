@@ -652,12 +652,12 @@ ROUTE_COLOR_OVERRIDES = {
     # basemap is near-black; the arrows carry a dark outline for the same
     # reason.
     #
-    # "Navy" is a steel blue: true navy is charcoal on charcoal.
-    #
     # Across the river to Allston.
     "AL": "#A5233A", "XSEC": "#CFC2A6", "QSTA": "#A8875C",
-    # North to the Quad.
-    "QE": "#2F857F", "QSEC": "#5FA8A1", "QYE": "#52708F",
+    # North to the Quad. No blues: Dark Matter draws its roads slate-blue
+    # and its water blue, so a blue route sits in the basemap's own range and
+    # vanishes. Plum reads as a third family beside the warm and green ones.
+    "QE": "#8B63AE", "QSEC": "#B08CCB", "QYE": "#66478A",
     # Cambridge and the river houses.
     "AC": "#457A50", "ME": "#858C47",
     # Runs when nothing else does.

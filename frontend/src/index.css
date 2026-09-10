@@ -152,22 +152,24 @@
   height: 12px;
   transform: translate(-50%, -50%);
   border-radius: 9999px;
-  background: #3b82f6;
+  /* Crimson, not the conventional blue: the basemap's roads and water are
+     blue, and a blue you-are-here dot disappeared into them. */
+  background: var(--color-crimson-light);
   border: 2px solid #ffffff;
-  box-shadow: 0 0 10px rgba(59, 130, 246, 0.8), 0 0 24px rgba(59, 130, 246, 0.4);
-  animation: pulse-blue 2s ease-in-out infinite;
+  box-shadow: 0 0 10px rgba(212, 115, 127, 0.8), 0 0 24px rgba(212, 115, 127, 0.4);
+  animation: pulse-here 2s ease-in-out infinite;
 }
 
-@keyframes pulse-blue {
+@keyframes pulse-here {
 
   0%,
   100% {
-    box-shadow: 0 0 10px rgba(59, 130, 246, 0.8), 0 0 24px rgba(59, 130, 246, 0.4);
+    box-shadow: 0 0 10px rgba(212, 115, 127, 0.8), 0 0 24px rgba(212, 115, 127, 0.4);
     transform: translate(-50%, -50%) scale(1);
   }
 
   50% {
-    box-shadow: 0 0 16px rgba(59, 130, 246, 1), 0 0 36px rgba(59, 130, 246, 0.6);
+    box-shadow: 0 0 16px rgba(212, 115, 127, 1), 0 0 36px rgba(212, 115, 127, 0.6);
     transform: translate(-50%, -50%) scale(1.1);
   }
 }
@@ -388,8 +390,8 @@ body {
 .maplibregl-popup-anchor-left .maplibregl-popup-tip { border-right-color: rgba(23, 23, 23, 0.96); }
 .maplibregl-popup-anchor-right .maplibregl-popup-tip { border-left-color: rgba(23, 23, 23, 0.96); }
 
-/* Little pointer under a vehicle label. */
-.vehicle-label-tip {
+/* Pointer under a map card. */
+.map-card-tip {
   position: absolute;
   left: 50%;
   top: 100%;

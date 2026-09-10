@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { Marker, type MarkerInstance } from "react-map-gl/maplibre";
-import { ARROW_PATH, NEUTRAL_ROUTE_COLOR, bearingDeg, lerp, textOnRouteColor } from "./mapUtils";
+import { ARROW_PATH, NEUTRAL_ROUTE_COLOR, bearingDeg, lerp } from "./mapUtils";
 import type { Vehicle } from "./types";
 
 /** Ease in and out. A vehicle that starts and stops abruptly reads as a
@@ -32,6 +32,8 @@ const SIZE = 40;
  */
 export function ShuttleMarker({
     v,
+    selected = false,
+    onSelect,
     // Matched to the vehicle poll interval, not shorter than it. At 1.2s
     // against a 3s poll the bus lurched to its new position and then sat
     // still for two seconds; spending the whole interval in motion is what
@@ -40,22 +42,13 @@ export function ShuttleMarker({
 }: {
     v: Vehicle & { lat: number; lng: number };
     durationMs?: number;
+    selected?: boolean;
+    /** Tap handler. Hands back a live position reader so the card that opens
+     * can follow the marker mid-glide; MapShell owns the card. */
+    onSelect?: (v: Vehicle, getLngLat: () => { lng: number; lat: number } | null) => void;
 }) {
     const markerRef = useRef<MarkerInstance>(null);
     const innerRef = useRef<HTMLDivElement>(null);
-    // Tap a bus to learn which one it is. The label is a child of the marker
-    // element rather than a map popup, so it rides along with the animated
-    // position for free and needs no binding to the map. Closes on a tap
-    // anywhere else.
-    const [open, setOpen] = useState(false);
-    const rootRef = useRef<HTMLDivElement>(null);
-    useEffect(() => {
-        if (!open) return;
-        const away = (e: PointerEvent) => { if (!rootRef.current?.contains(e.target as Node)) setOpen(false); };
-        document.addEventListener('pointerdown', away, true);
-        return () => document.removeEventListener('pointerdown', away, true);
-    }, [open]);
-
     const prevPosRef = useRef<[number, number] | null>(null);
     const rafRef = useRef<number | null>(null);
     // Unwrapped heading: kept as a continuous value rather than 0-360 so that
@@ -110,55 +103,33 @@ export function ShuttleMarker({
 
     const color = v.color || NEUTRAL_ROUTE_COLOR;
 
-    const code = v.route_id ? String(v.route_id) : '';
-    const name = v.route_name || code || 'Unknown route';
-
     return (
-        <Marker ref={markerRef} longitude={v.lng} latitude={v.lat} anchor="center" style={{ zIndex: open ? 20 : 10 }}>
-            <div ref={rootRef} className="relative" style={{ width: SIZE, height: SIZE }}>
-                <button
-                    type="button"
-                    aria-label={`${name}, shuttle ${v.id}`}
-                    aria-expanded={open}
-                    onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}
-                    className="block h-full w-full cursor-pointer bg-transparent p-0"
+        <Marker ref={markerRef} longitude={v.lng} latitude={v.lat} anchor="center" style={{ zIndex: selected ? 20 : 10 }}>
+            <button
+                type="button"
+                aria-label={`${v.route_name || v.route_id || 'Shuttle'}, shuttle ${v.id}`}
+                aria-pressed={selected}
+                onClick={(e) => { e.stopPropagation(); onSelect?.(v, () => markerRef.current?.getLngLat() ?? null); }}
+                className="block cursor-pointer bg-transparent p-0"
+                style={{ width: SIZE, height: SIZE }}
+            >
+                <div
+                    ref={innerRef}
+                    className="vehicle-marker-inner"
+                    style={{ width: SIZE, height: SIZE, transformOrigin: '50% 50%' }}
                 >
-                    <div
-                        ref={innerRef}
-                        className="vehicle-marker-inner"
-                        style={{ width: SIZE, height: SIZE, transformOrigin: '50% 50%' }}
-                    >
-                        <svg width={SIZE} height={SIZE} viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
-                            <path
-                                d={ARROW_PATH}
-                                fill={color}
-                                stroke="#0b0f17"
-                                strokeWidth={5}
-                                strokeLinejoin="round"
-                                paintOrder="stroke"
-                            />
-                        </svg>
-                    </div>
-                </button>
-
-                {open && (
-                    <div
-                        role="tooltip"
-                        className="vehicle-label absolute left-1/2 bottom-full mb-2 -translate-x-1/2 whitespace-nowrap rounded-xl border border-white/10 bg-neutral-900/95 px-3 py-2 text-sm shadow-2xl backdrop-blur-md"
-                    >
-                        <div className="flex items-center gap-2">
-                            {code && (
-                                <span className="rounded-md px-1.5 py-0.5 text-[10px] font-black" style={{ backgroundColor: color, color: textOnRouteColor(v.color) }}>
-                                    {code}
-                                </span>
-                            )}
-                            <span className="font-semibold text-white">{name}</span>
-                        </div>
-                        <div className="mt-0.5 text-xs text-neutral-400">Shuttle #{String(v.id)}</div>
-                        <div className="vehicle-label-tip" />
-                    </div>
-                )}
-            </div>
+                    <svg width={SIZE} height={SIZE} viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+                        <path
+                            d={ARROW_PATH}
+                            fill={color}
+                            stroke="#0b0f17"
+                            strokeWidth={5}
+                            strokeLinejoin="round"
+                            paintOrder="stroke"
+                        />
+                    </svg>
+                </div>
+            </button>
         </Marker>
     );
 }

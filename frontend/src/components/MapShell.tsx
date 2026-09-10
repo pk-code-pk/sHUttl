@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import Map, { Layer, Marker, Popup, Source, type MapRef } from 'react-map-gl/maplibre';
+import Map, { Layer, Marker, Source, type MapRef } from 'react-map-gl/maplibre';
+import { MapCard } from './MapCard';
 import type { LngLatBoundsLike } from 'maplibre-gl';
 import { Moon, Navigation as NavigationIcon, Route as RouteIcon, Settings, Sun, X } from 'lucide-react';
 import clsx from 'clsx';
 import { ShuttleMarker } from './ShuttleMarker';
 import { buttonVariants, cn } from './ui/styles';
-import { NEUTRAL_ROUTE_COLOR, bboxOf, relativeLuminance } from './mapUtils';
+import { NEUTRAL_ROUTE_COLOR, bboxOf, relativeLuminance, textOnRouteColor } from './mapUtils';
 import type { Stop, Vehicle, RoutePath, TripResponse, TripSegment } from './types';
 import { API_BASE_URL, MAP_MAX_ZOOM, MAP_MIN_ZOOM, MAP_STYLE_DARK, MAP_STYLE_LIGHT } from '@/config';
 
@@ -23,7 +24,8 @@ const STATUS_PILL =
 const busCount = (n: number) => `${n} ${n === 1 ? 'bus' : 'buses'}`;
 
 // Fallback palette for trip segments whose route carries no colour.
-const FALLBACK_ROUTE_COLORS = ['#ef4444', '#22c55e', '#3b82f6', '#f59e0b', '#a855f7', '#14b8a6', '#f97316', '#ec4899'];
+// No blues: the basemap's roads and water are. See ROUTE_COLOR_OVERRIDES.
+const FALLBACK_ROUTE_COLORS = ['#A5233A', '#457A50', '#8B63AE', '#A8875C', '#858C47', '#CFC2A6', '#66478A', '#9C9488'];
 
 type Bbox = [number, number, number, number];
 
@@ -95,6 +97,11 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
     const [routeVisibility, setRouteVisibility] = useState<Record<string, boolean>>({});
     const [showRouteSettings, setShowRouteSettings] = useState(false);
     const [selectedStop, setSelectedStop] = useState<Stop | null>(null);
+    // A tapped bus: the vehicle plus a live reader of its marker position.
+    const [selectedVehicle, setSelectedVehicle] = useState<{ v: Vehicle; getLngLat: () => { lng: number; lat: number } | null } | null>(null);
+    const closeCards = useCallback(() => { setSelectedStop(null); setSelectedVehicle(null); }, []);
+    const stopLngLat = useCallback(() => (selectedStop ? { lng: selectedStop.lng, lat: selectedStop.lat } : null), [selectedStop]);
+    const vehicleLngLat = useCallback(() => selectedVehicle?.getLngLat() ?? null, [selectedVehicle]);
     const routeSettingsRef = useRef<HTMLDivElement>(null);
 
     // Basemap ground: dark by default, light on request. Only the style
@@ -418,7 +425,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
                                 latitude={stop.lat}
                                 anchor="center"
                                 style={{ zIndex: isTripStop ? 5 : 1 }}
-                                onClick={(e) => { e.originalEvent.stopPropagation(); setSelectedStop(stop); }}
+                                onClick={(e) => { e.originalEvent.stopPropagation(); setSelectedVehicle(null); setSelectedStop(stop); }}
                             >
                                 {isTripStop
                                     ? <div className="trip-endpoint-container"><div className="trip-endpoint-dot" /></div>
@@ -426,22 +433,6 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
                             </Marker>
                         );
                     })}
-
-                    {selectedStop && (
-                        <Popup
-                            longitude={selectedStop.lng}
-                            latitude={selectedStop.lat}
-                            anchor="bottom"
-                            offset={14}
-                            closeButton={false}
-                            onClose={() => setSelectedStop(null)}
-                        >
-                            <div className="text-sm">
-                                <div className="font-semibold text-white">{selectedStop.name}</div>
-                                <div className="text-xs text-neutral-400">Stop ID: {selectedStop.id}</div>
-                            </div>
-                        </Popup>
-                    )}
 
                     {userLocation && (
                         <Marker longitude={userLocation.lng} latitude={userLocation.lat} anchor="center" style={{ zIndex: 6 }}>
@@ -451,13 +442,51 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
 
                     {vehicles
                         .filter((v): v is Vehicle & { lat: number; lng: number } => typeof v.lat === 'number' && typeof v.lng === 'number')
-                        .map((v) => <ShuttleMarker key={v.id} v={v} durationMs={3000} />)}
+                        .map((v) => (
+                            <ShuttleMarker
+                                key={v.id}
+                                v={v}
+                                durationMs={3000}
+                                selected={selectedVehicle?.v.id === v.id}
+                                onSelect={(veh, getLngLat) => {
+                                    setSelectedStop(null);
+                                    setSelectedVehicle((cur) => (cur?.v.id === veh.id ? null : { v: veh, getLngLat }));
+                                }}
+                            />
+                        ))}
                 </Map>
             ) : (
                 <div className="flex h-full w-full items-center justify-center text-neutral-400">
                     Select a system to view map
                 </div>
             )}
+
+            {/* Cards for a tapped stop or bus. Portalled above the panel and
+                every control — see MapCard for why they cannot live inside
+                the map. */}
+            {selectedStop && (
+                <MapCard mapRef={mapRef} getLngLat={stopLngLat} onClose={closeCards}>
+                    <div className="font-semibold text-white">{selectedStop.name}</div>
+                    <div className="text-xs text-neutral-400">Stop ID: {selectedStop.id}</div>
+                </MapCard>
+            )}
+            {selectedVehicle && (() => {
+                const v = selectedVehicle.v;
+                const code = v.route_id ? String(v.route_id) : '';
+                const name = v.route_name || code || 'Unknown route';
+                const color = v.color || NEUTRAL_ROUTE_COLOR;
+                return (
+                    <MapCard mapRef={mapRef} getLngLat={vehicleLngLat} onClose={closeCards}>
+                        <div className="flex items-center gap-2">
+                            {code && (
+                                <span className="rounded-md px-1.5 py-0.5 text-[10px] font-black" style={{ backgroundColor: color, color: textOnRouteColor(v.color) }}>{code}</span>
+                            )}
+                            <span className="font-semibold text-white">{name}</span>
+                        </div>
+                        <div className="mt-0.5 text-xs text-neutral-400">Shuttle #{String(v.id)}</div>
+                    </MapCard>
+                );
+            })()}
 
             {/* 1. Mobile Top Bar (hidden on desktop) */}
             <div className="md:hidden fixed top-4 inset-x-4 z-[1000] grid grid-cols-[1fr_auto_1fr] items-center pointer-events-none">

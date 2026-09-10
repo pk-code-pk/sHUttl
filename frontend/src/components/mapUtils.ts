@@ -43,7 +43,7 @@ export function relativeLuminance(color: string | null | undefined): number | nu
 export const ARROW_PATH = 'M32 9 L53 51 L32 41 L11 51 Z';
 
 /** Fallback when a route carries no colour: the app's grey, not a random hue. */
-export const NEUTRAL_ROUTE_COLOR = '#93a3b5';
+export const NEUTRAL_ROUTE_COLOR = '#9C9488';
 
 /** Axis-aligned bounds of a set of [lng, lat] points as [west, south, east,
  * north] — the order MapLibre wants — or null for an empty set. */
