@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MapContainer, TileLayer, Popup, Polyline, useMap, Marker } from 'react-leaflet';
-import { Navigation as NavigationIcon, Settings, X } from 'lucide-react';
+import { Moon, Navigation as NavigationIcon, Settings, Sun, X } from 'lucide-react';
 import clsx from 'clsx';
 import L from 'leaflet';
 import type { LatLngExpression } from 'leaflet';
@@ -8,7 +8,7 @@ import { ShuttleMarker } from './ShuttleMarker';
 import { relativeLuminance } from './mapUtils';
 import { buttonVariants, cn } from './ui/styles';
 import type { Stop, Vehicle, RoutePath, TripResponse, TripSegment } from './types';
-import { API_BASE_URL, MAP_ATTRIBUTION, MAP_MAX_NATIVE_ZOOM, MAP_MAX_ZOOM, MAP_SUBDOMAINS, MAP_TILE_URL, MAP_TILES_NEED_DIM } from '@/config';
+import { API_BASE_URL, MAP_ATTRIBUTION, MAP_MAX_NATIVE_ZOOM, MAP_MAX_ZOOM, MAP_SUBDOMAINS, MAP_TILE_URL, MAP_TILE_URL_LIGHT, MAP_TILES_NEED_DIM } from '@/config';
 
 /** The read-only status pill, shared by the mobile top bar and the desktop
  * bottom bar. They had drifted to different grounds, paddings and text sizes
@@ -236,6 +236,21 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
     const activeTripBounds = tripBounds ?? focusRouteBounds;
     const [mapInstance, setMapInstance] = useState<L.Map | null>(null);
     const [zoom, setZoom] = useState(15);
+
+    // Basemap ground: dark by default, light on request. Only the tiles
+    // change — chrome and route colours stay — and the choice is remembered.
+    const [basemap, setBasemap] = useState<'dark' | 'light'>(() => {
+        try { return localStorage.getItem('shuttl:basemap') === 'light' ? 'light' : 'dark'; }
+        catch { return 'dark'; }
+    });
+    const toggleBasemap = useCallback(() => {
+        setBasemap((b) => {
+            const next = b === 'dark' ? 'light' : 'dark';
+            try { localStorage.setItem('shuttl:basemap', next); } catch { /* private mode */ }
+            return next;
+        });
+    }, []);
+    const isLight = basemap === 'light';
 
     // Line weight follows zoom. Leaflet animates a zoom by CSS-scaling the
     // overlay pane, so a 4px line is already 8px on screen by the end of a
@@ -477,7 +492,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
     }, [trip]);
 
     return (
-        <div className={cn('relative h-full w-full bg-neutral-900', MAP_TILES_NEED_DIM && 'map-tiles-dim')}>
+        <div className={cn('relative h-full w-full bg-neutral-900', MAP_TILES_NEED_DIM && !isLight && 'map-tiles-dim', isLight && 'map-light')}>
             {systemId ? (
                 <MapContainer
                     key={systemId}
@@ -508,8 +523,9 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
                     {/* Basemap. Provider is configurable; see config.ts for why
                         the CARTO URL that used to be hardcoded here had to go. */}
                     <TileLayer
+                        key={basemap}
                         attribution={MAP_ATTRIBUTION}
-                        url={MAP_TILE_URL}
+                        url={isLight ? MAP_TILE_URL_LIGHT : MAP_TILE_URL}
                         maxZoom={MAP_MAX_ZOOM}
                         // Keep a wide ring of offscreen tiles alive. Leaflet
                         // prunes to 2 screens by default, so panning walked
@@ -726,6 +742,14 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
                         >
                             <Settings size={14} />
                         </button>
+                        <button
+                            type="button"
+                            onClick={toggleBasemap}
+                            className={buttonVariants({ variant: 'overlay', size: 'icon' })}
+                            aria-label={isLight ? 'Switch to dark map' : 'Switch to light map'}
+                        >
+                            {isLight ? <Moon size={14} /> : <Sun size={14} />}
+                        </button>
                     </div>
                 ) : <div />}
 
@@ -779,6 +803,19 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
                             buttons a thumb apart called Routes and Show Routes
                             gave no way to guess which did what. */}
                         <span>Filter</span>
+                    </button>
+                </div>
+
+                {/* Basemap toggle */}
+                <div className="pointer-events-auto order-2 md:order-2">
+                    <button
+                        type="button"
+                        onClick={toggleBasemap}
+                        className={buttonVariants({ variant: 'overlay', size: 'icon' })}
+                        aria-label={isLight ? 'Switch to dark map' : 'Switch to light map'}
+                        title={isLight ? 'Dark map' : 'Light map'}
+                    >
+                        {isLight ? <Moon size={13} /> : <Sun size={13} />}
                     </button>
                 </div>
 

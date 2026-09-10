@@ -40,6 +40,12 @@ const ESRI_TILE_URL =
 const ESRI_ATTRIBUTION =
     '&copy; <a href="https://www.esri.com/">Esri</a>, &copy; <a href="http://openstreetmap.org">OpenStreetMap</a> contributors'
 
+// Light counterpart for the basemap toggle: CARTO Positron, or Esri's Light
+// Gray Canvas on the keyless fallback. Same chrome, same route colours; only
+// the ground changes.
+const ESRI_LIGHT_TILE_URL =
+    'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}'
+
 const CARTO_TILE_URL =
     // `key`, not `api_key`. Tested against the CDN from a browser: every other
     // spelling — api_key, apikey, access_token — returns the same bytes as no
@@ -49,6 +55,9 @@ const CARTO_TILE_URL =
     `https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png?key=${MAP_API_KEY}`
 const CARTO_ATTRIBUTION =
     '&copy; <a href="https://carto.com/attributions">CARTO</a>, &copy; <a href="http://openstreetmap.org">OpenStreetMap</a> contributors'
+
+const CARTO_LIGHT_TILE_URL =
+    `https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png?key=${MAP_API_KEY}`
 
 const usingCarto = Boolean(MAP_API_KEY) && !import.meta.env.VITE_MAP_TILE_URL
 
@@ -61,6 +70,9 @@ if (!MAP_API_KEY && !import.meta.env.VITE_MAP_TILE_URL) {
 
 const MAP_TILE_URL =
     import.meta.env.VITE_MAP_TILE_URL ?? (usingCarto ? CARTO_TILE_URL : ESRI_TILE_URL)
+
+const MAP_TILE_URL_LIGHT =
+    import.meta.env.VITE_MAP_TILE_URL_LIGHT ?? (usingCarto ? CARTO_LIGHT_TILE_URL : ESRI_LIGHT_TILE_URL)
 
 const MAP_ATTRIBUTION =
     import.meta.env.VITE_MAP_ATTRIBUTION ?? (usingCarto ? CARTO_ATTRIBUTION : ESRI_ATTRIBUTION)
@@ -92,6 +104,7 @@ const MAP_TILES_NEED_DIM = !usingCarto
 export {
     API_BASE_URL,
     MAP_TILE_URL,
+    MAP_TILE_URL_LIGHT,
     MAP_ATTRIBUTION,
     MAP_MAX_ZOOM,
     MAP_MAX_NATIVE_ZOOM,

@@ -41,6 +41,13 @@
 .leaflet-tile-container {
   background-color: #0b0f17;
 }
+/* Light basemap: the ground behind an unplaced tile must be light too, or a
+   pan shows black squares under a pale map. */
+.map-light .leaflet-container,
+.map-light .leaflet-container .leaflet-pane,
+.map-light .leaflet-tile-container {
+  background-color: #e8e8e6;
+}
 
 /* Darkening the basemap.
 
