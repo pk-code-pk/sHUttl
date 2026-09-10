@@ -1,4 +1,5 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useImperativeHandle, useMemo, useRef, forwardRef } from "react";
+import type React from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { createPortal } from "react-dom";
 import { MapPin, Navigation as NavigationIcon, ArrowUpDown, Clock, Info, ChevronDown, ChevronLeft, X, Share2, Check, TriangleAlert } from "lucide-react";
@@ -160,13 +161,18 @@ function CandidateCard({ candidate, isSelected, onSelect }: CandidateCardProps) 
     );
 }
 
-export const TripPlannerPanel = ({
+export interface TripPlannerHandle {
+    /** Set one end of the trip from outside — a tap on a stop marker. */
+    setEndpoint: (which: 'origin' | 'destination', stopId: string) => void;
+}
+
+const TripPlannerPanelInner = ({
     className,
     system,
     trip,
     onTripChange,
     onUserLocationChange
-}: TripPlannerPanelProps) => {
+}: TripPlannerPanelProps, ref: React.Ref<TripPlannerHandle>) => {
     const [stops, setStops] = useState<StopOption[]>([]);
     const [loadingStops, setLoadingStops] = useState(false);
     const [originStopId, setOriginStopId] = useState<string>('');
@@ -613,6 +619,31 @@ export const TripPlannerPanel = ({
         setMode(pendingMode);
         setPendingMode(null);
     };
+
+    useImperativeHandle(ref, () => ({
+        setEndpoint: (which, stopId) => {
+            const stop = findStopById(stopId);
+            if (!stop) return;
+            setMode('plan');
+            if (which === 'origin') {
+                setOriginUseCurrentLocation(false);
+                setOriginCoords(null);
+                setOriginStopId(stopId);
+                setOriginQuery(stop.name);
+            } else {
+                setDestStopId(stopId);
+                setDestQuery(stop.name);
+            }
+            // Plan straight away once both ends are known, so tapping two
+            // stops on the map is a complete action rather than a form filled
+            // in for you.
+            const originId = which === 'origin' ? stopId : originStopId;
+            const destId = which === 'destination' ? stopId : destStopId;
+            if (originId && destId) {
+                void handlePlanTrip({ originStopId: originId, destStopId: destId });
+            }
+        },
+    }));
 
     // Helper: Reset live updates and candidates when inputs change significantly
     const resetLiveState = () => {
@@ -1515,3 +1546,8 @@ export const TripPlannerPanel = ({
         </PanelSheet>
     );
 };
+
+export const TripPlannerPanel = forwardRef<TripPlannerHandle, TripPlannerPanelProps>(
+    TripPlannerPanelInner,
+);
+TripPlannerPanel.displayName = 'TripPlannerPanel';

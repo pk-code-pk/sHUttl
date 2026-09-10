@@ -5,6 +5,7 @@ import clsx from 'clsx';
 import L from 'leaflet';
 import type { LatLngExpression } from 'leaflet';
 import { ShuttleMarker } from './ShuttleMarker';
+import { StopPopup } from './StopPopup';
 import { buttonVariants, cn } from './ui/styles';
 import type { Stop, Vehicle, RoutePath, TripResponse, TripSegment } from './types';
 import { API_BASE_URL, MAP_ATTRIBUTION, MAP_MAX_NATIVE_ZOOM, MAP_MAX_ZOOM, MAP_SUBDOMAINS, MAP_TILE_URL } from '@/config';
@@ -25,6 +26,9 @@ interface MapShellProps {
     systemId: number | null;
     trip: TripResponse | null;
     userLocation?: { lat: number; lng: number } | null;
+    /** Tapping a stop can seed the trip planner with it. */
+    onPlanFromStop?: (stopId: string) => void;
+    onPlanToStop?: (stopId: string) => void;
 }
 
 
@@ -145,7 +149,7 @@ function MapController({
     return null;
 }
 
-export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
+export const MapShell = ({ systemId, trip, userLocation, onPlanFromStop, onPlanToStop }: MapShellProps) => {
     const [stops, setStops] = useState<Stop[]>([]);
     const [vehicles, setVehicles] = useState<Vehicle[]>([]);
     const [routes, setRoutes] = useState<RoutePath[]>([]);
@@ -417,6 +421,10 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
 
                     {/* Basemap. Provider is configurable; see config.ts for why
                         the CARTO URL that used to be hardcoded here had to go. */}
+                    {/* Darkens the basemap. A div rather than a filter on the
+                        tile pane — see .map-dim. */}
+                    <div className="map-dim" />
+
                     <TileLayer
                         attribution={MAP_ATTRIBUTION}
                         url={MAP_TILE_URL}
@@ -436,10 +444,6 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                         // then visibly slide against the map. A brief gap is
                         // a far smaller fault than the whole basemap drifting
                         // out from under the pins.
-                        // Cross-fading tiles in is what makes a fetch visible
-                        // at all. Without it a tile appears when it is ready,
-                        // over a ground already the right colour.
-                        className="shuttl-tile"
                         // Request tiles with CORS. Leaflet's img tiles are
                         // no-cors by default, which makes every response
                         // opaque: status 0, ok false, headers unreadable. The
@@ -506,12 +510,13 @@ export const MapShell = ({ systemId, trip, userLocation }: MapShellProps) => {
                                 zIndexOffset={isTripStop ? 100 : 0}
                             >
                                 <Popup>
-                                    <div className="text-sm text-neutral-800">
-                                        <div className="font-semibold">{stop.name}</div>
-                                        <div className="text-xs text-neutral-500">
-                                            Stop ID: {stop.id}
-                                        </div>
-                                    </div>
+                                    <StopPopup
+                                        stopId={String(stop.id)}
+                                        stopName={stop.name}
+                                        systemId={systemId}
+                                        onPlanFrom={onPlanFromStop}
+                                        onPlanTo={onPlanToStop}
+                                    />
                                 </Popup>
                             </Marker>
                         );

@@ -42,45 +42,29 @@
   background-color: #0b0f17;
 }
 
-/* The basemap arrives mid-grey, several stops lighter than the panel above it,
-   which made the two read as separate applications stacked on each other.
-   Darkening it into the same range is the fix; no hue is added, so the map
-   stays grey.
+/* Darkening the basemap without a CSS filter.
 
-   Brightness is the load-bearing value here and was tuned against
-   screenshots: at 0.52 the map became a void with illegible street names,
-   which costs the orientation a map exists to give. This keeps streets
-   readable while sitting a step above the sheet, so map and panel still read
-   as figure and ground. */
-/* Anything not yet painted shows this rather than the page beneath, so a tile
-   still in flight is a dark square instead of a white one. Leaflet leaves
-   tiles transparent, which is where the bursts of white came from: the browser
-   showed whatever was behind the pane. */
-.leaflet-tile-pane img,
-.leaflet-tile {
-  background: #0b0f17;
-}
-
-/* Kill the fade-in. Leaflet ramps opacity 0 to 1 per tile, which is precisely
-   what makes loading visible; with the dark ground above, a tile can simply
-   appear. */
-.shuttl-tile,
-.leaflet-tile {
-  opacity: 1 !important;
-  transition: none !important;
-}
-
-.leaflet-tile-pane {
-  /* Darker, so the route colours and the buses carry the map rather than
-     competing with the ground under them.
-
-     Brightness is the load-bearing value and has a floor: at 0.52 the map
-     became a void with illegible street names, which costs the orientation a
-     map exists to give. 0.60 is as far down as it goes while streets stay
-     readable, and the contrast bump buys some of that legibility back — it
-     separates the roads from the blocks around them, so the ground reads as
-     darker without turning flat. */
-  filter: brightness(0.6) saturate(0.5) contrast(1.16);
+   A filter on the tile pane forces that layer to re-rasterise on every
+   transform. During a zoom the tile layer then lags a frame or two behind the
+   marker layer, which the eye reads as the stops sliding around over the map —
+   the more so on a phone, where the fill rate is lowest and the filter chain
+   is longest. The panes are in step to the pixel when measured after the
+   animation, so this only ever showed up in motion.
+   
+   A flat overlay costs the compositor nothing and cannot desync, because it is
+   not attached to the panes at all. It loses the desaturation the filter also
+   did, which the muted route palette no longer needs. */
+.map-dim {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  /* Above the tiles (200) and below the routes and markers (400+), so it
+     darkens the basemap alone. */
+  z-index: 250;
+  /* Tuned to land where brightness(0.6) did. Alpha compositing over a mid
+     grey is not the same curve as a brightness multiply, so this is higher
+     than the filter's figure would suggest. */
+  background: rgba(7, 11, 18, 0.62);
 }
 
 /* Stop Marker Hitbox - large clickable area */

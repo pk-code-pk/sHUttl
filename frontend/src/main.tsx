@@ -7,6 +7,10 @@ import { Analytics } from '@vercel/analytics/react'
 import 'leaflet/dist/leaflet.css'
 import './index.css'
 import App from './App.tsx'
+import { preloadCampusTiles } from './lib/preloadTiles'
+
+// Warm the basemap before the map can need it. See lib/preloadTiles.
+preloadCampusTiles()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
