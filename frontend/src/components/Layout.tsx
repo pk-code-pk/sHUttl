@@ -1,5 +1,5 @@
-import { useRef, useState } from "react";
-import { TripPlannerPanel, type TripPlannerHandle } from "./TripPlannerPanel";
+import { useState } from "react";
+import { TripPlannerPanel } from "./TripPlannerPanel";
 import { MapShell } from "./MapShell";
 import type { TripResponse } from "./types";
 
@@ -16,21 +16,12 @@ interface LayoutProps {
 
 export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
     const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
-    // Lets a tap on a stop seed the planner, which owns the stop list and the
-    // planning call.
-    const plannerRef = useRef<TripPlannerHandle>(null);
 
     return (
         <div className="fixed inset-0 md:relative md:w-full md:h-[100dvh] overflow-hidden bg-neutral-950 overscroll-none">
             {/* Background Map - fills entire screen */}
             <div className="absolute inset-0 z-0">
-                <MapShell
-                    systemId={system?.id ?? null}
-                    trip={trip}
-                    userLocation={userLocation}
-                    onPlanFromStop={(id) => plannerRef.current?.setEndpoint('origin', id)}
-                    onPlanToStop={(id) => plannerRef.current?.setEndpoint('destination', id)}
-                />
+                <MapShell systemId={system?.id ?? null} trip={trip} userLocation={userLocation} />
             </div>
 
             {/* 
@@ -59,7 +50,6 @@ export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
                     flex justify-center md:block
                 ">
                     <TripPlannerPanel
-                        ref={plannerRef}
                         className="w-full"
                         system={system}
                         trip={trip}
