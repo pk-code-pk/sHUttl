@@ -127,8 +127,13 @@ export const PanelSheet = ({
             <div
                 className={cn(
                     'pointer-events-auto flex max-h-[85vh] flex-col rounded-xl',
-                    'bg-neutral-900/95 backdrop-blur-md',
-                    'border border-white/5 shadow-xl',
+                    // Dark tinted glass: a low-alpha near-black over a heavy
+                    // blur, so the map reads through the panel without the
+                    // text losing its ground. Saturation lift gives the blur
+                    // some life instead of a grey smear.
+                    'bg-neutral-950/70 backdrop-blur-2xl backdrop-saturate-150',
+                    'border border-white/10 shadow-xl',
+                    'shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]',
                     className,
                 )}
             >
@@ -142,8 +147,8 @@ export const PanelSheet = ({
             className={cn(
                 'pointer-events-auto fixed inset-x-0 top-0 z-30 flex h-[100dvh] flex-col',
                 'rounded-t-3xl border-t border-white/10',
-                'bg-neutral-900/95 backdrop-blur-xl',
-                'shadow-[0_-8px_30px_rgba(0,0,0,0.5)]',
+                'bg-neutral-950/70 backdrop-blur-2xl backdrop-saturate-150',
+                'shadow-[0_-8px_30px_rgba(0,0,0,0.5),inset_0_1px_0_rgba(255,255,255,0.06)]',
                 className,
             )}
             style={{ y }}
