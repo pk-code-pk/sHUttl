@@ -25,7 +25,7 @@ const busCount = (n: number) => `${n} ${n === 1 ? 'bus' : 'buses'}`;
 
 // Fallback palette for trip segments whose route carries no colour.
 // No blues: the basemap's roads and water are. See ROUTE_COLOR_OVERRIDES.
-const FALLBACK_ROUTE_COLORS = ['#A5233A', '#457A50', '#8B63AE', '#A8875C', '#858C47', '#CFC2A6', '#66478A', '#9C9488'];
+const FALLBACK_ROUTE_COLORS = ['#A5233A', '#457A50', '#8B63AE', '#A8875C', '#858C47', '#CFC2A6', '#66478A', '#D4A43C'];
 
 type Bbox = [number, number, number, number];
 
@@ -322,7 +322,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
                 const isFocus = focusRoute != null && sameRoute(r.route_id, focusRoute.route_id);
                 let weight = 4, opacity = 1;
                 if (focusRoute) {
-                    if (!isFocus) { weight = 3; opacity = 0.3; }
+                    if (!isFocus) { weight = 3; opacity = 0.45; }
                     else if (trip) { weight = 2; opacity = 0.4; }
                     else { weight = 5; }
                 }

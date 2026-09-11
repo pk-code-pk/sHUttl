@@ -660,8 +660,10 @@ ROUTE_COLOR_OVERRIDES = {
     "QE": "#8B63AE", "QSEC": "#B08CCB", "QYE": "#66478A",
     # Cambridge and the river houses.
     "AC": "#457A50", "ME": "#858C47",
-    # Runs when nothing else does.
-    "OVNT": "#7F796F",
+    # Runs when nothing else does. Gold, not grey: the grey it had was a
+    # warm charcoal on a charcoal map and could not be seen at all, and this
+    # is the route people ride in the dark.
+    "OVNT": "#D4A43C",
 }
 
 
