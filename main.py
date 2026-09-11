@@ -157,6 +157,12 @@ async def startup_event():
     asyncio.create_task(reminders_module.reminder_scheduler(REMINDER_STORE))
     logger.info("Reminder scheduler started", extra={"store": REMINDER_STORE.backend})
 
+    # Forecasts have to be written down before the bus arrives to be scorable
+    # later, and a laptop with its lid shut writes nothing.
+    if ETA_LOG_ENABLED:
+        asyncio.create_task(eta_prediction_logger())
+        logger.info("ETA prediction log started", extra={"interval_s": ETA_LOG_INTERVAL_S})
+
     redis_url = os.getenv("REDIS_URL")
     if not redis_url:
         logger.info("REDIS_URL not set, running without rate limiting")
@@ -187,6 +193,26 @@ class OptionalRateLimiter(RateLimiter):
 VEHICLE_STATE = {}  # cache: (system_id, vehicle_id) -> last 4 GPS positions + timestamps
 
 VEHICLE_POLL_INTERVAL_S = 10  # seconds between background position polls
+
+# ---------------------------------------------------------------------------
+# ETA prediction log
+#
+# Scoring a forecast means having written it down before the bus arrived, so
+# something has to sample both predictors continuously. eta_scoreboard.py does
+# that from a laptop, which stops the moment the lid closes; this is the same
+# sampling running in the service, where it survives that and the free tier's
+# idle spin-down alike.
+#
+# Redis, not a file: Render's disk is wiped on every deploy, and a prediction
+# log that resets on each push can never cover the days a comparison needs.
+# The list is capped, so it is a rolling window rather than an unbounded leak.
+# ---------------------------------------------------------------------------
+ETA_LOG_INTERVAL_S = int(os.getenv("ETA_LOG_INTERVAL_S", "150"))
+ETA_LOG_ENABLED = os.getenv("ETA_LOG_ENABLED", "1") not in ("0", "false", "False")
+REDIS_ETA_PRED_KEY = "eta:predictions"
+# ~24 stops x a couple of routes per sample, every 150s, is roughly 35k rows a
+# day. 120k keeps about three days at ~25MB.
+ETA_LOG_MAX_ROWS = int(os.getenv("ETA_LOG_MAX_ROWS", "120000"))
 
 async def _vehicle_position_poller():
     """
@@ -3663,3 +3689,107 @@ async def api_parse_schedule(images: list[UploadFile] = File(...)):
             detail="No courses were found in those screenshots. Make sure each course card is fully visible.",
         )
     return {"classes": classes}
+
+
+# ---------------------------------------------------------------------------
+# ETA prediction logging (see ETA_LOG_INTERVAL_S above)
+# ---------------------------------------------------------------------------
+
+def sample_eta_predictions(system_id: int = DEFAULT_SYSTEM_ID) -> list[dict]:
+    """Both predictors' current answers for every stop, stamped with the time.
+
+    The same shape eta_scoreboard.py writes, so `score` reads either source.
+    `ours_min` is deliberately our own projection and not the number the app
+    displays: /departures prefers the operator's prediction wherever they have
+    one, and scoring that against them compares them with themselves.
+    """
+    rows: list[dict] = []
+    try:
+        stops = get_stops(system_id)
+    except Exception as e:
+        logger.warning("ETA log: could not list stops", exc_info=e)
+        return rows
+
+    for stop in stops:
+        t = time.time()
+        try:
+            ours = {o["route_id"]: o for o in estimate_arrivals_for_stop(stop.id, system_id)}
+        except Exception:
+            ours = {}
+
+        vendor: dict[str, float] = {}
+        try:
+            for e in get_platform_etas(stop.id):
+                rid = e.route_id
+                if rid not in vendor or float(e.eta_minutes) < vendor[rid]:
+                    vendor[rid] = float(e.eta_minutes)
+        except Exception:
+            pass
+
+        # Every route either side names, not only the ones both do: a bus one
+        # of them missed entirely is exactly where the two differ most.
+        for rid in set(ours) | set(vendor):
+            mine = ours.get(rid)
+            own = mine.get("own_eta_minutes") if mine else None
+            if own is None and mine and mine.get("eta_source") != "operator":
+                own = mine.get("eta_minutes")
+            rows.append({
+                "t": round(t, 1),
+                "stop_id": str(stop.id),
+                "stop_name": getattr(stop, "name", ""),
+                "route_id": rid,
+                "ours_min": round(own, 3) if own is not None else None,
+                "displayed_min": round(mine["eta_minutes"], 3) if mine else None,
+                "vendor_min": vendor.get(rid),
+                "eta_source": mine.get("eta_source") if mine else None,
+                "learned_fraction": mine.get("learned_fraction") if mine else None,
+                "distance_m": mine.get("distance_m") if mine else None,
+            })
+    return rows
+
+
+def _store_eta_predictions(rows: list[dict]) -> int:
+    if not rows or redis_client is None:
+        return 0
+    pipe = redis_client.pipeline()
+    for r in rows:
+        pipe.rpush(REDIS_ETA_PRED_KEY, json.dumps(r))
+    pipe.ltrim(REDIS_ETA_PRED_KEY, -ETA_LOG_MAX_ROWS, -1)
+    pipe.execute()
+    return len(rows)
+
+
+async def eta_prediction_logger():
+    """Append both predictors' forecasts to Redis on a fixed cadence."""
+    if redis_client is None:
+        logger.info("ETA prediction log disabled: no Redis (the file would not survive a deploy)")
+        return
+    while True:
+        await asyncio.sleep(ETA_LOG_INTERVAL_S)
+        try:
+            rows = await asyncio.to_thread(sample_eta_predictions)
+            written = await asyncio.to_thread(_store_eta_predictions, rows)
+            if written:
+                logger.debug("ETA predictions logged", extra={"rows": written})
+        except Exception as e:
+            logger.warning("ETA prediction log tick failed", exc_info=e)
+
+
+@app.get("/eta_predictions", dependencies=[Depends(OptionalRateLimiter(times=10, seconds=60))])
+def api_eta_predictions(limit: int = Query(50000, ge=1, le=200000)):
+    """The logged forecasts, oldest first, for eta_scoreboard.py to score."""
+    if redis_client is None:
+        raise HTTPException(status_code=503, detail="Prediction log unavailable (no Redis)")
+    try:
+        total = redis_client.llen(REDIS_ETA_PRED_KEY)
+        raw = redis_client.lrange(REDIS_ETA_PRED_KEY, -limit, -1) or []
+    except RedisError as e:
+        logger.warning("Could not read prediction log", exc_info=e)
+        raise HTTPException(status_code=503, detail="Prediction log unavailable")
+    out = []
+    for item in raw:
+        try:
+            out.append(json.loads(item))
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return {"total": total, "returned": len(out), "predictions": out}

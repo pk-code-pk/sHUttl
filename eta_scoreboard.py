@@ -147,9 +147,20 @@ def _load_jsonl(path: str) -> list[dict]:
 
 
 def cmd_score(args):
-    preds = _load_jsonl(args.preds)
+    # The service logs predictions itself, which is the only source that keeps
+    # running with the laptop shut. A local file is still read when asked for.
+    if args.remote:
+        payload = _fetch(args.api, "eta_predictions", {"limit": args.limit})
+        preds = payload.get("predictions", [])
+        print(f"Read {len(preds)} predictions from {args.api} "
+              f"(log holds {payload.get('total', '?')}).\n")
+    else:
+        preds = _load_jsonl(args.preds)
     if not preds:
-        print(f"No predictions at {args.preds}. Run `collect` first.", file=sys.stderr)
+        where = f"{args.api}/eta_predictions" if args.remote else args.preds
+        print(f"No predictions at {where}. "
+              f"{'The service log may not have filled yet.' if args.remote else 'Run `collect` first.'}",
+              file=sys.stderr)
         return 1
 
     payload = _fetch(args.api, "arrivals", {"limit": 20000})
@@ -314,6 +325,10 @@ def main():
 
     p_score = sub.add_parser("score", help="score both against observed arrivals")
     p_score.add_argument("--preds", default=DEFAULT_PRED_PATH)
+    p_score.add_argument("--remote", action="store_true",
+                         help="read the service's own prediction log instead of a local file")
+    p_score.add_argument("--limit", type=int, default=50000,
+                         help="max predictions to pull with --remote")
     p_score.set_defaults(func=cmd_score)
 
     args = parser.parse_args()
