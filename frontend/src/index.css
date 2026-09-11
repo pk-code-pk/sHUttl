@@ -76,6 +76,13 @@
   background: #111111;
   border-color: rgba(255, 255, 255, 0.75);
 }
+/* A stop the expanded departure will serve: larger, ringed in the route
+   colour (set inline), so the run reads as a string of its own stops. */
+.stop-marker-dot--run {
+  width: 14px;
+  height: 14px;
+  border-width: 3px;
+}
 
 .stop-marker-container:hover .stop-marker-dot {
   transform: translate(-50%, -50%) scale(1.3);

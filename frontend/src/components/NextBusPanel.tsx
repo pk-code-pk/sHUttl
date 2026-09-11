@@ -54,6 +54,16 @@ export interface Departure {
     catchable: boolean;
     following_minutes: number[];
     to_stops: ToStop[];
+    /** The stretch this bus rides from the boarding stop through to_stops. */
+    polyline?: { lat: number; lng: number }[];
+}
+
+/** What the map draws when a departure is expanded: the run and its stops. */
+export interface DepartureRun {
+    routeId: string;
+    color: string | null;
+    polyline: { lat: number; lng: number }[];
+    stops: { id: string; name: string; lat: number; lng: number }[];
 }
 
 interface DeparturesResponse {
@@ -78,6 +88,7 @@ interface NextBusPanelProps {
         originStopId: string,
         destStopId: string | null,
         routeId?: string,
+        run?: DepartureRun | null,
     ) => void;
 }
 
@@ -202,16 +213,21 @@ export const NextBusPanel = ({ systemId, onShowOnMap }: NextBusPanelProps) => {
         const opening = openKey !== key;
         setOpenKey(opening ? key : null);
 
-        // Expanding a row shows the route this bus runs on the map, framed.
-        // No destination is passed, so nothing is planned yet — the rider
-        // picks that from the list below, and only then does a trip draw.
-        //
-        // The route, not a guessed trip: an earlier version drew the run to
-        // the last onward stop on expand, which is wrong on a loop. XSEC's run
-        // ends at Kennedy School (Northbound), about 100 m from where you
-        // board it, so the map correctly drew a 100 m stub. Showing the whole
-        // route sidesteps the guess. Collapsing clears it.
-        onShowOnMap?.(d.stop.id, null, opening ? d.route_id : undefined);
+        // Expanding a row shows this bus's run on the map — the stretch from
+        // the boarding stop through its onward stops, sliced from the route
+        // hop by hop on the server, with those stops highlighted — framed the
+        // way Plan Trip frames a trip. No destination is passed, so nothing is
+        // planned yet; picking an onward stop below is what plans a trip.
+        // Collapsing clears it.
+        const run: DepartureRun | null = opening
+            ? {
+                  routeId: d.route_id,
+                  color: d.color,
+                  polyline: d.polyline ?? [],
+                  stops: [d.stop, ...d.to_stops].map((t) => ({ id: String(t.id), name: t.name, lat: t.lat, lng: t.lng })),
+              }
+            : null;
+        onShowOnMap?.(d.stop.id, null, opening ? d.route_id : undefined, run);
     };
 
     return (

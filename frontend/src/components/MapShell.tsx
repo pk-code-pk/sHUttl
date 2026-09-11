@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Map, { AttributionControl, Layer, Marker, Source, type MapRef } from 'react-map-gl/maplibre';
 import { MapCard } from './MapCard';
+import { SHEET_RESTING_FRACTION } from './ui/sheetSnaps';
+import type { DepartureRun } from './NextBusPanel';
 import type { LngLatBoundsLike } from 'maplibre-gl';
 import { Moon, Navigation as NavigationIcon, Route as RouteIcon, Settings, Sun, X } from 'lucide-react';
 import clsx from 'clsx';
@@ -45,6 +47,9 @@ interface MapShellProps {
      * departure of the same route — or a re-tap after zooming in by hand —
      * reframes. */
     focusNonce?: number;
+    /** The expanded departure's run: geometry and stops. Drawn like a trip,
+     * with the whole route thin beneath it for orientation. */
+    focusRun?: DepartureRun | null;
 }
 
 /* Route ids arrive from two endpoints — /routes and /departures — and the
@@ -73,20 +78,20 @@ function tripKeyOf(trip: TripResponse | null): string | null {
 }
 
 /** Padding that keeps a fitted view clear of the UI. The bottom sheet covers
- * roughly the lower 45% of the screen on mobile and the panel the left 424px
+ * SHEET_RESTING_FRACTION of the screen on mobile and the panel the left 424px
  * on desktop; fitting to the whole viewport would put half of every route
  * behind them. maxZoom keeps a two-stop hop at neighbourhood scale rather than
  * doorstep. */
 function fitOptions() {
     const narrow = window.innerWidth < 768;
     return narrow
-        ? { padding: { top: 40, left: 30, right: 30, bottom: Math.round(window.innerHeight * 0.48) }, maxZoom: 16, duration: 650 }
+        ? { padding: { top: 40, left: 30, right: 30, bottom: Math.round(window.innerHeight * SHEET_RESTING_FRACTION) + 24 }, maxZoom: 16, duration: 650 }
         : { padding: { top: 60, left: 430, right: 60, bottom: 60 }, maxZoom: 16, duration: 650 };
 }
 
 const toLngLatBounds = (b: Bbox): LngLatBoundsLike => [[b[0], b[1]], [b[2], b[3]]];
 
-export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonce = 0 }: MapShellProps) => {
+export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonce = 0, focusRun = null }: MapShellProps) => {
     const mapRef = useRef<MapRef>(null);
     const [mapReady, setMapReady] = useState(false);
 
@@ -242,9 +247,16 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
     );
     const tripBox = useMemo(() => tripBbox(trip), [trip]);
 
-    // A planned trip wins: it is the more specific answer, and it is what the
-    // rider asked for last.
-    const activeBbox = tripBox ?? focusRouteBbox;
+    const runBbox = useMemo(() => {
+        const pts: [number, number][] = [];
+        for (const p of focusRun?.polyline ?? []) pts.push([p.lng, p.lat]);
+        for (const st of focusRun?.stops ?? []) pts.push([st.lng, st.lat]);
+        return bboxOf(pts);
+    }, [focusRun]);
+
+    // A planned trip wins, then the departure's run, then the whole route:
+    // most specific answer first, and the one the rider asked for last.
+    const activeBbox = tripBox ?? runBbox ?? focusRouteBbox;
     const activeKey = useMemo(
         () => tripKeyOf(trip) ?? (focusRouteId ? `route:${focusRouteId}:${focusNonce}` : null),
         [trip, focusRouteId, focusNonce],
@@ -323,7 +335,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
                 let weight = 4, opacity = 1;
                 if (focusRoute) {
                     if (!isFocus) { weight = 3; opacity = 0.45; }
-                    else if (trip) { weight = 2; opacity = 0.4; }
+                    else if (trip || (focusRun && focusRun.polyline.length > 1)) { weight = 2; opacity = 0.4; }
                     else { weight = 5; }
                 }
                 return {
@@ -333,9 +345,21 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
                 };
             });
         return { type: 'FeatureCollection' as const, features };
-    }, [routes, focusRoute, showRoutes, routeVisibility, trip]);
+    }, [routes, focusRoute, showRoutes, routeVisibility, trip, focusRun]);
 
     const tripGeoJson = useMemo(() => {
+        // No trip yet but a departure expanded: its run takes the trip layer,
+        // so it is drawn with exactly the treatment a planned trip gets.
+        if (!trip && focusRun && focusRun.polyline.length > 1) {
+            return {
+                type: 'FeatureCollection' as const,
+                features: [{
+                    type: 'Feature' as const,
+                    properties: { color: focusRun.color || NEUTRAL_ROUTE_COLOR, weight: 6, opacity: 1, order: 0 },
+                    geometry: { type: 'LineString' as const, coordinates: focusRun.polyline.map((p) => [p.lng, p.lat]) },
+                }],
+            };
+        }
         const segments = trip?.segments ?? [];
         const features = segments.map((seg: TripSegment, idx: number) => {
             const pts = seg.polyline?.length ? seg.polyline : (seg.stops ?? []);
@@ -346,14 +370,27 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
             };
         });
         return { type: 'FeatureCollection' as const, features };
-    }, [trip]);
+    }, [trip, focusRun]);
 
+    // Stops that get the endpoint treatment: a trip's origin and destination,
+    // or — with a departure expanded and no trip — the run's first and last.
     const tripStopIds = useMemo(() => {
-        const ids = new Set<string | number>();
-        if (trip?.origin?.nearest_stop?.id) ids.add(trip.origin.nearest_stop.id);
-        if (trip?.destination?.nearest_stop?.id) ids.add(trip.destination.nearest_stop.id);
+        const ids = new Set<string>();
+        if (trip) {
+            if (trip.origin?.nearest_stop?.id != null) ids.add(String(trip.origin.nearest_stop.id));
+            if (trip.destination?.nearest_stop?.id != null) ids.add(String(trip.destination.nearest_stop.id));
+        } else if (focusRun && focusRun.stops.length) {
+            ids.add(String(focusRun.stops[0].id));
+            ids.add(String(focusRun.stops[focusRun.stops.length - 1].id));
+        }
         return ids;
-    }, [trip]);
+    }, [trip, focusRun]);
+    // Stops the run serves in between: emphasised, in the route colour.
+    const runStopIds = useMemo(() => {
+        const ids = new Set<string>();
+        if (!trip && focusRun) for (const st of focusRun.stops) ids.add(String(st.id));
+        return ids;
+    }, [trip, focusRun]);
 
     // Line width follows zoom gently — a touch thinner zoomed out, a touch
     // heavier at building scale — and is otherwise the weight the feature
@@ -427,7 +464,8 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
 
                     {/* Stops: dots with a generous tap target. */}
                     {stops.map((stop) => {
-                        const isTripStop = tripStopIds.has(stop.id);
+                        const isTripStop = tripStopIds.has(String(stop.id));
+                        const isRunStop = !isTripStop && runStopIds.has(String(stop.id));
                         return (
                             <Marker
                                 key={stop.id}
@@ -439,7 +477,12 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
                             >
                                 {isTripStop
                                     ? <div className="trip-endpoint-container"><div className="trip-endpoint-dot" /></div>
-                                    : <div className="stop-marker-container"><div className="stop-marker-dot" /></div>}
+                                    : <div className="stop-marker-container">
+                                        <div
+                                            className={cn('stop-marker-dot', isRunStop && 'stop-marker-dot--run')}
+                                            style={isRunStop ? { borderColor: focusRun?.color || undefined } : undefined}
+                                        />
+                                      </div>}
                             </Marker>
                         );
                     })}

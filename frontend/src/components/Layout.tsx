@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 import { TripPlannerPanel } from "./TripPlannerPanel";
 import { MapShell } from "./MapShell";
 import type { TripResponse } from "./types";
+import type { DepartureRun } from "./NextBusPanel";
 
 interface System {
     id: number;
@@ -22,9 +23,9 @@ export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
     // departures of the same route share an id, and a rider who has zoomed in
     // by hand and taps a row wants the map to come back to the route either
     // way; the nonce is what tells the map "this is a new request to frame".
-    const [focus, setFocus] = useState<{ id: string | null; nonce: number }>({ id: null, nonce: 0 });
+    const [focus, setFocus] = useState<{ id: string | null; run: DepartureRun | null; nonce: number }>({ id: null, run: null, nonce: 0 });
     const setFocusRouteId = useCallback(
-        (id: string | null) => setFocus((f) => ({ id, nonce: f.nonce + 1 })),
+        (id: string | null, run?: DepartureRun | null) => setFocus((f) => ({ id, run: run ?? null, nonce: f.nonce + 1 })),
         [],
     );
 
@@ -37,6 +38,7 @@ export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
                     trip={trip}
                     userLocation={userLocation}
                     focusRouteId={focus.id}
+                    focusRun={focus.run}
                     focusNonce={focus.nonce}
                 />
             </div>

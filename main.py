@@ -2762,6 +2762,36 @@ def downstream_stops(route_id: str, boarding_stop_id: str, depart_in_min: float)
     return out
 
 
+def run_polyline(route_id: str, boarding_stop, to_stops: list[dict]) -> list[dict]:
+    """The stretch a bus rides from the boarding stop through its onward stops.
+
+    Built hop by hop — boarding stop to the first onward stop, that to the
+    next, and so on — with the same slicer Plan Trip uses for a segment, then
+    joined. Not sliced boarding-to-last in one go: on a loop the last onward
+    stop can sit a hundred metres behind the boarding stop (XSEC ends at
+    Kennedy School, round the corner from where you board it), and a single
+    slice between those two points is a stub, not the run. Each hop is short
+    and unambiguous, so the join is the whole loop the bus actually drives.
+    """
+    if not to_stops:
+        return []
+    stop_coords = get_stop_coords_for_route(route_id)
+    pts: list[tuple[float, float]] = []
+    prev_id, prev_lat, prev_lng = str(boarding_stop.id), float(boarding_stop.latitude), float(boarding_stop.longitude)
+    for t in to_stops:
+        shape = get_shape_for_segment(route_id, prev_id, str(t["id"]))
+        hop = (
+            slice_shape_to_segment(shape, prev_lat, prev_lng, float(t["lat"]), float(t["lng"]), stop_coords=stop_coords)
+            if shape else [(prev_lat, prev_lng), (float(t["lat"]), float(t["lng"]))]
+        )
+        # Drop the join vertex so consecutive hops do not double a point.
+        if pts and hop and pts[-1] == hop[0]:
+            hop = hop[1:]
+        pts.extend(hop)
+        prev_id, prev_lat, prev_lng = str(t["id"]), float(t["lat"]), float(t["lng"])
+    return [{"lat": lat, "lng": lng} for lat, lng in pts]
+
+
 @app.get("/departures", dependencies=[Depends(OptionalRateLimiter(times=60, seconds=60))])
 def api_departures(
     lat: float = Query(..., ge=-90, le=90),
@@ -2879,7 +2909,10 @@ def api_departures(
                 "catchable": eta_min * 60.0 >= walk_s,
                 # Where this bus takes you, so the row can answer "does it go
                 # where I need" without a second request.
-                "to_stops": downstream_stops(route_id, stop.id, eta_min),
+                "to_stops": (to_stops := downstream_stops(route_id, stop.id, eta_min)),
+                # The geometry of that run, so the map can draw the stretch
+                # this bus will ride the way Plan Trip draws a trip.
+                "polyline": run_polyline(route_id, stop, to_stops),
                 # Later buses on the same route, so the list can show a second
                 # option without another request.
                 "following_minutes": [float(e.eta_minutes) for e in vendor_list[1:3]],

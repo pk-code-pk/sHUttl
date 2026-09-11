@@ -13,7 +13,7 @@ import { formatEtaSeconds, splitEtaLabel } from "../utils/time";
 import logo from "../assets/logo.svg";
 import { API_BASE_URL } from "@/config";
 import { describeFailure, getLocation } from "@/lib/geolocation";
-import { NextBusPanel } from "./NextBusPanel";
+import { NextBusPanel, type DepartureRun } from "./NextBusPanel";
 import { Button } from "./ui/Button";
 import { Alert, AlertActions, AlertContent, AlertDescription, AlertIcon, AlertTitle } from "./ui/Alert";
 import { cn } from "./ui/styles";
@@ -44,7 +44,7 @@ interface TripPlannerPanelProps {
      * Set when a departure row is expanded; cleared on collapse or on leaving
      * the mode. MapShell draws and frames it through the same path a trip
      * takes, so there is one focus mechanism, not two. */
-    onFocusRouteChange?: (routeId: string | null) => void;
+    onFocusRouteChange?: (routeId: string | null, run?: DepartureRun | null) => void;
 }
 
 interface StopOption {
@@ -589,6 +589,7 @@ export const TripPlannerPanel = ({
         originStopId: string,
         destStopId: string | null,
         routeId?: string,
+        run?: DepartureRun | null,
     ) => {
         // No destination yet: the rider has expanded a departure and is
         // looking at where it goes. Clear any trip and show the route itself,
@@ -598,7 +599,7 @@ export const TripPlannerPanel = ({
         if (!destStopId) {
             onTripChange(null);
             resetLiveState();
-            onFocusRouteChange?.(routeId ?? null);
+            onFocusRouteChange?.(routeId ?? null, run ?? null);
             return;
         }
 
