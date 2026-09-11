@@ -8,10 +8,15 @@
  * rest. It was 0.45, and on a phone that left the map a letterbox above the
  * sheet; a route fitted into it was too small to read.
  */
-export const SNAP_FRACTIONS = [0.92, 0.32, 0.12];
+// Four positions: expanded, a half-and-half for reading a list while
+// watching the map, the resting position, and minimised. The half position
+// was added because going from 32% straight to 92% left no way to see a
+// long departure list and the buses at once.
+export const SNAP_FRACTIONS = [0.92, 0.6, 0.32, 0.12];
 export const SNAP_EXPANDED = 0;
-export const SNAP_DEFAULT = 1;
-export const SNAP_MINIMISED = 2;
+export const SNAP_HALF = 1;
+export const SNAP_DEFAULT = 2;
+export const SNAP_MINIMISED = 3;
 
 /** The fraction of the screen the sheet covers at rest. The map uses it to
  * keep fitted routes clear of the panel. */
