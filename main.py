@@ -44,6 +44,7 @@ from harvard_shapes import (
     get_stop_coords_for_route,
     get_route_id_by_name,
 )
+from harvard_places import PLACES, match_place, match_stop_name
 
 logger = logging.getLogger("trip")
 
@@ -2704,6 +2705,26 @@ WALK_SPEED_MS = 1.35
 DEPARTURE_TO_STOPS = 8
 
 
+def hop_estimate(route_id: str, prev_id: str, sid: str, stops_by_id: dict) -> tuple[float, str]:
+    """Seconds for one stop-to-stop hop, and where the number came from.
+
+    Learned segment time when the store has one, the distance model otherwise.
+    Shared by the departure board and the arrival planner so a bus cannot be
+    shown reaching the same stop at two different times on two screens.
+    """
+    learned = ARRIVAL_STORE.segment_estimate(route_id, prev_id, sid)
+    if learned is not None:
+        return learned[0], "learned"
+    prev_stop = stops_by_id.get(prev_id)
+    stop = stops_by_id.get(sid)
+    hop_m = (
+        distance_m(prev_stop.latitude, prev_stop.longitude,
+                   stop.latitude, stop.longitude)
+        if prev_stop and stop else 0.0
+    )
+    return hop_m / FALLBACK_SPEED_MS + DWELL_S_PER_STOP, "estimated"
+
+
 def downstream_stops(route_id: str, boarding_stop_id: str, depart_in_min: float) -> list[dict]:
     """Where a bus goes after this stop, with a clock time for each.
 
@@ -2736,20 +2757,7 @@ def downstream_stops(route_id: str, boarding_stop_id: str, depart_in_min: float)
         if stop is None:
             continue
 
-        learned = ARRIVAL_STORE.segment_estimate(route_id, prev_id, sid)
-        if learned is not None:
-            hop_s = learned[0]
-            source = "learned"
-        else:
-            prev_stop = stops_by_id.get(prev_id)
-            hop_m = (
-                distance_m(prev_stop.latitude, prev_stop.longitude,
-                           stop.latitude, stop.longitude)
-                if prev_stop else 0.0
-            )
-            hop_s = hop_m / FALLBACK_SPEED_MS + DWELL_S_PER_STOP
-            source = "estimated"
-
+        hop_s, source = hop_estimate(route_id, prev_id, sid, stops_by_id)
         cumulative_s += hop_s
         out.append({
             **stopdict(stop),
@@ -2929,3 +2937,236 @@ def api_departures(
         "departures": departures,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
+
+
+# ---------------------------------------------------------------------------
+# GET /arrival_plan
+#
+# The inverse of the departure board. Departures answer "what is leaving now";
+# this answers "I have to be at Maxwell Dworkin at 3:00 — which bus, from which
+# stop, and when do I need to be standing there". The input is the text a
+# calendar event carries, not a coordinate, because that is what a rider has.
+# ---------------------------------------------------------------------------
+
+# Standing at the stop this long before the bus is due absorbs the operator's
+# ETA rounding (whole minutes) and a bus that runs a little early.
+ARRIVAL_PLAN_STOP_BUFFER_S = 120.0
+
+# Planning a loop: this many hops is more than any Harvard route has stops, so
+# the search always either reaches the destination or wraps back to the start.
+ARRIVAL_PLAN_MAX_HOPS = 40
+
+
+def resolve_location(query: str, system_id: int = DEFAULT_SYSTEM_ID):
+    """Free text -> (stops, resolved_name, confidence, place_latlng).
+
+    Gazetteer first, fuzzy stop names second. Returns every stop the gazetteer
+    lists for the place so the planner can alight at whichever side of a
+    paired stop a route actually serves; the first is the preferred one.
+    `place_latlng` is None when we only matched a stop name, since then the
+    stop is the best position we have.
+    """
+    stops = get_stops(system_id)
+    by_id = {str(s.id): s for s in stops}
+
+    hit = match_place(query)
+    if hit is not None:
+        name, conf = hit
+        lat, lng, ids = PLACES[name]
+        found = [by_id[i] for i in ids if i in by_id]
+        if found:
+            return found, name, round(conf, 3), (lat, lng)
+
+    hit = match_stop_name(query, [s.name for s in stops])
+    if hit is not None:
+        name, conf = hit
+        stop = next(s for s in stops if s.name == name)
+        return [stop], name, round(conf, 3), None
+
+    return [], query, 0.0, None
+
+
+def _departures_from_stop(stop, system_id: int) -> dict[str, list[tuple[float, str, str | None]]]:
+    """Upcoming departures per route as (minutes, eta_source, route_name).
+
+    The same preference order /departures uses — operator predictions when
+    they exist (every trip they list, not only the first), our own projection
+    where they have none — so the planner's departure clock is the one the
+    departure board already shows.
+    """
+    out: dict[str, list[tuple[float, str, str | None]]] = defaultdict(list)
+    try:
+        for e in get_platform_etas(stop.id):
+            out[e.route_id].append((float(e.eta_minutes), "operator", e.route_name))
+    except HTTPException:
+        logger.warning("Operator ETAs unavailable for stop", extra={"stop_id": stop.id})
+
+    try:
+        for o in estimate_arrivals_for_stop(stop.id, system_id):
+            if out.get(o["route_id"]):
+                continue
+            src = "learned" if (o.get("eta_source") or "").startswith("learned") else "estimated"
+            out[o["route_id"]].append((o["eta_minutes"], src, o.get("route_name")))
+    except HTTPException:
+        pass
+    return out
+
+
+def ride_to_first_of(route_id: str, board_stop_id: str, alight_ids: set[str], stops_by_id: dict):
+    """Ride time from a stop to whichever of `alight_ids` the route reaches first.
+
+    Returns (seconds, alight_stop_id) or None when the route never gets there
+    before looping back to the boarding stop.
+    """
+    chain = get_route_stop_ids(route_id)
+    if not chain or str(board_stop_id) not in chain:
+        return None
+    start = chain.index(str(board_stop_id))
+    total_s = 0.0
+    prev_id = str(board_stop_id)
+    for step in range(1, min(len(chain), ARRIVAL_PLAN_MAX_HOPS) + 1):
+        sid = chain[(start + step) % len(chain)]
+        if sid == str(board_stop_id):
+            return None
+        hop_s, _source = hop_estimate(route_id, prev_id, sid, stops_by_id)
+        total_s += hop_s
+        if sid in alight_ids:
+            return total_s, sid
+        prev_id = sid
+    return None
+
+
+def plan_arrival(
+    dest: str,
+    arrive_by: datetime,
+    lat: float | None = None,
+    lng: float | None = None,
+    origin_stop_id: str | None = None,
+    system_id: int = DEFAULT_SYSTEM_ID,
+) -> dict:
+    """The work behind /arrival_plan, callable without HTTP (validate_arrival_plan.py)."""
+    # Everything else in this file clocks in naive local time; meet it there.
+    if arrive_by.tzinfo is not None:
+        arrive_by = arrive_by.astimezone().replace(tzinfo=None)
+    now = datetime.now()
+
+    stops = get_stops(system_id)
+    if not stops:
+        raise HTTPException(status_code=503, detail="No stops available")
+    stops_by_id = {str(s.id): s for s in stops}
+
+    dest_stops, resolved_name, confidence, place_latlng = resolve_location(dest, system_id)
+    if not dest_stops:
+        raise HTTPException(status_code=404, detail=f"Could not resolve destination: {dest!r}")
+    dest_ids = {str(s.id) for s in dest_stops}
+
+    # Board candidates: like /departures, the stops within a short walk rather
+    # than only the nearest — the nearest stop may not be on a route that goes
+    # where you need, or its bus may leave too late.
+    if origin_stop_id is not None:
+        origin = stops_by_id.get(str(origin_stop_id))
+        if origin is None:
+            raise HTTPException(status_code=404, detail="Unknown origin_stop_id")
+        board_candidates = [(origin, 0.0)]
+    elif lat is not None and lng is not None:
+        nearby = sorted(
+            ((s, distance_m(lat, lng, s.latitude, s.longitude)) for s in stops),
+            key=lambda pair: pair[1],
+        )
+        board_candidates = [p for p in nearby if p[1] <= DEPARTURES_WALK_RADIUS_M][:DEPARTURES_MAX_STOPS]
+        if not board_candidates:
+            board_candidates = nearby[:1]
+        origin = board_candidates[0][0]
+    else:
+        raise HTTPException(status_code=422, detail="Provide lat and lng, or origin_stop_id")
+
+    routes_by_id = {str(r.myid): r for r in get_routes_cached(system_id)}
+
+    def walk_from(stop) -> float:
+        if place_latlng is None:
+            return 0.0
+        return distance_m(stop.latitude, stop.longitude, place_latlng[0], place_latlng[1])
+
+    options = []
+    for board, walk_to_board_m in board_candidates:
+        if str(board.id) in dest_ids:
+            continue
+        walk_to_board_s = walk_to_board_m / WALK_SPEED_MS
+        for route_id, deps in _departures_from_stop(board, system_id).items():
+            ride = ride_to_first_of(route_id, board.id, dest_ids, stops_by_id)
+            if ride is None:
+                continue
+            ride_s, alight_id = ride
+            alight = stops_by_id[alight_id]
+            walk_m = walk_from(alight)
+            walk_s = walk_m / WALK_SPEED_MS
+            route = routes_by_id.get(route_id)
+            color = (getattr(route, "groupColor", None) or getattr(route, "color", None)) if route else None
+
+            for eta_min, source, vendor_name in deps:
+                depart_at = now + timedelta(minutes=eta_min)
+                arrive_stop_at = depart_at + timedelta(seconds=ride_s)
+                arrive_dest_at = arrive_stop_at + timedelta(seconds=walk_s)
+                slack_s = (arrive_by - arrive_dest_at).total_seconds()
+                # A bus you cannot reach in time is not an option, however
+                # well it lines up with the meeting.
+                reachable = eta_min * 60.0 >= walk_to_board_s
+                options.append({
+                    "route_id": route_id,
+                    "route_name": route.name if route else vendor_name,
+                    "color": color,
+                    "board_stop": stopdict(board),
+                    "alight_stop": stopdict(alight),
+                    "depart_at": depart_at.isoformat(timespec="seconds"),
+                    "be_at_stop_by": (depart_at - timedelta(seconds=ARRIVAL_PLAN_STOP_BUFFER_S)).isoformat(timespec="seconds"),
+                    "arrive_stop_at": arrive_stop_at.isoformat(timespec="seconds"),
+                    "arrive_dest_at": arrive_dest_at.isoformat(timespec="seconds"),
+                    "slack_minutes": round(slack_s / 60.0, 1),
+                    "eta_source": source,
+                    "viable": slack_s >= 0 and reachable,
+                    # Not in the contract, but the reason an option is not
+                    # viable should be visible rather than inferred.
+                    "walk_to_stop_minutes": round(walk_to_board_s / 60.0, 1),
+                    "ride_minutes": round(ride_s / 60.0, 1),
+                })
+
+    options.sort(key=lambda o: o["depart_at"])
+    viable = [o for o in options if o["viable"]]
+    # Latest viable departure: the least time wasted waiting at the far end.
+    recommended = max(viable, key=lambda o: o["depart_at"]) if viable else None
+
+    dest_stop = dest_stops[0]
+    dest_walk_m = walk_from(dest_stop)
+    return {
+        "dest": {
+            "query": dest,
+            "resolved_name": resolved_name,
+            "stop": stopdict(dest_stop),
+            "walk_m": round(dest_walk_m, 1),
+            "walk_minutes": round(dest_walk_m / WALK_SPEED_MS / 60.0, 1),
+            "confidence": confidence,
+        },
+        "origin_stop": stopdict(origin),
+        "arrive_by": arrive_by.isoformat(timespec="seconds"),
+        "options": options,
+        "recommended": recommended,
+        "generated_at": now.isoformat(timespec="seconds"),
+    }
+
+
+@app.get("/arrival_plan", dependencies=[Depends(OptionalRateLimiter(times=30, seconds=60))])
+def api_arrival_plan(
+    dest: str = Query(..., min_length=1),
+    arrive_by: datetime = Query(...),
+    lat: float | None = Query(None, ge=-90, le=90),
+    lng: float | None = Query(None, ge=-180, le=180),
+    origin_stop_id: str | None = None,
+    system_id: int = DEFAULT_SYSTEM_ID,
+):
+    """Which bus to take, from where, and when to be at the stop, to reach `dest` by `arrive_by`.
+
+    `recommended` is the latest departure that still gets there in time; the
+    full `options` list is returned so a client can offer the earlier, safer
+    ones too.
+    """
+    return plan_arrival(dest, arrive_by, lat, lng, origin_stop_id, system_id)
