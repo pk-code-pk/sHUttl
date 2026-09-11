@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { TripPlannerPanel } from "./TripPlannerPanel";
 import { MapShell } from "./MapShell";
 import type { TripResponse } from "./types";
@@ -18,7 +18,15 @@ export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
     const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
     // Route Next Bus Out has expanded, for the map to draw and frame. Lifted
     // here because the panel and the map are siblings.
-    const [focusRouteId, setFocusRouteId] = useState<string | null>(null);
+    // Along with the id, a count of how many times focus has been set. Two
+    // departures of the same route share an id, and a rider who has zoomed in
+    // by hand and taps a row wants the map to come back to the route either
+    // way; the nonce is what tells the map "this is a new request to frame".
+    const [focus, setFocus] = useState<{ id: string | null; nonce: number }>({ id: null, nonce: 0 });
+    const setFocusRouteId = useCallback(
+        (id: string | null) => setFocus((f) => ({ id, nonce: f.nonce + 1 })),
+        [],
+    );
 
     return (
         <div className="fixed inset-0 md:relative md:w-full md:h-[100dvh] overflow-hidden bg-neutral-950 overscroll-none">
@@ -28,7 +36,8 @@ export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
                     systemId={system?.id ?? null}
                     trip={trip}
                     userLocation={userLocation}
-                    focusRouteId={focusRouteId}
+                    focusRouteId={focus.id}
+                    focusNonce={focus.nonce}
                 />
             </div>
 
@@ -74,7 +83,7 @@ export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
                     and reading as a fourth button in it. A byline is the
                     quietest thing on the screen, so it is set as plain text
                     with no surface of its own. */}
-                <div className="pointer-events-none fixed bottom-2 left-1/2 hidden -translate-x-1/2 md:block">
+                <div className="pointer-events-none fixed bottom-2 left-[424px] right-0 hidden text-center md:block">
                     <p className="text-[10px] font-medium text-white/35">
                         Developed by Praneel Khiantani
                     </p>

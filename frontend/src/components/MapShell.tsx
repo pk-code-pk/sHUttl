@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import Map, { Layer, Marker, Source, type MapRef } from 'react-map-gl/maplibre';
+import Map, { AttributionControl, Layer, Marker, Source, type MapRef } from 'react-map-gl/maplibre';
 import { MapCard } from './MapCard';
 import type { LngLatBoundsLike } from 'maplibre-gl';
 import { Moon, Navigation as NavigationIcon, Route as RouteIcon, Settings, Sun, X } from 'lucide-react';
@@ -41,6 +41,10 @@ interface MapShellProps {
      * through the same bounds-and-key path a trip does rather than a second
      * focus implementation. */
     focusRouteId?: string | null;
+    /** Bumped every time focus is set, even to the same route, so a second
+     * departure of the same route — or a re-tap after zooming in by hand —
+     * reframes. */
+    focusNonce?: number;
 }
 
 /* Route ids arrive from two endpoints — /routes and /departures — and the
@@ -82,7 +86,7 @@ function fitOptions() {
 
 const toLngLatBounds = (b: Bbox): LngLatBoundsLike => [[b[0], b[1]], [b[2], b[3]]];
 
-export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShellProps) => {
+export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonce = 0 }: MapShellProps) => {
     const mapRef = useRef<MapRef>(null);
     const [mapReady, setMapReady] = useState(false);
 
@@ -242,8 +246,8 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
     // rider asked for last.
     const activeBbox = tripBox ?? focusRouteBbox;
     const activeKey = useMemo(
-        () => tripKeyOf(trip) ?? (focusRouteId ? `route:${focusRouteId}` : null),
-        [trip, focusRouteId],
+        () => tripKeyOf(trip) ?? (focusRouteId ? `route:${focusRouteId}:${focusNonce}` : null),
+        [trip, focusRouteId, focusNonce],
     );
 
     // Fit the whole network on launch, once per system.
@@ -379,7 +383,11 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
                     dragRotate={false}
                     pitchWithRotate={false}
                     touchPitch={false}
-                    attributionControl={{ compact: true }}
+                    // Attribution goes bottom-left so the bottom-right corner is
+                    // the actions' alone. Bottom-left sits below the panel on
+                    // desktop (the panel stops at 85vh) and under the sheet on
+                    // mobile, where it was before.
+                    attributionControl={false}
                     // MapLibre reports style, tile and WebGL failures as map
                     // events, not console errors. Without this a broken
                     // basemap is a silent dark rectangle.
@@ -393,6 +401,8 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
                         setMapReady(true);
                     }}
                 >
+                    <AttributionControl position="bottom-left" compact />
+
                     {/* Route lines. One source, one layer; per-feature colour,
                         weight and opacity from properties, draw order from
                         line-sort-key. */}
@@ -488,104 +498,102 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId }: MapShel
                 );
             })()}
 
-            {/* 1. Mobile Top Bar (hidden on desktop) */}
-            <div className="md:hidden fixed top-4 inset-x-4 z-[1000] grid grid-cols-[1fr_auto_1fr] items-center pointer-events-none">
-                <div className={cn(STATUS_PILL, 'justify-self-start pointer-events-auto min-w-[32px]')}>
-                    {systemId
-                        ? loading ? '…' : <span className="whitespace-nowrap">{busCount(vehicles.length)}</span>
-                        : 'Select system'}
-                </div>
+            {/* Controls.
 
-                {systemId ? (
-                    <div className="pointer-events-auto flex items-center gap-1.5">
-                        <button type="button" onClick={recenter} className={cn(buttonVariants({ variant: 'overlay', size: 'icon' }), 'text-white')} aria-label="Recenter map">
-                            <NavigationIcon size={14} className="fill-current -translate-x-[1px] translate-y-[1px]" />
-                        </button>
-                        <button
-                            type="button"
-                            data-route-settings-trigger
-                            onClick={handleRouteSettingsClick}
-                            className={buttonVariants({ variant: showRouteSettings ? 'selected' : 'overlay', size: 'icon' })}
-                            aria-label="Filter routes"
-                        >
-                            <Settings size={14} />
-                        </button>
-                        <button type="button" onClick={toggleBasemap} className={buttonVariants({ variant: 'overlay', size: 'icon' })} aria-label={isLight ? 'Switch to dark map' : 'Switch to light map'}>
-                            {isLight ? <Moon size={14} /> : <Sun size={14} />}
-                        </button>
-                    </div>
-                ) : <div />}
+                One rule on every viewport: actions cluster in one corner and
+                read-only status sits alone in another, so nothing has to be
+                centred against something it does not belong with. The
+                previous layout centred a button row that also held the status
+                pill (so the buttons sat off-centre), floated Recenter on its
+                own 96px above it, and centred the byline in the full width
+                while the row was centred in the map area.
 
-                <button
-                    type="button"
-                    onClick={() => setShowRoutes((prev) => !prev)}
-                    aria-pressed={showRoutes}
-                    aria-label={showRoutes ? 'Hide routes' : 'Show routes'}
-                    className={cn(buttonVariants({ variant: showRoutes ? 'selected' : 'overlay', size: 'icon' }), 'justify-self-end pointer-events-auto')}
-                >
-                    <RouteIcon size={14} />
-                </button>
+                Mobile: status top-left, all four actions top-right.
+                Desktop: status top-right of the map area, all four actions
+                bottom-right, byline centred under the map area. */}
+
+            {/* Status */}
+            <div className={cn(STATUS_PILL, 'pointer-events-none fixed left-4 top-4 z-[1000] min-w-[32px] md:absolute md:left-auto md:right-6 md:top-6')}>
+                {systemId
+                    ? loading
+                        ? '…'
+                        : <span className="whitespace-nowrap"><span className="hidden md:inline">{stops.length} stops • </span>{busCount(vehicles.length)}</span>
+                    : <span className="whitespace-nowrap"><span className="md:hidden">Select system</span><span className="hidden md:inline">Select a system to begin</span></span>}
             </div>
+            {(vehiclesError || routesError) && (
+                <p className="animate-pulse-subtle pointer-events-none fixed left-4 top-[60px] z-[1000] rounded-full border border-crimson-mid/40 bg-crimson-deep/30 px-3 py-1 text-[10px] font-medium text-crimson-light backdrop-blur-sm md:absolute md:left-auto md:right-6 md:top-[68px]">
+                    {vehiclesError && routesError ? 'Real-time data unavailable' : vehiclesError ? 'Vehicle tracking unavailable' : 'Route information unavailable'}
+                </p>
+            )}
 
-            {/* 2. Desktop bottom controls (hidden on mobile). Centred in the map
-                area beside the 400px panel, not the full width — centred in the
-                full width they landed under the panel at tablet widths. */}
-            <div className="hidden md:flex pointer-events-none absolute bottom-8 left-[424px] right-0 flex-row flex-wrap items-center justify-center gap-3 px-6 z-[1000]">
-                <div className="pointer-events-auto">
+            {/* Actions */}
+            {systemId && (
+                <div className="pointer-events-none fixed right-4 top-4 z-[1000] flex items-center gap-1.5 md:absolute md:bottom-6 md:right-6 md:top-auto md:gap-2">
+                    <button
+                        type="button"
+                        onClick={recenter}
+                        title="Recenter"
+                        aria-label="Recenter map"
+                        className={cn(buttonVariants({ variant: 'overlay', size: 'icon' }), 'pointer-events-auto text-white')}
+                    >
+                        <NavigationIcon size={14} className="fill-current -translate-x-[1px] translate-y-[1px]" />
+                    </button>
                     <button
                         type="button"
                         onClick={() => setShowRoutes((prev) => !prev)}
-                        className={cn(buttonVariants({ variant: showRoutes ? 'selected' : 'overlay', size: 'md' }), 'rounded-full')}
+                        aria-pressed={showRoutes}
+                        aria-label={showRoutes ? 'Hide routes' : 'Show routes'}
+                        title={showRoutes ? 'Hide routes' : 'Show routes'}
+                        className={cn(buttonVariants({ variant: showRoutes ? 'selected' : 'overlay', size: 'icon' }), 'pointer-events-auto md:hidden')}
                     >
+                        <RouteIcon size={14} />
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setShowRoutes((prev) => !prev)}
+                        aria-pressed={showRoutes}
+                        className={cn(buttonVariants({ variant: showRoutes ? 'selected' : 'overlay', size: 'md' }), 'pointer-events-auto hidden rounded-full md:inline-flex')}
+                    >
+                        <RouteIcon size={12} />
                         {showRoutes ? 'Hide Routes' : 'Show Routes'}
                         {loadingRoutes && showRoutes && <div className="h-3 w-3 animate-spin rounded-full border-2 border-white/25 border-t-white" />}
                     </button>
-                </div>
-                <div className="pointer-events-auto">
                     <button
                         type="button"
                         data-route-settings-trigger
                         onClick={handleRouteSettingsClick}
-                        className={cn(buttonVariants({ variant: showRouteSettings ? 'selected' : 'overlay', size: 'md' }), 'rounded-full')}
+                        aria-label="Filter routes"
+                        title="Filter routes"
+                        className={cn(buttonVariants({ variant: showRouteSettings ? 'selected' : 'overlay', size: 'icon' }), 'pointer-events-auto md:hidden')}
+                    >
+                        <Settings size={14} />
+                    </button>
+                    <button
+                        type="button"
+                        data-route-settings-trigger
+                        onClick={handleRouteSettingsClick}
+                        className={cn(buttonVariants({ variant: showRouteSettings ? 'selected' : 'overlay', size: 'md' }), 'pointer-events-auto hidden rounded-full md:inline-flex')}
                     >
                         <Settings size={12} />
                         <span>Filter</span>
                     </button>
-                </div>
-                <div className="pointer-events-auto">
-                    <button type="button" onClick={toggleBasemap} className={buttonVariants({ variant: 'overlay', size: 'icon' })} aria-label={isLight ? 'Switch to dark map' : 'Switch to light map'} title={isLight ? 'Dark map' : 'Light map'}>
-                        {isLight ? <Moon size={13} /> : <Sun size={13} />}
+                    <button
+                        type="button"
+                        onClick={toggleBasemap}
+                        aria-label={isLight ? 'Switch to dark map' : 'Switch to light map'}
+                        title={isLight ? 'Dark map' : 'Light map'}
+                        className={cn(buttonVariants({ variant: 'overlay', size: 'icon' }), 'pointer-events-auto')}
+                    >
+                        {isLight ? <Moon size={14} /> : <Sun size={14} />}
                     </button>
                 </div>
-                <div className="pointer-events-none flex flex-col items-center gap-1.5">
-                    <div className={STATUS_PILL}>
-                        {systemId ? (loading ? 'Loading stops…' : `${stops.length} stops • ${busCount(vehicles.length)}`) : 'Select a system to begin'}
-                    </div>
-                    {(vehiclesError || routesError) && (
-                        <p className="animate-pulse-subtle rounded-full border border-crimson-mid/40 bg-crimson-deep/30 px-3 py-1 text-[10px] font-medium text-crimson-light backdrop-blur-sm">
-                            {vehiclesError && routesError ? 'Real-time data unavailable' : vehiclesError ? 'Vehicle tracking unavailable' : 'Route information unavailable'}
-                        </p>
-                    )}
-                </div>
-            </div>
-
-            {/* Desktop Recenter */}
-            {systemId && (
-                <button
-                    type="button"
-                    title="Recenter visible area"
-                    onClick={recenter}
-                    className={cn(buttonVariants({ variant: 'overlay', size: 'md' }), 'pointer-events-auto absolute right-6 bottom-32 z-[1000] hidden rounded-full shadow-xl md:flex')}
-                >
-                    Recenter
-                </button>
             )}
 
             {/* Route filter */}
             {showRouteSettings && (
                 <div
                     ref={routeSettingsRef}
-                    className="fixed z-[1001] top-16 left-4 right-4 md:absolute md:top-auto md:bottom-24 md:left-1/2 md:-translate-x-1/2 md:w-72 md:right-auto rounded-xl bg-black/80 backdrop-blur-xl border border-white/10 shadow-2xl p-3 max-h-[60vh] overflow-y-auto"
+                    className="fixed z-[1001] top-16 left-4 right-4 md:absolute md:top-auto md:bottom-16 md:left-auto md:right-6 md:w-72 rounded-xl bg-black/80 backdrop-blur-xl border border-white/10 shadow-2xl p-3 max-h-[60vh] overflow-y-auto"
                 >
                     <div className="mb-2 flex items-center justify-between px-1">
                         <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-500">Filter routes</span>

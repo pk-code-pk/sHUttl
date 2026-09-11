@@ -182,6 +182,7 @@ export const TripPlannerPanel = ({
     const [showSuccess, setShowSuccess] = useState(false);
     const [itineraryOpen, setItineraryOpen] = useState(true);
     const isMobile = useIsMobile();
+    const planGenRef = useRef(0);
 
     // Focus states for autocomplete
     const [originOpen, setOriginOpen] = useState(false);
@@ -447,6 +448,13 @@ export const TripPlannerPanel = ({
             return;
         }
 
+        // Generation stamp: a /trip answer that arrives after the rider has
+        // moved on — collapsed the row, opened another route, switched mode —
+        // must not land. It used to: tap an onward stop, tap a different
+        // route within the second the request took, and the map zoomed back
+        // into the abandoned segment when the response came in.
+        const gen = ++planGenRef.current;
+
         setPlanning(true);
         try {
             const params = new URLSearchParams({
@@ -471,6 +479,7 @@ export const TripPlannerPanel = ({
                 throw new Error(message);
             }
             const data: TripCandidatesResponse = await res.json();
+            if (gen !== planGenRef.current) return;
             const newCandidates = data.candidates || [];
             if (newCandidates.length === 0) throw new Error("No trip candidates found.");
             setCandidates(newCandidates);
@@ -512,12 +521,13 @@ export const TripPlannerPanel = ({
             const url = buildTripUrl(endpoints.origin, endpoints.destination, stops);
             if (url) window.history.replaceState(null, '', url);
         } catch (e) {
+            if (gen !== planGenRef.current) return;
             console.error(e);
             const message = e instanceof Error ? e.message : "Unknown error";
             setError(message);
             onTripChange(null);
         } finally {
-            setPlanning(false);
+            if (gen === planGenRef.current) setPlanning(false);
         }
     };
 
@@ -633,6 +643,9 @@ export const TripPlannerPanel = ({
 
     // Helper: Reset live updates and candidates when inputs change significantly
     const resetLiveState = () => {
+        // Anything still in flight belongs to a trip the rider has left.
+        planGenRef.current++;
+        setPlanning(false);
         setSharedEndpoints(null);
         setShareState('idle');
         setActiveTripParams(null);
