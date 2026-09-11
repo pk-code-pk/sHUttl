@@ -14,6 +14,7 @@ import logo from "../assets/logo.svg";
 import { API_BASE_URL } from "@/config";
 import { describeFailure, getLocation } from "@/lib/geolocation";
 import { NextBusPanel, type DepartureRun } from "./NextBusPanel";
+import { ClassesPanel } from "./ClassesPanel";
 import { Button } from "./ui/Button";
 import { Alert, AlertActions, AlertContent, AlertDescription, AlertIcon, AlertTitle } from "./ui/Alert";
 import { cn } from "./ui/styles";
@@ -219,10 +220,11 @@ export const TripPlannerPanel = ({
     const POLL_INTERVAL_MS = 8000; // ~8 seconds
 
     // Multi-candidate state
-    // Two modes. "Next bus out" is the common case — standing somewhere,
+    // Three modes. "Next bus out" is the common case — standing somewhere,
     // wanting to know what is leaving — and it needs no input at all, so it
-    // does not belong behind the from/to form.
-    type PanelMode = 'next' | 'plan';
+    // does not belong behind the from/to form. "Classes" reads the rider's
+    // calendar and works backwards from each class to a stop and a time.
+    type PanelMode = 'next' | 'plan' | 'classes';
     // A shared link is a request for a specific trip, so it opens the planner.
     const [mode, setMode] = useState<PanelMode>(
         hasTripLink(window.location.search) ? 'plan' : 'next',
@@ -622,8 +624,9 @@ export const TripPlannerPanel = ({
     const requestMode = (next: PanelMode) => {
         if (next === mode) return;
         // Only worth interrupting when there is something to lose: a trip on
-        // the map, or candidates the user is still choosing between.
-        const wouldDiscardTrip = next === 'next' && (Boolean(trip) || candidates.length > 0);
+        // the map, or candidates the user is still choosing between. Both
+        // list modes replace the planned trip with their own.
+        const wouldDiscardTrip = next !== 'plan' && (Boolean(trip) || candidates.length > 0);
         if (wouldDiscardTrip) {
             setPendingMode(next);
             return;
@@ -776,6 +779,7 @@ export const TripPlannerPanel = ({
                         segments={[
                             { id: 'next' as PanelMode, label: 'Next Bus Out' },
                             { id: 'plan' as PanelMode, label: 'Plan Trip' },
+                            { id: 'classes' as PanelMode, label: 'Classes' },
                         ]}
                     />
                 </div>
@@ -813,8 +817,8 @@ export const TripPlannerPanel = ({
                                     <AlertContent>
                                         <AlertTitle>Clear your planned trip?</AlertTitle>
                                         <AlertDescription>
-                                            Next Bus Out shows departures near you, so the
-                                            route you planned will come off the map.
+                                            {pendingMode === 'classes' ? 'Classes' : 'Next Bus Out'} shows
+                                            its own list, so the route you planned will come off the map.
                                         </AlertDescription>
                                         <AlertActions>
                                             <Button variant="primary" size="sm" block onClick={confirmModeSwitch}>
@@ -835,6 +839,13 @@ export const TripPlannerPanel = ({
 
                 {mode === 'next' && (
                     <NextBusPanel
+                        systemId={system?.id}
+                        onShowOnMap={showDepartureOnMap}
+                    />
+                )}
+
+                {mode === 'classes' && (
+                    <ClassesPanel
                         systemId={system?.id}
                         onShowOnMap={showDepartureOnMap}
                     />
