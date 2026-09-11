@@ -20,7 +20,7 @@ import { Alert, AlertActions, AlertContent, AlertDescription, AlertIcon, AlertTi
 import { cn } from "./ui/styles";
 import { SegmentedControl } from "./ui/SegmentedControl";
 import { PanelSheet } from "./ui/PanelSheet";
-import { SNAP_DEFAULT, SNAP_MINIMISED } from "./ui/sheetSnaps";
+import { SNAP_DEFAULT, SNAP_HALF, SNAP_MINIMISED } from "./ui/sheetSnaps";
 import {
     buildTripUrl,
     copyToClipboard,
@@ -634,6 +634,7 @@ export const TripPlannerPanel = ({
         setPendingMode(null);
         onFocusRouteChange?.(null);
         setMode(next);
+        revealFor(next);
     };
 
     const confirmModeSwitch = () => {
@@ -642,7 +643,19 @@ export const TripPlannerPanel = ({
         resetLiveState();
         onFocusRouteChange?.(null);
         setMode(pendingMode);
+        revealFor(pendingMode);
         setPendingMode(null);
+    };
+
+    /** Lift the sheet far enough that the mode the rider just asked for is
+     * actually on screen. At the resting snap a phone shows the tab row and a
+     * couple of lines under it — enough for the next departure, but Classes
+     * opens on a drop zone that is entirely below the fold, so tapping the tab
+     * appeared to do nothing at all. Only ever raises. */
+    const revealFor = (next: PanelMode) => {
+        if (!isMobile) return;
+        const wanted = next === 'classes' ? SNAP_HALF : SNAP_DEFAULT;
+        setSnap((cur) => Math.min(cur, wanted));
     };
 
     // Helper: Reset live updates and candidates when inputs change significantly

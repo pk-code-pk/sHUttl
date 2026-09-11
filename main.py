@@ -1,5 +1,5 @@
 import asyncio
-from fastapi import FastAPI, HTTPException, Query, Depends, Request, Response
+from fastapi import FastAPI, File, HTTPException, Query, Depends, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from collections import defaultdict, deque
 import datetime
@@ -732,7 +732,10 @@ STOPS_TTL = 60 * 10  # 10 minutes
 
 @app.get("/stops", dependencies=[Depends(OptionalRateLimiter(times=30, seconds=60))])
 def list_stops(system_id: int = DEFAULT_SYSTEM_ID):
-    cache_key = f"api:stops:{system_id}"
+    # v2: rows gained a `routes` list. The old key would keep serving cached
+    # rows without it until the TTL expired, and a picker that cannot see
+    # which routes call anywhere silently loses its service warnings.
+    cache_key = f"api:stops:v2:{system_id}"
 
     if redis_client is not None:
         try:
@@ -744,6 +747,21 @@ def list_stops(system_id: int = DEFAULT_SYSTEM_ID):
 
     stops = get_stops(system_id)
     data = [stopdict(s) for s in stops]
+
+    # Which routes call at each stop. Without it a picker can offer Winthrop
+    # House as somewhere to start a 10am trip, when the only routes that stop
+    # there are Overnight and Quad Stadium — nothing calls between about 7:40
+    # in the morning and 12:40 at night, so every plan from it quietly fails.
+    try:
+        serving: dict[str, list[str]] = defaultdict(list)
+        for r in get_routes(system_id):
+            for pid in (getattr(r, "platform_ids", None) or []):
+                serving[str(pid)].append(r.id)
+        for row in data:
+            row["routes"] = sorted(serving.get(str(row.get("id")), []))
+    except Exception as e:
+        # A stop list without route badges is still a usable stop list.
+        logger.warning("Could not attach routes to stops", exc_info=e)
 
     if redis_client is not None:
         try:
@@ -2596,6 +2614,12 @@ def estimate_arrivals_for_stop(stop_id: str, system_id: int = DEFAULT_SYSTEM_ID)
             "route_id": r["route_id"],
             "route_name": r.get("route_name"),
             "eta_minutes": nb["eta_to_boarding_stop_s"] / 60.0,
+            # Our own projection, before the operator's number is preferred
+            # over it for display. Without this the accuracy tooling scores
+            # the operator against itself wherever they have a prediction —
+            # a guaranteed tie on ~70% of rows — and can never answer whether
+            # preferring them is the right default.
+            "own_eta_minutes": (nb["own_eta_s"] / 60.0) if nb.get("own_eta_s") is not None else None,
             "distance_m": nb.get("distance_to_boarding_stop_m"),
             "stops_ahead": nb.get("stops_ahead"),
             "vehicle_id": nb.get("vehicle_id"),
@@ -3059,6 +3083,7 @@ def plan_arrival(
     lng: float | None = None,
     origin_stop_id: str | None = None,
     system_id: int = DEFAULT_SYSTEM_ID,
+    origin_place: str | None = None,
 ) -> dict:
     """The work behind /arrival_plan, callable without HTTP (validate_arrival_plan.py)."""
     # Everything else in this file clocks in naive local time; meet it there.
@@ -3079,11 +3104,31 @@ def plan_arrival(
     # Board candidates: like /departures, the stops within a short walk rather
     # than only the nearest — the nearest stop may not be on a route that goes
     # where you need, or its bus may leave too late.
+    # Order of preference: an explicit stop, then a place named in words (the
+    # previous class's room, say — a rider walking from one class to the next
+    # starts from that building, not from home), then a coordinate.
     if origin_stop_id is not None:
         origin = stops_by_id.get(str(origin_stop_id))
         if origin is None:
             raise HTTPException(status_code=404, detail="Unknown origin_stop_id")
         board_candidates = [(origin, 0.0)]
+    elif origin_place:
+        from_stops, _name, _conf, from_latlng = resolve_location(origin_place, system_id)
+        if not from_stops:
+            raise HTTPException(status_code=404, detail=f"Could not resolve origin: {origin_place!r}")
+        if from_latlng is not None:
+            # Walk from the building itself, not from its stop, so the
+            # walk-to-stop minutes are real.
+            nearby = sorted(
+                ((st, distance_m(from_latlng[0], from_latlng[1], st.latitude, st.longitude)) for st in stops),
+                key=lambda pair: pair[1],
+            )
+            board_candidates = [p for p in nearby if p[1] <= DEPARTURES_WALK_RADIUS_M][:DEPARTURES_MAX_STOPS]
+            if not board_candidates:
+                board_candidates = nearby[:1]
+        else:
+            board_candidates = [(st, 0.0) for st in from_stops]
+        origin = board_candidates[0][0]
     elif lat is not None and lng is not None:
         nearby = sorted(
             ((s, distance_m(lat, lng, s.latitude, s.longitude)) for s in stops),
@@ -3094,7 +3139,7 @@ def plan_arrival(
             board_candidates = nearby[:1]
         origin = board_candidates[0][0]
     else:
-        raise HTTPException(status_code=422, detail="Provide lat and lng, or origin_stop_id")
+        raise HTTPException(status_code=422, detail="Provide lat and lng, origin_stop_id, or origin_place")
 
     routes_by_id = {str(r.myid): r for r in get_routes_cached(system_id)}
 
@@ -3232,13 +3277,13 @@ def plan_arrival(
     }
 
 
-def arrival_plan_for(dest: str, arrive_by: datetime, lat=None, lng=None, origin_stop_id=None) -> dict:
+def arrival_plan_for(dest: str, arrive_by: datetime, lat=None, lng=None, origin_stop_id=None, origin_place=None) -> dict:
     """What the reminder scheduler calls. Same answer as GET /arrival_plan.
 
     Exists so reminders.py can plan without going over HTTP; the name and
     keyword arguments are the contract it was written against.
     """
-    return plan_arrival(dest=dest, arrive_by=arrive_by, lat=lat, lng=lng, origin_stop_id=origin_stop_id)
+    return plan_arrival(dest=dest, arrive_by=arrive_by, lat=lat, lng=lng, origin_stop_id=origin_stop_id, origin_place=origin_place)
 
 
 @app.get("/arrival_plan", dependencies=[Depends(OptionalRateLimiter(times=30, seconds=60))])
@@ -3248,6 +3293,7 @@ def api_arrival_plan(
     lat: float | None = Query(None, ge=-90, le=90),
     lng: float | None = Query(None, ge=-180, le=180),
     origin_stop_id: str | None = None,
+    origin_place: str | None = None,
     system_id: int = DEFAULT_SYSTEM_ID,
 ):
     """Which bus to take, from where, and when to be at the stop, to reach `dest` by `arrive_by`.
@@ -3256,7 +3302,7 @@ def api_arrival_plan(
     full `options` list is returned so a client can offer the earlier, safer
     ones too.
     """
-    return plan_arrival(dest, arrive_by, lat, lng, origin_stop_id, system_id)
+    return plan_arrival(dest, arrive_by, lat, lng, origin_stop_id, system_id, origin_place)
 
 
 # Web Push reminders
@@ -3349,3 +3395,271 @@ def api_get_reminders(client_id: str = Query(..., min_length=1, max_length=128))
     except (RedisError, OSError) as e:
         logger.warning("Could not read reminders", exc_info=e)
         raise HTTPException(status_code=503, detail="Reminder store unavailable")
+
+
+# ---------------------------------------------------------------------------
+# POST /parse-schedule — screenshot → structured class list via GPT-4o-mini
+# ---------------------------------------------------------------------------
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# Reading which of seven day circles are filled is the whole job, and a weaker
+# vision model returns the unselected ones too — which puts a rider at a stop
+# on a day they have no class. Overridable so the model can be changed without
+# a deploy.
+SCHEDULE_PARSE_MODEL = os.getenv("SCHEDULE_PARSE_MODEL", "gpt-5.6-luna")
+
+SCHEDULE_PARSE_PROMPT = """Extract every class meeting from these my.harvard enrollment screenshots.
+
+READING THE DAY CIRCLES — the part that is most often got wrong.
+Every meeting has a row of exactly seven circles, always in this order:
+    SU  M  T  W  TH  F  S
+They are not a list of the days the class meets. They are all seven days of
+the week, every time, and only some of them are switched on:
+  * SELECTED   = dark/black ring with dark bold text inside.
+  * UNSELECTED = pale light-grey ring with light-grey text inside.
+Return ONLY the selected ones. Compare the circles against each other in the
+same row — the contrast between a selected and an unselected circle is obvious
+side by side. A class meeting on Monday and Wednesday shows SU, T, TH, F and S
+in pale grey and M and W in solid black, and must return exactly ["M","W"].
+Never return all seven days. Returning an unselected day is a serious error:
+it sends the rider to a bus stop on a day they have no class.
+
+NESTED SUB-MEETINGS.
+A course card can contain a smaller block inside it — labelled Discussion,
+Section, Lab, Conference, or similar, often with a code like "DIS2" — that has
+its OWN day circles, its own time, and its own room. That is a separate
+meeting the rider must travel to, so return it as its OWN object, with:
+  * the parent course's title and code,
+  * `section` set to the label shown on the block (e.g. "DIS2", "Discussion"),
+  * its own days, times and location,
+  * the parent's term dates, which the block usually does not repeat.
+Return the parent lecture as its own object too, with section "Lecture".
+
+MULTIPLE SCREENSHOTS.
+The images are consecutive screenshots of ONE scrolling page, in order. A card
+is often split across two of them — name and room at the bottom of one image,
+day circles and time at the top of the next. Stitch those halves into ONE
+object. The same course appearing in two images is the same card continued,
+unless the two show genuinely different meeting patterns, which means they are
+a lecture and its section and should stay separate.
+
+For each meeting return a JSON object with these exact keys:
+- title: course name (e.g. "Visualization")
+- code: course code (e.g. "COMPSCI 1710")
+- section: component label (e.g. "Lecture", "DIS2", "Lab"), else ""
+- location: room/building exactly as shown (e.g. "Sever 101 (FAS)")
+- days: array of SELECTED day circles only. Use exactly: "M","T","W","TH","F","SA","SU"
+- start_time: 24h "HH:MM" — "2:15pm" becomes "14:15", "10:30am" becomes "10:30"
+- end_time: 24h "HH:MM"
+- term_start: "YYYY-MM-DD" — "Sept. 2, 2026" becomes "2026-09-02"
+- term_end: "YYYY-MM-DD" — "Dec. 4, 2026" becomes "2026-12-04"
+
+A meeting whose days or times are cut off by the edge of the screenshot should
+still be returned, with those fields as empty strings or an empty array. Do
+not invent a value you cannot actually see.
+
+Return ONLY a JSON array of objects. No markdown, no explanation."""
+
+# GPT is asked for "M"/"TH" but returns "Mon"/"Thursday"/"R" often enough that
+# the spelling cannot be trusted. Everything folds to the seven tokens the
+# frontend's DAY_MAP knows. "S" is Saturday: my.harvard's own circle row runs
+# SU M T W TH F S, so a bare S in a screenshot is the last column.
+_DAY_TOKENS = {
+    "SU": "SU", "SUN": "SU", "SUNDAY": "SU", "U": "SU",
+    "M": "M", "MO": "M", "MON": "M", "MONDAY": "M",
+    "T": "T", "TU": "T", "TUE": "T", "TUES": "T", "TUESDAY": "T",
+    "W": "W", "WE": "W", "WED": "W", "WEDNESDAY": "W",
+    "TH": "TH", "THU": "TH", "THUR": "TH", "THURS": "TH", "THURSDAY": "TH", "R": "TH",
+    "F": "F", "FR": "F", "FRI": "F", "FRIDAY": "F",
+    "S": "SA", "SA": "SA", "SAT": "SA", "SATURDAY": "SA",
+}
+_DAY_ORDER = ["SU", "M", "T", "W", "TH", "F", "SA"]
+
+# No term dates in the screenshot means no bound to hold a class to. Rather
+# than let it recur forever, it gets a semester's worth of life from today.
+_DEFAULT_TERM_DAYS = 120
+
+
+def _norm_days(raw: Any) -> list[str]:
+    if isinstance(raw, str):
+        raw = re.split(r"[,\s/]+", raw)
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for d in raw:
+        tok = _DAY_TOKENS.get(str(d).strip().upper().rstrip("."))
+        if tok and tok not in out:
+            out.append(tok)
+    return sorted(out, key=_DAY_ORDER.index)
+
+
+def _norm_time(raw: Any) -> Optional[str]:
+    """"2:15pm" / "14:15" / "14:15:00" -> "14:15". None if unreadable."""
+    s = str(raw or "").strip().lower().replace(".", "")
+    m = re.match(r"^(\d{1,2}):(\d{2})(?::\d{2})?\s*(am|pm)?$", s)
+    if not m:
+        m = re.match(r"^(\d{1,2})\s*(am|pm)$", s)
+        if not m:
+            return None
+        hour, minute, mer = int(m.group(1)), 0, m.group(2)
+    else:
+        hour, minute, mer = int(m.group(1)), int(m.group(2)), m.group(3)
+    if mer == "pm" and hour != 12:
+        hour += 12
+    elif mer == "am" and hour == 12:
+        hour = 0
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _norm_date(raw: Any) -> Optional[str]:
+    s = str(raw or "").strip()
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", s):
+        return None
+    try:
+        datetime.strptime(s, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return s
+
+
+def _normalize_class(raw: Any) -> Optional[dict]:
+    """One GPT object -> the shape the frontend can render without guarding.
+
+    None when the row is not a class at all. Every returned dict has every key
+    present and of the right type, so the client never meets an undefined.
+    """
+    if not isinstance(raw, dict):
+        return None
+    title = str(raw.get("title") or "").strip()
+    code = str(raw.get("code") or "").strip()
+    if not title and not code:
+        return None
+
+    days = _norm_days(raw.get("days"))
+    start_time = _norm_time(raw.get("start_time"))
+    end_time = _norm_time(raw.get("end_time"))
+    # A class we cannot place in the week is not plannable. Returned anyway,
+    # flagged, so the UI can say which course needs a better screenshot rather
+    # than silently dropping it.
+    plannable = bool(days and start_time and end_time)
+
+    term_start = _norm_date(raw.get("term_start"))
+    term_end = _norm_date(raw.get("term_end"))
+    today = datetime.now().date()
+    if term_start is None:
+        term_start = today.isoformat()
+    if term_end is None:
+        base = datetime.strptime(term_start, "%Y-%m-%d").date()
+        term_end = (base + timedelta(days=_DEFAULT_TERM_DAYS)).isoformat()
+    if term_end < term_start:
+        term_start, term_end = term_end, term_start
+
+    section = str(raw.get("section") or "").strip()
+    # Lecture and section of one course share a code; the id has to carry the
+    # meeting pattern or the second overwrites the first on merge.
+    ident = "-".join([code or title, section, "".join(days), start_time or ""])
+    slug = re.sub(r"[^a-z0-9]+", "-", ident.lower()).strip("-") or "class"
+
+    return {
+        "id": slug,
+        "title": title or code,
+        "code": code,
+        "section": section,
+        "location": str(raw.get("location") or "").strip(),
+        "days": days,
+        "start_time": start_time or "",
+        "end_time": end_time or "",
+        "term_start": term_start,
+        "term_end": term_end,
+        "plannable": plannable,
+    }
+
+
+# Each screenshot is one vision call's worth of tokens, and the key paying for
+# it is ours. Four covers a full enrollment page scrolled through; more than
+# that is someone else's bulk job.
+MAX_SCHEDULE_IMAGES = 4
+MAX_SCHEDULE_IMAGE_BYTES = 6 * 1024 * 1024
+ALLOWED_SCHEDULE_MIMES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+
+
+@app.post("/parse-schedule", dependencies=[Depends(OptionalRateLimiter(times=4, seconds=300))])
+async def api_parse_schedule(images: list[UploadFile] = File(...)):
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=503, detail="Schedule parsing is not configured on this server.")
+    if not images:
+        raise HTTPException(status_code=400, detail="No screenshots were uploaded.")
+    if len(images) > MAX_SCHEDULE_IMAGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many screenshots at once (max {MAX_SCHEDULE_IMAGES}).",
+        )
+
+    import base64
+    from openai import OpenAI
+
+    content: list[dict] = [{"type": "text", "text": SCHEDULE_PARSE_PROMPT}]
+    for img in images:
+        mime = (img.content_type or "").split(";")[0].strip().lower()
+        if mime not in ALLOWED_SCHEDULE_MIMES:
+            raise HTTPException(status_code=400, detail="Only PNG, JPEG, WebP or GIF screenshots are accepted.")
+        raw = await img.read()
+        if not raw:
+            raise HTTPException(status_code=400, detail="One of the screenshots was empty.")
+        if len(raw) > MAX_SCHEDULE_IMAGE_BYTES:
+            raise HTTPException(status_code=400, detail="A screenshot is too large (max 6MB each).")
+        b64 = base64.b64encode(raw).decode()
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime};base64,{b64}", "detail": "high"},
+        })
+
+    text = ""
+    try:
+        client = OpenAI(api_key=OPENAI_API_KEY, timeout=120.0)
+        resp = client.chat.completions.create(
+            model=SCHEDULE_PARSE_MODEL,
+            messages=[{"role": "user", "content": content}],
+            # This model family takes max_completion_tokens and rejects
+            # temperature outright; the older max_tokens spelling is a 400.
+            max_completion_tokens=4096,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        logger.warning("Schedule parse call failed", exc_info=e)
+        raise HTTPException(status_code=502, detail="Could not read the screenshots. Try again in a moment.")
+
+    # Fenced output happens despite the prompt; strip it before parsing rather
+    # than failing on a response that is otherwise correct.
+    if text.startswith("```"):
+        inner = text.split("\n", 1)
+        text = (inner[1] if len(inner) > 1 else "").rsplit("```", 1)[0].strip()
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        logger.warning("Schedule parse returned non-JSON: %s", text[:500])
+        raise HTTPException(status_code=502, detail="Could not read a schedule from these screenshots.")
+
+    if isinstance(parsed, dict):
+        parsed = parsed.get("classes") if isinstance(parsed.get("classes"), list) else [parsed]
+    if not isinstance(parsed, list):
+        raise HTTPException(status_code=502, detail="Could not read a schedule from these screenshots.")
+
+    classes, seen = [], set()
+    for row in parsed:
+        norm = _normalize_class(row)
+        if norm is None or norm["id"] in seen:
+            continue
+        seen.add(norm["id"])
+        classes.append(norm)
+
+    if not classes:
+        raise HTTPException(
+            status_code=422,
+            detail="No courses were found in those screenshots. Make sure each course card is fully visible.",
+        )
+    return {"classes": classes}

@@ -25,6 +25,10 @@ export interface Reminder {
     /** ISO 8601. */
     arrive_by: string;
     dest: string;
+    /** Where the rider is coming from, in words — the previous class's room,
+     * when one ends shortly before this one starts. The server resolves it the
+     * same way it resolves a destination, and prefers it over the stop. */
+    origin_place?: string | null;
     /** Either a chosen stop or a GPS fix; the server plans from whichever is
      * present, preferring the stop. */
     origin_stop_id?: string | null;

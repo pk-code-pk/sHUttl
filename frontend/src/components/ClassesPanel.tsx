@@ -1,46 +1,36 @@
 /**
- * Classes.
+ * Classes — screenshot-powered schedule import.
  *
- * Next Bus Out answers "what is leaving from here". Plan Trip answers "how do
- * I get from A to B". Neither answers the question a student actually has at
- * 9:40: "when do I need to leave for my 10:30". The calendar already knows the
- * where and the when, so this reads it and works backwards — for each class,
- * which shuttle, which stop, and the one number that matters: the time to be
- * standing at it.
+ * The rider screenshots their my.harvard enrollment page and drops the
+ * image(s) here. The backend reads them with a vision model and returns the
+ * structured schedule — course, section, days, times, room, term dates. That
+ * is saved to localStorage, and from then on this panel generates the next
+ * week of meetings from it and plans an arrival for each.
  *
- * The list keeps Next Bus Out's visual grammar on purpose — route badge, a
- * big white figure on the right, small grey labels — so a rider who knows one
- * mode can read the other. The difference is what the figure means: there it
- * is minutes until a bus, here it is a clock time to be at a stop, because
- * "be there by 10:04" is what you set an alarm to and "in 23 minutes" is not.
+ * It replaces a Google Calendar integration that Harvard's Workspace admin
+ * policy blocks outright (`admin_policy_enforced` on consent, before any of
+ * our code runs). A screenshot needs no OAuth, no admin approval, and no
+ * account, and carries what the calendar did not: the section meetings.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import {
     Bell,
     BellOff,
-    CalendarDays,
+    Camera,
+    ChevronDown,
+    ChevronUp,
     Clock,
-    Info,
-    LogOut,
     MapPin,
     RefreshCw,
+    Trash2,
     TriangleAlert,
+    Upload,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { API_BASE_URL } from '@/config';
 import { describeFailure, getLocation } from '@/lib/geolocation';
-import {
-    type CalendarEvent,
-    NotSignedInError,
-    getAccountEmail,
-    isCalendarConfigured,
-    isSignedIn,
-    listUpcomingEvents,
-    signIn,
-    signOut,
-} from '@/lib/googleCalendar';
 import {
     type Reminder,
     SubscribeError,
@@ -53,11 +43,193 @@ import {
     setReminderEnabled,
 } from '@/lib/reminders';
 import { textOnRouteColor } from './mapUtils';
-import { Alert, AlertActions, AlertContent, AlertDescription, AlertIcon, AlertTitle } from './ui/Alert';
+import { Alert, AlertActions, AlertContent, AlertDescription, AlertIcon } from './ui/Alert';
 import { buttonVariants, cn } from './ui/styles';
 
 // ---------------------------------------------------------------------------
-// /arrival_plan contract
+// Stored schedule shape
+// ---------------------------------------------------------------------------
+
+/** The server normalises every field before it gets here — each key is always
+ * present and of this type. The guards below are for schedules saved by an
+ * older build, not for the current endpoint. */
+export interface StoredClass {
+    id: string;
+    title: string;
+    code: string;
+    section: string;
+    location: string;
+    days: string[];       // "M","T","W","TH","F","SA","SU"
+    start_time: string;   // "HH:MM" 24h
+    end_time: string;     // "HH:MM" 24h
+    term_start: string;   // "YYYY-MM-DD"
+    term_end: string;     // "YYYY-MM-DD"
+    /** False when the screenshot had no readable day row or meeting time, so
+     * there is nothing to place in the week. Listed, never planned. */
+    plannable: boolean;
+}
+
+const STORAGE_KEY = 'shuttl:classes:schedule';
+const ORIGIN_KEY = 'shuttl:classes:origin';
+
+function loadSchedule(): StoredClass[] {
+    try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+}
+
+function saveSchedule(classes: StoredClass[]) {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(classes)); } catch { /* private mode */ }
+}
+
+const hasMeeting = (c: StoredClass) => Boolean(c.days?.length && c.start_time && c.end_time);
+
+/** Same course, by code where there is one and by name where there is not. */
+function sameCourse(a: StoredClass, b: StoredClass): boolean {
+    const codeA = a.code?.trim().toLowerCase();
+    const codeB = b.code?.trim().toLowerCase();
+    if (codeA && codeB) return codeA === codeB;
+    return Boolean(a.title && b.title && a.title.trim().toLowerCase() === b.title.trim().toLowerCase());
+}
+
+/** `primary` with its empty fields filled from `fallback`. Keeps primary's id,
+ * so the caller decides which half names the result by choosing the order. */
+function fillBlanks(primary: StoredClass, fallback: StoredClass): StoredClass {
+    const merged: StoredClass = { ...fallback, ...primary };
+    for (const key of ['title', 'code', 'section', 'location', 'start_time', 'end_time'] as const) {
+        if (!primary[key] && fallback[key]) merged[key] = fallback[key];
+    }
+    if (!primary.days?.length && fallback.days?.length) merged.days = fallback.days;
+    merged.id = primary.id;
+    merged.plannable = hasMeeting(merged);
+    return merged;
+}
+
+/**
+ * Fold a freshly parsed batch into the stored schedule.
+ *
+ * Riders upload a few screenshots at a time, so one course can arrive in
+ * pieces across separate uploads: the name and room in today's batch, the day
+ * circles and time in the next. The two halves get different ids — the id
+ * carries the meeting pattern — so appending blindly would leave a stub row
+ * sitting beside the finished one. A record that matches a stored course and
+ * completes it replaces it; one that adds nothing merges in and disappears.
+ *
+ * Two records for the same course that BOTH carry a meeting pattern are left
+ * as two rows: that is a lecture and its section, not a split card.
+ */
+function mergeClasses(existing: StoredClass[], incoming: StoredClass[]): StoredClass[] {
+    const out = [...existing];
+    for (const next of incoming) {
+        const exact = out.findIndex((c) => c.id === next.id);
+        if (exact >= 0) {
+            out[exact] = fillBlanks(next, out[exact]);
+            continue;
+        }
+        const partial = out.findIndex(
+            (c) => sameCourse(c, next) && !(hasMeeting(c) && hasMeeting(next)),
+        );
+        if (partial >= 0) {
+            out[partial] = hasMeeting(next)
+                ? fillBlanks(next, out[partial])
+                : fillBlanks(out[partial], next);
+            continue;
+        }
+        out.push(next);
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Generate upcoming events from stored schedule
+// ---------------------------------------------------------------------------
+
+const DAY_MAP: Record<string, number> = { SU: 0, M: 1, T: 2, W: 3, TH: 4, F: 5, SA: 6 };
+
+interface ClassEvent {
+    id: string;
+    classId: string;
+    title: string;
+    code: string;
+    section: string;
+    location: string;
+    start: string;   // ISO
+    end: string;      // ISO
+}
+
+/** A date-only string to local midnight, or null if it is not one. Never an
+ * Invalid Date: every comparison against one is false, which silently turns a
+ * term-bounds check into no check at all. */
+function parseDay(value: string | undefined): Date | null {
+    if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+    const d = new Date(`${value}T00:00:00`);
+    return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/** "HH:MM" to [hours, minutes], or null. */
+function parseClock(value: string | undefined): [number, number] | null {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(value ?? '');
+    if (!m) return null;
+    const h = Number(m[1]);
+    const min = Number(m[2]);
+    return h <= 23 && min <= 59 ? [h, min] : null;
+}
+
+function upcomingEvents(classes: StoredClass[], hoursAhead: number): ClassEvent[] {
+    const now = new Date();
+    const horizon = new Date(now.getTime() + hoursAhead * 3600_000);
+    const events: ClassEvent[] = [];
+    const spanDays = Math.ceil(hoursAhead / 24) + 1;
+
+    for (const c of classes) {
+        const termStart = parseDay(c.term_start);
+        const termEnd = parseDay(c.term_end);
+        const jsDays = (c.days ?? []).map(d => DAY_MAP[d]).filter(d => d !== undefined);
+        const startClock = parseClock(c.start_time);
+        const endClock = parseClock(c.end_time);
+        // No day row or no meeting time means there is no occurrence to place.
+        // The course still shows in the list below, flagged.
+        if (!jsDays.length || !startClock || !endClock) continue;
+        const [startH, startM] = startClock;
+        const [endH, endM] = endClock;
+
+        const day = new Date(now);
+        day.setHours(0, 0, 0, 0);
+
+        for (let i = 0; i < spanDays; i++) {
+            const check = new Date(day);
+            check.setDate(day.getDate() + i);
+
+            if (termStart && check < termStart) continue;
+            if (termEnd && check > termEnd) continue;
+            if (!jsDays.includes(check.getDay())) continue;
+
+            const start = new Date(check);
+            start.setHours(startH, startM, 0, 0);
+            const end = new Date(check);
+            end.setHours(endH, endM, 0, 0);
+
+            if (end < now || start > horizon) continue;
+
+            events.push({
+                id: `${c.id}-${start.toISOString().slice(0, 10)}`,
+                classId: c.id,
+                title: c.title,
+                code: c.code,
+                section: c.section ?? '',
+                location: c.location,
+                start: start.toISOString(),
+                end: end.toISOString(),
+            });
+        }
+    }
+    events.sort((a, b) => a.start.localeCompare(b.start));
+    return events;
+}
+
+// ---------------------------------------------------------------------------
+// /arrival_plan contract (unchanged from before)
 // ---------------------------------------------------------------------------
 
 interface PlanStop {
@@ -65,7 +237,17 @@ interface PlanStop {
     name: string;
     lat: number;
     lng: number;
+    /** Route ids calling at this stop, from /stops. */
+    routes?: string[];
 }
+
+/** Routes that only run overnight or before the morning. A stop served by
+ * nothing else is unusable as the start of a 10am trip, and saying so in the
+ * picker is the difference between "this app is broken" and "not that one". */
+const OFF_HOURS_ROUTES = new Set(['OVNT', 'QSTA']);
+
+const daytimeServed = (s: PlanStop) =>
+    !s.routes?.length || s.routes.some((r) => !OFF_HOURS_ROUTES.has(r));
 
 interface PlanRecommendation {
     route_id: string;
@@ -100,25 +282,22 @@ type PlanState =
     | { status: 'error'; message: string }
     | { status: 'ok'; plan: ArrivalPlan };
 
-// Below this the geocoder is guessing between similarly named buildings, and
-// the rider should glance at the resolved name before trusting the stop.
 const LOW_CONFIDENCE = 0.6;
-const LOOKAHEAD_HOURS = 36;
+/** A week. The calendar version looked 36 hours ahead because a calendar has
+ * something in it most days; a class schedule does not. A Monday/Wednesday
+ * course uploaded on a Friday evening has no occurrence inside 36 hours, so
+ * the panel came up empty and read as broken. Seven days always has the next
+ * meeting of every course in it. */
+const LOOKAHEAD_HOURS = 168;
 const LEAD_MINUTES = 10;
 
 interface ClassesPanelProps {
     systemId: number | undefined;
-    /**
-     * Show a class's plan on the map, or clear it when passed a null
-     * destination. Same callback Next Bus Out uses, so the drawn route, the
-     * framing and the live refresh are the planner's — not a copy kept here.
-     */
     onShowOnMap?: (originStopId: string, destStopId: string | null, routeId?: string) => void;
 }
 
 // ---------------------------------------------------------------------------
-// Time formatting. Plans are all clock times, so the figure and its AM/PM are
-// split the way ETA figures split from "min": the digits are the content.
+// Time formatting
 // ---------------------------------------------------------------------------
 
 function clockParts(iso: string): { value: string; period: string } {
@@ -138,145 +317,222 @@ const clock = (iso: string) => {
     return period ? `${value} ${period}` : value;
 };
 
-/** "10:30" today, "Tomorrow 10:30", or "Thu 10:30" further out. */
-function whenLabel(iso: string): string {
+/** "Today", "Tomorrow", then the weekday — a week of classes is only legible
+ * once it is cut into days, and after tomorrow the date matters as much as the
+ * name of the day. */
+function dayHeading(iso: string): string {
     const d = new Date(iso);
     const now = new Date();
-    const sameDay = d.toDateString() === now.toDateString();
-    if (sameDay) return clock(iso);
+    if (d.toDateString() === now.toDateString()) return 'Today';
     const tomorrow = new Date(now);
     tomorrow.setDate(now.getDate() + 1);
-    if (d.toDateString() === tomorrow.toDateString()) return `Tomorrow ${clock(iso)}`;
-    return `${d.toLocaleDateString(undefined, { weekday: 'short' })} ${clock(iso)}`;
+    if (d.toDateString() === tomorrow.toDateString()) return 'Tomorrow';
+    return d.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
+}
+
+interface DayGroup { key: string; label: string; items: ClassEvent[] }
+
+/** Events in day buckets, in order. Events arrive sorted, so one pass keeps
+ * them that way inside each bucket too. */
+function groupByDay(events: ClassEvent[]): DayGroup[] {
+    const groups: DayGroup[] = [];
+    for (const ev of events) {
+        const key = new Date(ev.start).toDateString();
+        const last = groups[groups.length - 1];
+        if (last?.key === key) last.items.push(ev);
+        else groups.push({ key, label: dayHeading(ev.start), items: [ev] });
+    }
+    return groups;
 }
 
 // ---------------------------------------------------------------------------
+// Origin chaining
+// ---------------------------------------------------------------------------
+
+const CHAIN_GAP_MINUTES = 60;
+const GPS_HORIZON_MINUTES = 60;
+
+interface OriginChoice {
+    origin_place?: string;
+    origin_stop_id?: string;
+    lat?: number;
+    lng?: number;
+    from: 'gps' | 'previous class' | 'home';
+}
+
+function originForEach(
+    events: ClassEvent[],
+    homeStopId: string,
+    coords: { lat: number; lng: number } | null,
+    now: Date,
+): Record<string, OriginChoice> {
+    const out: Record<string, OriginChoice> = {};
+    const sorted = [...events].sort((a, b) => a.start.localeCompare(b.start));
+
+    sorted.forEach((ev, i) => {
+        const startsInMin = (new Date(ev.start).getTime() - now.getTime()) / 60000;
+        if (coords && startsInMin <= GPS_HORIZON_MINUTES) {
+            out[ev.id] = { lat: coords.lat, lng: coords.lng, from: 'gps' };
+            return;
+        }
+        const prev = sorted[i - 1];
+        if (prev?.location && prev.end) {
+            const gapMin = (new Date(ev.start).getTime() - new Date(prev.end).getTime()) / 60000;
+            const sameDay = new Date(prev.end).toDateString() === new Date(ev.start).toDateString();
+            if (sameDay && gapMin >= 0 && gapMin <= CHAIN_GAP_MINUTES) {
+                out[ev.id] = { origin_place: prev.location, from: 'previous class' };
+                return;
+            }
+        }
+        out[ev.id] = { origin_stop_id: homeStopId, from: 'home' };
+    });
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
 
 export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
-    const configured = isCalendarConfigured();
+    const [schedule, setSchedule] = useState<StoredClass[]>(() => loadSchedule());
+    const [parsing, setParsing] = useState(false);
+    const [parseError, setParseError] = useState<string | null>(null);
+    const [dragOver, setDragOver] = useState(false);
+    const fileRef = useRef<HTMLInputElement>(null);
 
-    // Calendar
-    const [signedIn, setSignedIn] = useState<boolean>(() => isSignedIn());
-    const [email, setEmail] = useState<string | null>(null);
-    const [events, setEvents] = useState<CalendarEvent[] | null>(null);
-    const [eventsLoading, setEventsLoading] = useState(false);
-    const [authError, setAuthError] = useState<string | null>(null);
+    // Generated events from stored schedule
+    const [events, setEvents] = useState<ClassEvent[]>([]);
+    useEffect(() => {
+        setEvents(upcomingEvents(schedule, LOOKAHEAD_HOURS));
+    }, [schedule]);
 
-    // Origin. Same fallback as Next Bus Out: geolocation fails often enough on
-    // desktop that a mode built on it needs a hand-picked stop as a way in.
+    // Origin
     const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
     const [locating, setLocating] = useState(false);
     const [locError, setLocError] = useState<string | null>(null);
     const [stops, setStops] = useState<PlanStop[]>([]);
-    // The stop reminders and plans leave from, when the rider has chosen one.
-    // Remembered across visits: a reminder is planned on the server from the
-    // origin sent with it, and "where you were when the calendar loaded" is
-    // the wrong origin by the time the class is near. A chosen stop — the
-    // dorm's — is right every morning.
     const [manualStopId, setManualStopIdState] = useState<string>(() => {
-        try { return localStorage.getItem('shuttl:classes:origin') ?? ''; } catch { return ''; }
+        try { return localStorage.getItem(ORIGIN_KEY) ?? ''; } catch { return ''; }
     });
     const setManualStopId = (id: string) => {
         setManualStopIdState(id);
-        try { id ? localStorage.setItem('shuttl:classes:origin', id) : localStorage.removeItem('shuttl:classes:origin'); } catch { /* private mode */ }
+        try {
+            if (id) localStorage.setItem(ORIGIN_KEY, id);
+            else localStorage.removeItem(ORIGIN_KEY);
+        } catch { /* private mode */ }
     };
     const [showStopPicker, setShowStopPicker] = useState(false);
+    const [showCourses, setShowCourses] = useState(false);
+    const needsAttention = schedule.some((c) => c.plannable === false);
+    // A stop chosen by hand is an origin in its own right and survives a
+    // reload; the GPS fix does not. Keying the rows off coords alone told a
+    // rider with a saved stop to "pick a starting stop" while their plans were
+    // already loading behind the message.
+    const hasOrigin = Boolean(coords || manualStopId);
+    const chosenStop = stops.find((s) => String(s.id) === manualStopId);
 
-    // Plans, one per event, filled in as each arrives rather than all at once:
-    // the first class of the day is the one being asked about, and it should
-    // not wait on a geocode for tomorrow's seminar.
+    // Plans
     const [plans, setPlans] = useState<Record<string, PlanState>>({});
     const planGen = useRef(0);
     const [selectedId, setSelectedId] = useState<string | null>(null);
 
-    // Reminders. `publicKey` undefined = still asking; null = server has no
-    // push configured, which hides the toggle.
+    // The next class is the question the panel was opened to answer, so it is
+    // the one row that starts expanded. Everything behind it stays a single
+    // line until asked for — a week of classes is fifteen rows, and fifteen
+    // expanded plans is a wall. Collapsing it by hand sticks: the effect only
+    // reaches for a default when the current pick is gone.
+    useEffect(() => {
+        setSelectedId((cur) => (cur && events.some((e) => e.id === cur) ? cur : events[0]?.id ?? null));
+    }, [events]);
+
+    // Reminders
     const [publicKey, setPublicKey] = useState<string | null | undefined>(undefined);
     const [remindOn, setRemindOn] = useState<boolean>(() => isReminderEnabled());
     const [remindBusy, setRemindBusy] = useState(false);
     const [remindError, setRemindError] = useState<string | null>(null);
-
     const pushAvailable = isPushSupported() && Boolean(publicKey);
 
-    // -- calendar -----------------------------------------------------------
+    // -- screenshot parse ------------------------------------------------------
 
-    const loadEvents = useCallback(async () => {
-        setEventsLoading(true);
-        setAuthError(null);
+    const parseScreenshots = useCallback(async (files: File[]) => {
+        const images = files.filter(f => f.type.startsWith('image/'));
+        if (images.length === 0) return;
+        setParsing(true);
+        setParseError(null);
         try {
-            const [list, who] = await Promise.all([listUpcomingEvents(LOOKAHEAD_HOURS), getAccountEmail()]);
-            setEvents(list);
-            setEmail(who);
-            setSelectedId(null);
-        } catch (e) {
-            if (e instanceof NotSignedInError) {
-                // Token lapsed under us; back to the Connect button, quietly.
-                setSignedIn(false);
-                setEvents(null);
-                setEmail(null);
-            } else {
-                setAuthError(e instanceof Error ? e.message : 'Could not load your calendar.');
+            const form = new FormData();
+            for (const img of images) form.append('images', img);
+            const res = await fetch(`${API_BASE_URL}/parse-schedule`, { method: 'POST', body: form });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({ detail: `Server error ${res.status}` }));
+                throw new Error(err.detail || `Parse failed (${res.status})`);
             }
-        } finally {
-            setEventsLoading(false);
-        }
-    }, []);
-
-    useEffect(() => {
-        if (signedIn) void loadEvents();
-    }, [signedIn, loadEvents]);
-
-    const connect = async () => {
-        setAuthError(null);
-        try {
-            await signIn();
-            setSignedIn(true);
+            const data = await res.json() as { classes?: StoredClass[] };
+            const parsed = Array.isArray(data.classes) ? data.classes : [];
+            if (parsed.length === 0) throw new Error('No courses were found in those screenshots.');
+            const merged = mergeClasses(schedule, parsed);
+            setSchedule(merged);
+            saveSchedule(merged);
         } catch (e) {
-            setAuthError(e instanceof Error ? e.message : 'Sign-in failed.');
+            setParseError(e instanceof Error ? e.message : 'Could not parse screenshots');
+        } finally {
+            setParsing(false);
         }
+    }, [schedule]);
+
+    const handleDrop = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        setDragOver(false);
+        const files = Array.from(e.dataTransfer.files);
+        if (files.length) void parseScreenshots(files);
+    }, [parseScreenshots]);
+
+    const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+        const files = Array.from(e.target.files ?? []);
+        if (files.length) void parseScreenshots(files);
+        e.target.value = '';
+    }, [parseScreenshots]);
+
+    const removeClass = (id: string) => {
+        const updated = schedule.filter(c => c.id !== id);
+        setSchedule(updated);
+        saveSchedule(updated);
     };
 
-    const disconnect = () => {
-        signOut();
-        setSignedIn(false);
-        setEvents(null);
-        setEmail(null);
+    const clearSchedule = () => {
+        setSchedule([]);
+        saveSchedule([]);
         setPlans({});
-        // A plan drawn from a class that is no longer listed would be a trip
-        // nothing on screen refers to.
         if (selectedId) onShowOnMap?.('', null);
         setSelectedId(null);
     };
 
-    // -- origin -------------------------------------------------------------
+    // -- origin ----------------------------------------------------------------
 
     const locate = useCallback((force = false) => {
         setLocating(true);
         setLocError(null);
         void getLocation(force).then((result) => {
             setLocating(false);
-            if (result.coords) {
-                setCoords(result.coords);
-                return;
-            }
-            if (result.failure) {
-                setLocError(describeFailure(result.failure));
-                setShowStopPicker(true);
-            }
+            if (result.coords) { setCoords(result.coords); return; }
+            if (result.failure) { setLocError(describeFailure(result.failure)); setShowStopPicker(true); }
         });
     }, []);
 
     useEffect(() => {
-        if (configured && signedIn) locate();
-    }, [configured, signedIn, locate]);
+        if (schedule.length > 0) locate();
+    }, [schedule.length, locate]);
 
     useEffect(() => {
-        if (!showStopPicker || !systemId || stops.length > 0) return;
+        // Also fetched when a stop is already saved but the picker is shut:
+        // the saved stop still has to be checked for service before its plans
+        // are trusted, and that check needs the list.
+        if ((!showStopPicker && !manualStopId) || !systemId || stops.length > 0) return;
         fetch(`${API_BASE_URL}/stops?system_id=${systemId}`)
             .then((r) => (r.ok ? r.json() : []))
             .then((d: PlanStop[]) => setStops(d || []))
             .catch(() => setStops([]));
-    }, [showStopPicker, systemId, stops.length]);
+    }, [showStopPicker, manualStopId, systemId, stops.length]);
 
     const chooseStop = (stopId: string) => {
         setManualStopId(stopId);
@@ -286,20 +542,44 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
         setLocError(null);
     };
 
-    // -- plans --------------------------------------------------------------
+    // -- plans -----------------------------------------------------------------
+
+    // Where each class is travelled from, one entry per event. A rider's day
+    // is a chain, not a series of trips from one fixed point: the 10am starts
+    // at home, the 11:30 starts wherever the 10am let out. Recomputed whenever
+    // the events or either origin changes, and shared by the plans below and
+    // the reminders further down so the card and the notification agree.
+    const origins = useMemo(
+        () => originForEach(events, manualStopId, coords, new Date()),
+        [events, manualStopId, coords],
+    );
 
     useEffect(() => {
-        if (!events || (!coords && !manualStopId)) return;
+        if (!events.length || !hasOrigin) return;
         const gen = ++planGen.current;
         setPlans(Object.fromEntries(events.map((e) => [e.id, { status: 'loading' } as PlanState])));
 
         for (const ev of events) {
-            // A chosen stop is the origin; a GPS fix only stands in when none
-            // is chosen. Same rule the reminders use, so the plan on screen
-            // and the notification agree.
-            const params = new URLSearchParams({ dest: ev.location ?? ev.title, arrive_by: ev.start });
-            if (manualStopId) params.set('origin_stop_id', manualStopId);
-            else if (coords) { params.set('lat', coords.lat.toString()); params.set('lng', coords.lng.toString()); }
+            const from = origins[ev.id];
+            const params = new URLSearchParams({ dest: ev.location || ev.title, arrive_by: ev.start });
+            // A named room beats a stop id: the planner resolves "Emerson 305"
+            // to the stop that actually serves it, which is the whole point of
+            // starting from the previous class rather than from home.
+            if (from?.origin_place) params.set('origin_place', from.origin_place);
+            else if (from?.origin_stop_id) params.set('origin_stop_id', from.origin_stop_id);
+            else if (from?.lat != null && from?.lng != null) {
+                params.set('lat', String(from.lat));
+                params.set('lng', String(from.lng));
+            } else {
+                // A class far enough out that the GPS fix is meaningless, with
+                // no home stop to fall back on. Say so rather than leaving the
+                // row on a skeleton that never resolves.
+                setPlans((p) => ({
+                    ...p,
+                    [ev.id]: { status: 'error', message: 'Set a home stop to plan this one.' },
+                }));
+                continue;
+            }
             fetch(`${API_BASE_URL}/arrival_plan?${params}`)
                 .then(async (res) => {
                     if (res.status === 404) throw new Error('Planner unavailable right now.');
@@ -307,31 +587,17 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
                     return (await res.json()) as ArrivalPlan;
                 })
                 .then(
-                    (plan) => {
-                        if (gen !== planGen.current) return;
-                        setPlans((p) => ({ ...p, [ev.id]: { status: 'ok', plan } }));
-                    },
+                    (plan) => { if (gen === planGen.current) setPlans((p) => ({ ...p, [ev.id]: { status: 'ok', plan } })); },
                     (e: unknown) => {
-                        if (gen !== planGen.current) return;
-                        setPlans((p) => ({
-                            ...p,
-                            [ev.id]: {
-                                status: 'error',
-                                message: e instanceof Error ? e.message : 'Could not plan this trip.',
-                            },
+                        if (gen === planGen.current) setPlans((p) => ({
+                            ...p, [ev.id]: { status: 'error', message: e instanceof Error ? e.message : 'Could not plan this trip.' },
                         }));
                     },
                 );
         }
-    }, [events, coords, manualStopId]);
+    }, [events, origins, hasOrigin]);
 
-    const refresh = () => {
-        if (!signedIn) return;
-        void loadEvents();
-        if (!coords) locate(true);
-    };
-
-    const toggleRow = (ev: CalendarEvent) => {
+    const toggleRow = (ev: ClassEvent) => {
         const state = plans[ev.id];
         const rec = state?.status === 'ok' ? state.plan.recommended : null;
         if (!rec) return;
@@ -341,38 +607,34 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
         else onShowOnMap?.(rec.board_stop.id, null);
     };
 
-    // -- reminders ----------------------------------------------------------
+    // -- reminders -------------------------------------------------------------
+
+    useEffect(() => { if (!isPushSupported()) { setPublicKey(null); return; } void fetchPublicKey().then(setPublicKey); }, []);
 
     useEffect(() => {
-        if (!isPushSupported()) {
-            setPublicKey(null);
-            return;
-        }
-        void fetchPublicKey().then(setPublicKey);
-    }, []);
-
-    // Whenever the list changes and reminders are on, the server gets the new
-    // list. Origin travels with it so the server can plan from where the
-    // rider was, not from a stop it has to guess.
-    useEffect(() => {
-        if (!remindOn || !pushAvailable || !events) return;
-        if (!coords && !manualStopId) return;
-        const reminders: Reminder[] = events.map((ev) => ({
-            id: ev.id,
-            title: ev.title,
-            arrive_by: ev.start,
-            dest: ev.location ?? ev.title,
-            // A chosen stop beats a GPS fix: the fix is where the rider was
-            // when this ran, the stop is where they will actually leave from.
-            origin_stop_id: manualStopId || null,
-            origin_lat: manualStopId ? null : coords?.lat ?? null,
-            origin_lng: manualStopId ? null : coords?.lng ?? null,
-            lead_minutes: LEAD_MINUTES,
-        }));
+        if (!remindOn || !pushAvailable || !events.length || !hasOrigin) return;
+        // The same chain the cards use. The server re-plans each reminder at
+        // send time, so it needs to know that the 11:30 is reached from the
+        // 10am's room — planning it from home would send the rider to the
+        // wrong stop, at the wrong time, for a bus they are nowhere near.
+        const reminders: Reminder[] = events.map((ev) => {
+            const from = origins[ev.id];
+            return {
+                id: ev.id,
+                title: ev.title,
+                arrive_by: ev.start,
+                dest: ev.location || ev.title,
+                origin_place: from?.origin_place ?? null,
+                origin_stop_id: from?.origin_stop_id ?? null,
+                origin_lat: from?.lat ?? null,
+                origin_lng: from?.lng ?? null,
+                lead_minutes: LEAD_MINUTES,
+            };
+        });
         putReminders(reminders).catch((e: unknown) => {
             setRemindError(e instanceof Error ? e.message : 'Could not save reminders.');
         });
-    }, [remindOn, pushAvailable, events, coords, manualStopId]);
+    }, [remindOn, pushAvailable, events, origins, hasOrigin]);
 
     const toggleRemind = async () => {
         if (!publicKey || remindBusy) return;
@@ -390,120 +652,131 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
             }
         } catch (e) {
             if (e instanceof SubscribeError && e.reason === 'denied') {
-                setRemindError('Notifications are blocked for this site. Allow them in your browser settings to get reminders.');
+                setRemindError('Notifications blocked for this site. Allow them in browser settings.');
             } else {
                 setRemindError(e instanceof Error ? e.message : 'Could not change reminders.');
             }
-        } finally {
-            setRemindBusy(false);
-        }
+        } finally { setRemindBusy(false); }
     };
 
-    // -- render -------------------------------------------------------------
+    // -- render: empty state (no schedule) ------------------------------------
 
-    if (!configured) {
+    if (schedule.length === 0 && !parsing) {
         return (
             <div className="flex flex-col flex-1 min-h-0 pt-1">
-                <Alert variant="info">
-                    <AlertIcon className="text-neutral-400">
-                        <Info size={14} />
-                    </AlertIcon>
-                    <AlertContent>
-                        <AlertTitle>Calendar isn't configured</AlertTitle>
-                        <AlertDescription>
-                            This build has no Google client ID, so the Classes tab cannot
-                            read a calendar. Set <code className="text-neutral-300">VITE_GOOGLE_CLIENT_ID</code> to
-                            turn it on.
-                        </AlertDescription>
-                    </AlertContent>
-                </Alert>
+                {parseError && (
+                    <Alert variant="warning" className="mb-2">
+                        <AlertIcon><TriangleAlert size={12} /></AlertIcon>
+                        <AlertContent><AlertDescription>{parseError}</AlertDescription></AlertContent>
+                    </Alert>
+                )}
+                <div
+                    className={clsx(
+                        'flex flex-1 flex-col items-center justify-center gap-3 py-8 text-center rounded-xl border-2 border-dashed transition-colors cursor-pointer',
+                        dragOver ? 'border-crimson/60 bg-crimson/5' : 'border-white/10 bg-transparent',
+                    )}
+                    onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                    onDragLeave={() => setDragOver(false)}
+                    onDrop={handleDrop}
+                    onClick={() => fileRef.current?.click()}
+                >
+                    <Camera size={22} className="text-crimson" />
+                    <div>
+                        <p className="text-[12px] font-semibold text-white">Screenshot your schedule</p>
+                        <p className="mt-1 max-w-[260px] text-[11px] leading-relaxed text-neutral-500">
+                            Open my.harvard → Enrollments and screenshot as you scroll.
+                            Drop them here in any order — a few at a time is fine, and you
+                            can add the rest later.
+                        </p>
+                    </div>
+                    <div className={cn(buttonVariants({ variant: 'primary', size: 'md' }), 'pointer-events-none')}>
+                        <Upload size={14} />
+                        Upload Screenshots
+                    </div>
+                    {/* The sheet can be dragged back down over this, and a
+                        half-covered drop zone reads as an app that does
+                        nothing. Say where the rest of it went. */}
+                    <p className="flex items-center gap-1 text-[9px] text-neutral-500 md:hidden">
+                        <ChevronUp size={10} />
+                        Swipe up on the bar above for the full form
+                    </p>
+                    <p className="max-w-[280px] text-[9px] leading-relaxed text-neutral-600">
+                        Screenshots are sent to OpenAI to be read, and are not stored by
+                        either service afterwards. Your schedule stays on this device.
+                    </p>
+                </div>
+                <input
+                    ref={fileRef}
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    className="hidden"
+                    onChange={handleFileChange}
+                />
             </div>
         );
     }
 
-    if (!signedIn) {
+    // -- render: parsing state ------------------------------------------------
+
+    if (parsing) {
         return (
             <div className="flex flex-col flex-1 min-h-0 pt-1">
-                {authError && (
-                    <Alert variant="warning" className="mb-2">
-                        <AlertIcon>
-                            <TriangleAlert size={12} />
-                        </AlertIcon>
-                        <AlertContent>
-                            <AlertDescription>{authError}</AlertDescription>
-                        </AlertContent>
-                    </Alert>
-                )}
                 <div className="flex flex-1 flex-col items-center justify-center gap-3 py-8 text-center">
-                    <CalendarDays size={22} className="text-crimson" />
-                    <div>
-                        <p className="text-[12px] font-semibold text-white">Which shuttle gets you to class?</p>
-                        <p className="mt-1 max-w-[260px] text-[11px] leading-relaxed text-neutral-500">
-                            Connect Google Calendar and each upcoming class gets a bus, a
-                            stop, and the time to be standing at it.
-                        </p>
-                    </div>
-                    <button
-                        type="button"
-                        onClick={() => void connect()}
-                        className={buttonVariants({ variant: 'primary', size: 'md' })}
-                    >
-                        Connect Google Calendar
-                    </button>
-                    <p className="text-[9px] text-neutral-600">Read-only. Nothing is stored on our servers.</p>
+                    <RefreshCw size={22} className="text-crimson animate-spin" />
+                    <p className="text-[12px] font-semibold text-white">Reading your schedule…</p>
+                    <p className="text-[11px] text-neutral-500">This takes a few seconds.</p>
                 </div>
             </div>
         );
     }
+
+    // -- render: schedule loaded ----------------------------------------------
 
     return (
         <div className="flex flex-col flex-1 min-h-0 pt-1">
-            {/* Who we are reading */}
+            {/* Header */}
             <div className="flex items-center justify-between shrink-0 pb-2">
                 <div className="flex items-center gap-1.5 min-w-0">
-                    <CalendarDays size={12} className="text-crimson shrink-0" />
+                    <Camera size={12} className="text-crimson shrink-0" />
                     <span className="text-[11px] text-neutral-300 truncate">
-                        Google Calendar
-                        {email && (
-                            <>
-                                {' '}· connected as <span className="font-semibold text-white">{email}</span>
-                            </>
-                        )}
+                        {schedule.length} class{schedule.length !== 1 ? 'es' : ''} loaded
                     </span>
                 </div>
-                <button
-                    type="button"
-                    onClick={() => setShowStopPicker((v) => !v)}
-                    aria-label="Choose a starting stop manually"
-                    className={cn(buttonVariants({ variant: 'ghost', size: 'iconSm' }), 'ml-auto')}
-                >
-                    <MapPin size={12} />
-                </button>
-                <button
-                    type="button"
-                    onClick={refresh}
-                    aria-label="Refresh classes"
-                    className={buttonVariants({ variant: 'ghost', size: 'iconSm' })}
-                >
-                    <RefreshCw size={12} className={clsx(eventsLoading && 'animate-spin')} />
-                </button>
-                <button
-                    type="button"
-                    onClick={disconnect}
-                    className={cn(buttonVariants({ variant: 'ghost', size: 'sm' }), 'px-2')}
-                >
-                    <LogOut size={11} />
-                    Sign out
-                </button>
+                <div className="flex items-center gap-0.5">
+                    <button
+                        type="button"
+                        onClick={() => setShowStopPicker((v) => !v)}
+                        aria-label="Choose starting stop"
+                        className={cn(buttonVariants({ variant: 'ghost', size: 'iconSm' }), 'ml-auto')}
+                    >
+                        <MapPin size={12} />
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => fileRef.current?.click()}
+                        aria-label="Add more screenshots"
+                        className={buttonVariants({ variant: 'ghost', size: 'iconSm' })}
+                    >
+                        <Camera size={12} />
+                    </button>
+                    <button
+                        type="button"
+                        onClick={clearSchedule}
+                        aria-label="Clear schedule"
+                        className={cn(buttonVariants({ variant: 'ghost', size: 'iconSm' }), 'text-neutral-500 hover:text-crimson')}
+                    >
+                        <Trash2 size={12} />
+                    </button>
+                </div>
             </div>
 
-            {/* Reminders. Rendered only when the server can push and the
-                browser can listen; a switch that cannot work is not shown. */}
+            {/* Reminders */}
             {pushAvailable && (
                 <div className="flex items-center justify-between gap-2 shrink-0 pb-2">
                     <span className="text-[10px] text-neutral-500">
                         {remindOn
-                            ? `A notification ${LEAD_MINUTES} min before you need to leave.`
+                            ? `Notification ${LEAD_MINUTES} min before you need to leave.`
                             : 'Get a nudge when it is time to leave for the stop.'}
                     </span>
                     <button
@@ -512,10 +785,7 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
                         aria-checked={remindOn}
                         disabled={remindBusy}
                         onClick={() => void toggleRemind()}
-                        className={cn(
-                            buttonVariants({ variant: remindOn ? 'selected' : 'secondary', size: 'sm' }),
-                            'shrink-0',
-                        )}
+                        className={cn(buttonVariants({ variant: remindOn ? 'selected' : 'secondary', size: 'sm' }), 'shrink-0')}
                     >
                         {remindOn ? <Bell size={11} /> : <BellOff size={11} />}
                         Remind me
@@ -523,20 +793,14 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
                 </div>
             )}
 
-            {(authError || locError || remindError) && (
+            {(parseError || locError || remindError) && (
                 <Alert variant="warning" className="mb-2">
-                    <AlertIcon>
-                        <TriangleAlert size={12} />
-                    </AlertIcon>
+                    <AlertIcon><TriangleAlert size={12} /></AlertIcon>
                     <AlertContent>
-                        <AlertDescription>{authError ?? locError ?? remindError}</AlertDescription>
+                        <AlertDescription>{parseError ?? locError ?? remindError}</AlertDescription>
                         {locError && (
                             <AlertActions>
-                                <button
-                                    type="button"
-                                    onClick={() => locate(true)}
-                                    className={buttonVariants({ variant: 'secondary', size: 'sm' })}
-                                >
+                                <button type="button" onClick={() => locate(true)} className={buttonVariants({ variant: 'secondary', size: 'sm' })}>
                                     Try again
                                 </button>
                             </AlertActions>
@@ -548,8 +812,12 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
             {showStopPicker && (
                 <div className="mb-2 shrink-0">
                     <label className="mb-1 flex items-center gap-1 px-0.5 text-[9px] font-bold uppercase tracking-wider text-neutral-500">
-                        <MapPin size={9} /> Starting from
+                        <MapPin size={9} /> Home stop
                     </label>
+                    <p className="mb-1.5 px-0.5 text-[9px] leading-relaxed text-neutral-500">
+                        Where your day starts. Classes with a gap before them are planned
+                        from here; back-to-back ones are planned from the class before.
+                    </p>
                     <select
                         value={manualStopId}
                         onChange={(e) => chooseStop(e.target.value)}
@@ -557,63 +825,141 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
                     >
                         <option value="">Choose a stop…</option>
                         {stops.map((s) => (
-                            <option key={s.id} value={s.id}>{s.name}</option>
+                            <option key={s.id} value={s.id}>
+                                {s.name}
+                                {!daytimeServed(s) && ` — ${s.routes?.join('/')} only, no daytime service`}
+                            </option>
                         ))}
                     </select>
+                    {chosenStop && !daytimeServed(chosenStop) && (
+                        <p className="mt-1 px-0.5 text-[9px] leading-relaxed text-crimson-light">
+                            {chosenStop.name} is only served by {chosenStop.routes?.join(' and ')} — overnight and
+                            early morning. Daytime classes cannot be planned from here.
+                        </p>
+                    )}
                 </div>
             )}
 
+            {/* Event list */}
             <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain touch-pan-y custom-scrollbar pr-1 pb-2 space-y-1.5">
-                {eventsLoading && !events && (
-                    <div className="space-y-1.5">
-                        {[0, 1, 2].map((i) => (
-                            <div key={i} className="h-16 animate-pulse rounded-xl bg-neutral-800/40" />
-                        ))}
-                    </div>
+                {events.length > 0 && (
+                    <p className="text-[10px] font-bold uppercase tracking-wider text-neutral-500">
+                        {locating ? 'Finding you…' : manualStopId ? 'From your chosen stop' : coords ? 'From where you are' : 'Pick a starting stop'}
+                    </p>
                 )}
 
-                {events && events.length === 0 && (
+                {events.length === 0 && (
                     <div className="py-6 text-center">
-                        <p className="text-[11px] text-neutral-400">Nothing to get to.</p>
+                        <p className="text-[11px] text-neutral-400">No upcoming classes.</p>
                         <p className="mt-1 text-[10px] text-neutral-500">
-                            No events with a location in the next {LOOKAHEAD_HOURS} hours.
+                            {schedule.some((c) => c.plannable === false)
+                                ? 'Some courses had no readable meeting time — see the list below.'
+                                : `Nothing on your schedule meets in the next ${Math.round(LOOKAHEAD_HOURS / 24)} days.`}
                         </p>
                     </div>
                 )}
 
-                {events && events.length > 0 && (
-                    <p className="text-[10px] font-bold uppercase tracking-wider text-neutral-500">
-                        {locating ? 'Finding you…' : coords ? (manualStopId ? 'From your chosen stop' : 'From where you are') : 'Pick a starting stop'}
-                    </p>
-                )}
-
-                {events?.map((ev) => (
-                    <ClassRow
-                        key={ev.id}
-                        event={ev}
-                        state={coords ? plans[ev.id] : undefined}
-                        hasOrigin={Boolean(coords)}
-                        open={selectedId === ev.id}
-                        onClick={() => toggleRow(ev)}
-                    />
+                {groupByDay(events).map(({ key, label, items }) => (
+                    <div key={key} className="space-y-1">
+                        <p className="px-0.5 pt-1.5 text-[9px] font-bold uppercase tracking-wider text-neutral-600">
+                            {label}
+                        </p>
+                        {items.map((ev) => (
+                            <ClassRow
+                                key={ev.id}
+                                event={ev}
+                                state={hasOrigin ? plans[ev.id] : undefined}
+                                hasOrigin={hasOrigin}
+                                origin={origins[ev.id]}
+                                open={selectedId === ev.id}
+                                onClick={() => toggleRow(ev)}
+                            />
+                        ))}
+                    </div>
                 ))}
+
+                {/* The stored courses. Folded away by default: it repeats what
+                    the day groups above already say, and its real jobs —
+                    deleting one course, and flagging a card that parsed
+                    without a meeting time — are occasional. A course that
+                    needs attention opens it unprompted. */}
+                <div className="pt-3 border-t border-white/5">
+                    <button
+                        type="button"
+                        onClick={() => setShowCourses((v) => !v)}
+                        aria-expanded={showCourses || needsAttention}
+                        className="flex w-full items-center justify-between py-0.5 text-left"
+                    >
+                        <span className="text-[9px] font-bold uppercase tracking-wider text-neutral-600">
+                            Your courses · {schedule.length}
+                        </span>
+                        {needsAttention ? (
+                            <span className="text-[9px] font-semibold text-crimson-light">
+                                {schedule.filter((c) => c.plannable === false).length} need a re-shot
+                            </span>
+                        ) : (
+                            <ChevronDown
+                                size={11}
+                                className={clsx('text-neutral-600 transition-transform', showCourses && 'rotate-180')}
+                            />
+                        )}
+                    </button>
+                </div>
+
+                <div className={clsx(!(showCourses || needsAttention) && 'hidden')}>
+                    {schedule.map((c) => (
+                        <div key={c.id} className="flex items-center justify-between py-1 group">
+                            <div className="min-w-0">
+                                <p className="truncate text-[11px] text-neutral-300">
+                                    {c.title}
+                                    {c.section && <span className="text-neutral-500"> · {c.section}</span>}
+                                </p>
+                                {c.plannable === false ? (
+                                    <p className="text-[9px] text-crimson-light">
+                                        {c.code} · no meeting time read — screenshot this card again
+                                    </p>
+                                ) : (
+                                    <p className="truncate text-[9px] text-neutral-500">
+                                        {[c.code, (c.days ?? []).join('/'), `${c.start_time}–${c.end_time}`, c.location]
+                                            .filter(Boolean)
+                                            .join(' · ')}
+                                    </p>
+                                )}
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => removeClass(c.id)}
+                                className="shrink-0 p-1 opacity-0 group-hover:opacity-100 transition-opacity text-neutral-600 hover:text-crimson"
+                                aria-label={`Remove ${c.title}`}
+                            >
+                                <Trash2 size={10} />
+                            </button>
+                        </div>
+                    ))}
+                </div>
             </div>
+
+            <input ref={fileRef} type="file" accept="image/*" multiple className="hidden" onChange={handleFileChange} />
         </div>
     );
 };
 
+// ---------------------------------------------------------------------------
+// ClassRow — same visual grammar as the old version
 // ---------------------------------------------------------------------------
 
 const ClassRow = ({
     event: ev,
     state,
     hasOrigin,
+    origin,
     open,
     onClick,
 }: {
-    event: CalendarEvent;
+    event: ClassEvent;
     state: PlanState | undefined;
     hasOrigin: boolean;
+    origin: OriginChoice | undefined;
     open: boolean;
     onClick: () => void;
 }) => {
@@ -640,8 +986,6 @@ const ClassRow = ({
                 className={clsx('w-full px-3 py-2.5 text-left', tappable && 'hover:bg-white/5')}
             >
                 <div className="flex items-center gap-2.5">
-                    {/* Route badge, or a neutral slot until there is a route to
-                        name — the column stays aligned while plans arrive. */}
                     <span
                         className="shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-black"
                         style={
@@ -654,11 +998,18 @@ const ClassRow = ({
                     </span>
 
                     <div className="min-w-0 flex-1">
-                        <p className="truncate text-[12px] font-semibold leading-tight text-white">{ev.title}</p>
+                        <p className="truncate text-[12px] font-semibold leading-tight text-white">
+                            {ev.title}
+                            {ev.section && ev.section !== 'Lecture' && (
+                                <span className="font-normal text-neutral-400"> · {ev.section}</span>
+                            )}
+                        </p>
+                        {/* The day is the group heading above, so the row only
+                            carries the clock time. */}
                         <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-neutral-400">
                             <span className="inline-flex shrink-0 items-center gap-0.5 tabular-nums">
                                 <Clock size={9} />
-                                {whenLabel(ev.start)}
+                                {clock(ev.start)}
                             </span>
                             {ev.location && (
                                 <>
@@ -669,8 +1020,6 @@ const ClassRow = ({
                         </div>
                     </div>
 
-                    {/* The one number. Same weight as Next Bus Out's ETA
-                        figure; here it is a clock time. */}
                     <div className="shrink-0 text-right">
                         <p className="text-[9px] font-bold uppercase tracking-wider text-neutral-500">Be at stop</p>
                         {rec ? (
@@ -681,48 +1030,69 @@ const ClassRow = ({
                     </div>
                 </div>
 
-                <div className="mt-2 border-t border-white/5 pt-2">
-                    {!hasOrigin && (
-                        <p className="text-[10px] text-neutral-500">Pick a starting stop to plan this one.</p>
-                    )}
-                    {hasOrigin && (!state || state.status === 'loading') && (
-                        <div className="space-y-1.5">
-                            <div className="h-2.5 w-2/3 animate-pulse rounded bg-neutral-700/50" />
-                            <div className="h-2.5 w-1/2 animate-pulse rounded bg-neutral-700/50" />
-                        </div>
-                    )}
-                    {state?.status === 'error' && (
-                        <p className="text-[10px] text-neutral-500">{state.message}</p>
-                    )}
-                    {plan && !rec && (
-                        <>
-                            <p className="text-[11px] font-bold text-crimson-light">No shuttle gets there in time.</p>
-                            <ResolvedDest plan={plan} lowConfidence={lowConfidence} />
-                        </>
-                    )}
-                    {plan && rec && (
-                        <div className="space-y-1">
-                            <p className="text-[11px] leading-snug text-neutral-300">
-                                Be at <span className="font-semibold text-white">{rec.board_stop.name}</span> by{' '}
-                                <span className="font-semibold tabular-nums text-white">{clock(rec.be_at_stop_by)}</span>
-                            </p>
-                            <p className="text-[10px] leading-snug text-neutral-400 tabular-nums">
-                                <span className="font-semibold text-neutral-300">{rec.route_id}</span> departs {clock(rec.depart_at)}
-                                {' → '}
-                                {rec.alight_stop.name} {clock(rec.arrive_stop_at)}
-                                {plan.dest.walk_minutes > 0 && (
-                                    <span className="text-neutral-500">
-                                        {' '}· {Math.max(1, Math.round(plan.dest.walk_minutes))} min walk
-                                    </span>
-                                )}
-                            </p>
-                            <div className="flex items-center justify-between gap-2">
-                                <Slack rec={rec} />
-                                <ResolvedDest plan={plan} lowConfidence={lowConfidence} />
+                {/* The full plan is only drawn for the open row. Every row
+                    carrying its own "be at X by Y, route Z departs…" block is
+                    what turned a week of classes into a wall of near-identical
+                    paragraphs; collapsed, the figure on the right is the
+                    answer and the rest is one tap away. */}
+                {open && (
+                    <div className="mt-2 border-t border-white/5 pt-2">
+                        {!hasOrigin && (
+                            <p className="text-[10px] text-neutral-500">Pick a starting stop to plan this one.</p>
+                        )}
+                        {hasOrigin && (!state || state.status === 'loading') && (
+                            <div className="space-y-1.5">
+                                <div className="h-2.5 w-2/3 animate-pulse rounded bg-neutral-700/50" />
+                                <div className="h-2.5 w-1/2 animate-pulse rounded bg-neutral-700/50" />
                             </div>
-                        </div>
-                    )}
-                </div>
+                        )}
+                        {state?.status === 'error' && (
+                            <p className="text-[10px] text-neutral-500">{state.message}</p>
+                        )}
+                        {plan && !rec && (
+                            <>
+                                <p className="text-[11px] font-bold text-crimson-light">No shuttle gets there in time.</p>
+                                <ResolvedDest plan={plan} lowConfidence={lowConfidence} />
+                            </>
+                        )}
+                        {plan && rec && (
+                            <div className="space-y-1">
+                                <p className="text-[11px] leading-snug text-neutral-300">
+                                    Be at <span className="font-semibold text-white">{rec.board_stop.name}</span> by{' '}
+                                    <span className="font-semibold tabular-nums text-white">{clock(rec.be_at_stop_by)}</span>
+                                </p>
+                                <p className="text-[10px] leading-snug text-neutral-400 tabular-nums">
+                                    <span className="font-semibold text-neutral-300">{rec.route_id}</span> departs {clock(rec.depart_at)}
+                                    {' → '}
+                                    {rec.alight_stop.name} {clock(rec.arrive_stop_at)}
+                                    {plan.dest.walk_minutes > 0 && (
+                                        <span className="text-neutral-500">
+                                            {' '}· {Math.max(1, Math.round(plan.dest.walk_minutes))} min walk
+                                        </span>
+                                    )}
+                                </p>
+                                <div className="flex items-center justify-between gap-2">
+                                    <Slack rec={rec} />
+                                    <ResolvedDest plan={plan} lowConfidence={lowConfidence} />
+                                </div>
+                                {/* Which end of the chain this plan starts
+                                    from. Without it "be at Harvard Square by
+                                    11:43" is unfalsifiable — the rider cannot
+                                    tell whether it assumed they are at home or
+                                    walking out of their last class. */}
+                                {origin && (
+                                    <p className="pt-0.5 text-[9px] text-neutral-500">
+                                        {origin.from === 'previous class'
+                                            ? `Starting from your last class · ${origin.origin_place}`
+                                            : origin.from === 'gps'
+                                                ? 'Starting from where you are now'
+                                                : 'Starting from your home stop'}
+                                    </p>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                )}
             </button>
         </motion.div>
     );
@@ -741,30 +1111,20 @@ const BigClock = ({ iso, muted }: { iso: string; muted: boolean }) => {
 };
 
 const Slack = ({ rec }: { rec: PlanRecommendation }) => {
-    if (!rec.viable) {
-        return <span className="text-[10px] font-bold text-crimson-light">Won't make it</span>;
-    }
+    if (!rec.viable) return <span className="text-[10px] font-bold text-crimson-light">Won't make it</span>;
     const m = Math.round(rec.slack_minutes);
     if (m <= 0) return <span className="text-[10px] font-bold text-crimson-light">Cutting it fine</span>;
     return (
         <span className="text-[10px] text-neutral-400 tabular-nums">
             {m} min spare
-            {/* Harvard's timetable says "approximately", and a plan built from
-                it is a headway midpoint, not a tracked bus. Say so where the
-                rider will read it. */}
             {rec.eta_source === 'schedule' && <span className="text-neutral-500"> · scheduled, approx.</span>}
         </span>
     );
 };
 
-/** Where the planner thinks the class is. Shown always, because the map dot
- * it puts the trip on is only as good as this match; flagged when the
- * geocoder was not sure. */
 const ResolvedDest = ({ plan, lowConfidence }: { plan: ArrivalPlan; lowConfidence: boolean }) => (
     <span className="min-w-0 truncate text-[10px] text-neutral-500">
         → {plan.dest.resolved_name || plan.dest.stop.name}
-        {lowConfidence && (
-            <span className="text-crimson-light"> · best guess, check the stop</span>
-        )}
+        {lowConfidence && <span className="text-crimson-light"> · best guess, check the stop</span>}
     </span>
 );

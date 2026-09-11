@@ -136,6 +136,16 @@ PLACES: dict[str, tuple[float, float, list[str]]] = {
     "Harvard Ed Portal": (42.3635, -71.1280, ["21", "14"]),
     "1 Western Ave": (42.3640, -71.1208, ["13"]),
     "One Western Ave": (42.3640, -71.1208, ["13"]),
+    # The SEAS teaching addresses on Western Ave. my.harvard prints the street
+    # address rather than a building name for these ("114 Western Ave 2111"),
+    # and without a row of their own they matched "1 Western Ave" — a stop on
+    # a different route, a few hundred metres the wrong way. Positions are
+    # interpolated along Western Ave between number 1 and the SEC at 150, both
+    # of which are surveyed above; each lands within ~100m of the SEC stop,
+    # which is the one that serves them.
+    "114 Western Ave": (42.3636, -71.1244, ["18"]),
+    "125 Western Ave": (42.3635, -71.1246, ["18"]),
+    "150 Western Ave": (42.3633, -71.1256, ["18"]),
     "Soldiers Field Park": (42.3652, -71.1226, ["13"]),
 }
 
@@ -161,12 +171,41 @@ def _tokens(text: str) -> list[str]:
     Room designators come in every shape a registrar can invent — "G115",
     "1.321", "Hall B", "Rm 105" — so anything with a digit and any lone letter
     is dropped rather than pattern-matched.
+
+    The exception is a bare number at the very front, which is a street
+    address and part of the building's identity: 1, 114 and 150 Western Ave
+    are three different buildings several hundred metres apart, served by
+    different stops. Dropping it made "114 Western Ave 2111" and
+    "1 Western Ave" the same two tokens and so an exact match.
     """
     raw = [t for t in _SPLIT_RE.split(text.lower().replace("'", "")) if t]
-    words = [t for t in raw if not any(ch.isdigit() for ch in t) and len(t) > 1]
+    words: list[str] = []
+    for i, t in enumerate(raw):
+        if t.isdigit():
+            if i == 0:
+                words.append(t)
+            continue
+        if any(ch.isdigit() for ch in t) or len(t) <= 1:
+            continue
+        words.append(t)
     kept = [w for w in words if w not in _STOPWORDS or w in _KEEP_IF_ALONE]
     strict = [w for w in kept if w not in _STOPWORDS]
     return strict or kept
+
+
+# Gazetteer rows spell some addresses out ("One Western Ave"), so the leading
+# word has to be read as the number it is or the mismatch penalty below never
+# fires against it.
+_NUMBER_WORDS = {"one": "1", "two": "2", "three": "3", "four": "4", "five": "5"}
+
+
+def _street_number(toks: list[str]) -> Optional[str]:
+    if not toks:
+        return None
+    head = toks[0]
+    if head.isdigit():
+        return head
+    return _NUMBER_WORDS.get(head)
 
 
 _PLACE_TOKENS: dict[str, list[str]] = {name: _tokens(name) for name in PLACES}
@@ -184,6 +223,7 @@ def match_place(query: str) -> Optional[tuple[str, float]]:
     if not q:
         return None
     qset = set(q)
+    qnum = _street_number(q)
 
     best: Optional[tuple[str, float]] = None
     for name, ptoks in _PLACE_TOKENS.items():
@@ -197,6 +237,14 @@ def match_place(query: str) -> Optional[tuple[str, float]]:
         # Coverage is what tells us the query really names this place; precision
         # only breaks ties between places the query covers equally well.
         score = 0.7 * coverage + 0.3 * precision
+        # Two street addresses on the same road that disagree about the number
+        # are not the same building, however well the rest of the name matches.
+        # Drop them below the acceptance floor so the caller falls through to
+        # the stop names, or reports an honest miss, instead of walking the
+        # rider to the wrong end of the street with full confidence.
+        pnum = _street_number(ptoks)
+        if qnum and pnum and qnum != pnum:
+            score *= 0.35
         if best is None or score > best[1]:
             best = (name, round(score, 3))
 

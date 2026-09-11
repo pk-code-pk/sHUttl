@@ -44,3 +44,5 @@ eta_predictions.jsonl
 
 # Claude Code worktrees and session files
 .claude/
+.vercel
+.env*

@@ -22,7 +22,9 @@ import reminders as rm
 
 
 def _planner_for(be_at_stop_by: datetime, depart_at: datetime, arrive_at: datetime):
-    def planner(dest, arrive_by, lat=None, lng=None, origin_stop_id=None):
+    # **kwargs so a new planner argument does not fail the stub before it
+    # fails anything real.
+    def planner(dest, arrive_by, lat=None, lng=None, origin_stop_id=None, **kwargs):
         return {
             "recommended": {
                 "route_id": "qye",

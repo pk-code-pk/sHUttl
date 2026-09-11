@@ -244,6 +244,10 @@ def normalize_reminder(raw: dict) -> Optional[dict]:
         "origin_lat": _float_or_none(raw.get("origin_lat")),
         "origin_lng": _float_or_none(raw.get("origin_lng")),
         "origin_stop_id": (str(raw["origin_stop_id"]) if raw.get("origin_stop_id") else None),
+        # Where the rider is coming from, in words — the previous class's
+        # room, when one ends shortly before this one starts. The planner
+        # resolves it the same way it resolves a destination.
+        "origin_place": (str(raw["origin_place"]).strip() or None) if raw.get("origin_place") else None,
         "lead_minutes": lead,
         # Preserved on PUT so re-saving the same set does not re-fire a reminder.
         "sent_at": raw.get("sent_at"),
@@ -382,6 +386,7 @@ def run_tick(
                     lat=r.get("origin_lat"),
                     lng=r.get("origin_lng"),
                     origin_stop_id=r.get("origin_stop_id"),
+                    origin_place=r.get("origin_place"),
                 ) or {}
             except Exception as e:
                 stats["errors"] += 1

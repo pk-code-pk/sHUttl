@@ -84,12 +84,20 @@ def sample_predictions(api: str) -> list[dict]:
         # missed a bus entirely, which is exactly where accuracy differs.
         for rid in set(ours) | set(vendor):
             mine = ours.get(rid)
+            # `eta_minutes` is what the app displays, which is the operator's
+            # own number wherever they have one — scoring that against them is
+            # scoring them against themselves. `own_eta_minutes` is our
+            # projection regardless, and is the only honest "ours" column.
+            own = mine.get("own_eta_minutes") if mine else None
+            if own is None and mine and mine.get("eta_source") != "operator":
+                own = mine.get("eta_minutes")
             rows.append({
                 "t": round(t, 1),
                 "stop_id": stop["id"],
                 "stop_name": stop["name"],
                 "route_id": rid,
-                "ours_min": round(mine["eta_minutes"], 3) if mine else None,
+                "ours_min": round(own, 3) if own is not None else None,
+                "displayed_min": round(mine["eta_minutes"], 3) if mine else None,
                 "vendor_min": vendor.get(rid),
                 "eta_source": mine.get("eta_source") if mine else None,
                 "learned_fraction": mine.get("learned_fraction") if mine else None,
