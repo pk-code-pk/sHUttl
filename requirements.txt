@@ -5,3 +5,5 @@ pydantic
 redis
 fastapi-limiter==0.1.6
 python-dotenv
+pywebpush
+py-vapid
