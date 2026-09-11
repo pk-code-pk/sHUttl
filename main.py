@@ -33,6 +33,8 @@ from ridesystems_client import (
 # GTFS export with live service in it. See ridesystems_client.py.
 from ridesystems_client import distance_along_route_m, get_route_stop_ids
 import arrivals as arrivals_module
+import reminders as reminders_module
+from pydantic import BaseModel, Field
 from arrivals import (
     STORE as ARRIVAL_STORE,
     learned_eta_to_stop,
@@ -60,6 +62,10 @@ if REDIS_URL:
         redis_client = None
 else:
     logger.info("REDIS_URL not set, running without Redis caching")
+
+# Push subscriptions + reminders share the cache connection. Without Redis they
+# fall back to data/reminders.json, which Render wipes on every deploy.
+REMINDER_STORE = reminders_module.Store(redis_client)
 
 # ---------------------------------------------------------------------------
 # In-process TTL cache for PassioGO objects (stops, routes)
@@ -143,6 +149,11 @@ async def startup_event():
     # Start background vehicle position poller (runs regardless of Redis)
     asyncio.create_task(_vehicle_position_poller())
     logger.info("Vehicle position poller started")
+
+    # Reminder ticks are what turn a saved class time into a push on the phone;
+    # nothing else fires them.
+    asyncio.create_task(reminders_module.reminder_scheduler(REMINDER_STORE))
+    logger.info("Reminder scheduler started", extra={"store": REMINDER_STORE.backend})
 
     redis_url = os.getenv("REDIS_URL")
     if not redis_url:
@@ -2929,3 +2940,96 @@ def api_departures(
         "departures": departures,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Web Push reminders
+# ---------------------------------------------------------------------------
+
+class PushSubscribeBody(BaseModel):
+    # The PushSubscription.toJSON() object from the browser, stored verbatim
+    # because pywebpush wants exactly that shape back.
+    subscription: dict[str, Any]
+    client_id: str = Field(min_length=1, max_length=128)
+
+
+class ReminderIn(BaseModel):
+    id: str = Field(min_length=1, max_length=128)
+    title: str = Field(default="", max_length=200)
+    arrive_by: str
+    dest: str = Field(default="", max_length=200)
+    origin_lat: Optional[float] = None
+    origin_lng: Optional[float] = None
+    origin_stop_id: Optional[str] = None
+    lead_minutes: int = Field(default=reminders_module.DEFAULT_LEAD_MINUTES, ge=0, le=180)
+    # Echoed back from GET so a client re-PUTting its list keeps sent state.
+    sent_at: Optional[str] = None
+
+
+class RemindersPut(BaseModel):
+    client_id: str = Field(min_length=1, max_length=128)
+    reminders: list[ReminderIn] = Field(default_factory=list, max_length=50)
+
+
+@app.get("/push/public_key")
+def api_push_public_key():
+    if not reminders_module.vapid_configured():
+        raise HTTPException(status_code=404, detail="Push not configured")
+    return {"public_key": reminders_module.VAPID_PUBLIC_KEY}
+
+
+@app.post("/push/subscribe", dependencies=[Depends(OptionalRateLimiter(times=10, seconds=60))])
+def api_push_subscribe(body: PushSubscribeBody):
+    sub = body.subscription
+    if not sub.get("endpoint") or not isinstance(sub.get("keys"), dict):
+        raise HTTPException(status_code=400, detail="subscription must include endpoint and keys")
+    try:
+        REMINDER_STORE.set_subscription(body.client_id, sub)
+    except (RedisError, OSError) as e:
+        logger.warning("Could not store push subscription", exc_info=e)
+        raise HTTPException(status_code=503, detail="Reminder store unavailable")
+    return {"ok": True}
+
+
+@app.delete("/push/subscribe", dependencies=[Depends(OptionalRateLimiter(times=10, seconds=60))])
+def api_push_unsubscribe(client_id: str = Query(..., min_length=1, max_length=128)):
+    try:
+        REMINDER_STORE.delete_subscription(client_id)
+    except (RedisError, OSError) as e:
+        logger.warning("Could not delete push subscription", exc_info=e)
+        raise HTTPException(status_code=503, detail="Reminder store unavailable")
+    return {"ok": True}
+
+
+@app.put("/reminders", dependencies=[Depends(OptionalRateLimiter(times=20, seconds=60))])
+def api_put_reminders(body: RemindersPut):
+    """Replace this client's reminder set. Past `arrive_by` entries are dropped."""
+    now = reminders_module.now_aware()
+    kept, dropped = [], []
+    for r in body.reminders:
+        norm = reminders_module.normalize_reminder(r.model_dump())
+        if norm is None:
+            raise HTTPException(status_code=400, detail=f"reminder {r.id!r}: arrive_by is not an ISO datetime")
+        if reminders_module.is_expired(norm, now):
+            dropped.append(norm["id"])
+            continue
+        kept.append(norm)
+    try:
+        REMINDER_STORE.set_reminders(body.client_id, kept)
+    except (RedisError, OSError) as e:
+        logger.warning("Could not store reminders", exc_info=e)
+        raise HTTPException(status_code=503, detail="Reminder store unavailable")
+    return {"ok": True, "reminders": kept, "dropped": dropped}
+
+
+@app.get("/reminders", dependencies=[Depends(OptionalRateLimiter(times=30, seconds=60))])
+def api_get_reminders(client_id: str = Query(..., min_length=1, max_length=128)):
+    try:
+        return {
+            "client_id": client_id,
+            "reminders": REMINDER_STORE.get_reminders(client_id),
+            "subscribed": REMINDER_STORE.get_subscription(client_id) is not None,
+        }
+    except (RedisError, OSError) as e:
+        logger.warning("Could not read reminders", exc_info=e)
+        raise HTTPException(status_code=503, detail="Reminder store unavailable")
