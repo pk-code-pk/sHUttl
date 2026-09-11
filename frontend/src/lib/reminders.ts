@@ -25,8 +25,11 @@ export interface Reminder {
     /** ISO 8601. */
     arrive_by: string;
     dest: string;
-    origin_lat: number;
-    origin_lng: number;
+    /** Either a chosen stop or a GPS fix; the server plans from whichever is
+     * present, preferring the stop. */
+    origin_stop_id?: string | null;
+    origin_lat: number | null;
+    origin_lng: number | null;
     lead_minutes: number;
 }
 

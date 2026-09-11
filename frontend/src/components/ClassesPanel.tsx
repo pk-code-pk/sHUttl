@@ -168,7 +168,18 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
     const [locating, setLocating] = useState(false);
     const [locError, setLocError] = useState<string | null>(null);
     const [stops, setStops] = useState<PlanStop[]>([]);
-    const [manualStopId, setManualStopId] = useState('');
+    // The stop reminders and plans leave from, when the rider has chosen one.
+    // Remembered across visits: a reminder is planned on the server from the
+    // origin sent with it, and "where you were when the calendar loaded" is
+    // the wrong origin by the time the class is near. A chosen stop — the
+    // dorm's — is right every morning.
+    const [manualStopId, setManualStopIdState] = useState<string>(() => {
+        try { return localStorage.getItem('shuttl:classes:origin') ?? ''; } catch { return ''; }
+    });
+    const setManualStopId = (id: string) => {
+        setManualStopIdState(id);
+        try { id ? localStorage.setItem('shuttl:classes:origin', id) : localStorage.removeItem('shuttl:classes:origin'); } catch { /* private mode */ }
+    };
     const [showStopPicker, setShowStopPicker] = useState(false);
 
     // Plans, one per event, filled in as each arrives rather than all at once:
@@ -278,17 +289,17 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
     // -- plans --------------------------------------------------------------
 
     useEffect(() => {
-        if (!events || !coords) return;
+        if (!events || (!coords && !manualStopId)) return;
         const gen = ++planGen.current;
         setPlans(Object.fromEntries(events.map((e) => [e.id, { status: 'loading' } as PlanState])));
 
         for (const ev of events) {
-            const params = new URLSearchParams({
-                dest: ev.location ?? ev.title,
-                arrive_by: ev.start,
-                lat: coords.lat.toString(),
-                lng: coords.lng.toString(),
-            });
+            // A chosen stop is the origin; a GPS fix only stands in when none
+            // is chosen. Same rule the reminders use, so the plan on screen
+            // and the notification agree.
+            const params = new URLSearchParams({ dest: ev.location ?? ev.title, arrive_by: ev.start });
+            if (manualStopId) params.set('origin_stop_id', manualStopId);
+            else if (coords) { params.set('lat', coords.lat.toString()); params.set('lng', coords.lng.toString()); }
             fetch(`${API_BASE_URL}/arrival_plan?${params}`)
                 .then(async (res) => {
                     if (res.status === 404) throw new Error('Planner unavailable right now.');
@@ -312,7 +323,7 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
                     },
                 );
         }
-    }, [events, coords]);
+    }, [events, coords, manualStopId]);
 
     const refresh = () => {
         if (!signedIn) return;
@@ -344,20 +355,24 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
     // list. Origin travels with it so the server can plan from where the
     // rider was, not from a stop it has to guess.
     useEffect(() => {
-        if (!remindOn || !pushAvailable || !events || !coords) return;
+        if (!remindOn || !pushAvailable || !events) return;
+        if (!coords && !manualStopId) return;
         const reminders: Reminder[] = events.map((ev) => ({
             id: ev.id,
             title: ev.title,
             arrive_by: ev.start,
             dest: ev.location ?? ev.title,
-            origin_lat: coords.lat,
-            origin_lng: coords.lng,
+            // A chosen stop beats a GPS fix: the fix is where the rider was
+            // when this ran, the stop is where they will actually leave from.
+            origin_stop_id: manualStopId || null,
+            origin_lat: manualStopId ? null : coords?.lat ?? null,
+            origin_lng: manualStopId ? null : coords?.lng ?? null,
             lead_minutes: LEAD_MINUTES,
         }));
         putReminders(reminders).catch((e: unknown) => {
             setRemindError(e instanceof Error ? e.message : 'Could not save reminders.');
         });
-    }, [remindOn, pushAvailable, events, coords]);
+    }, [remindOn, pushAvailable, events, coords, manualStopId]);
 
     const toggleRemind = async () => {
         if (!publicKey || remindBusy) return;
@@ -734,7 +749,10 @@ const Slack = ({ rec }: { rec: PlanRecommendation }) => {
     return (
         <span className="text-[10px] text-neutral-400 tabular-nums">
             {m} min spare
-            {rec.eta_source === 'schedule' && <span className="text-neutral-600"> · scheduled</span>}
+            {/* Harvard's timetable says "approximately", and a plan built from
+                it is a headway midpoint, not a tracked bus. Say so where the
+                rider will read it. */}
+            {rec.eta_source === 'schedule' && <span className="text-neutral-500"> · scheduled, approx.</span>}
         </span>
     );
 };
