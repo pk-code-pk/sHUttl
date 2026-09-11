@@ -49,6 +49,7 @@ from harvard_shapes import (
 from harvard_places import PLACES, match_place, match_stop_name
 
 logger = logging.getLogger("trip")
+import harvard_schedule
 
 REDIS_URL = os.getenv("REDIS_URL")
 redis_client: Optional[Redis] = None
@@ -2967,6 +2968,10 @@ ARRIVAL_PLAN_STOP_BUFFER_S = 120.0
 # the search always either reaches the destination or wraps back to the start.
 ARRIVAL_PLAN_MAX_HOPS = 40
 
+# How far ahead the operator's live ETAs are worth anything. Past this the
+# planner falls back to Harvard's published headways (harvard_schedule.py).
+ARRIVAL_PLAN_LIVE_HORIZON_MIN = 45
+
 
 def resolve_location(query: str, system_id: int = DEFAULT_SYSTEM_ID):
     """Free text -> (stops, resolved_name, confidence, place_latlng).
@@ -3099,11 +3104,14 @@ def plan_arrival(
         return distance_m(stop.latitude, stop.longitude, place_latlng[0], place_latlng[1])
 
     options = []
+    live_routes_at: dict[str, set[str]] = {}
     for board, walk_to_board_m in board_candidates:
         if str(board.id) in dest_ids:
             continue
         walk_to_board_s = walk_to_board_m / WALK_SPEED_MS
-        for route_id, deps in _departures_from_stop(board, system_id).items():
+        live_deps = _departures_from_stop(board, system_id)
+        live_routes_at[str(board.id)] = set(live_deps)
+        for route_id, deps in live_deps.items():
             ride = ride_to_first_of(route_id, board.id, dest_ids, stops_by_id)
             if ride is None:
                 continue
@@ -3137,6 +3145,65 @@ def plan_arrival(
                     "viable": slack_s >= 0 and reachable,
                     # Not in the contract, but the reason an option is not
                     # viable should be visible rather than inferred.
+                    "walk_to_stop_minutes": round(walk_to_board_s / 60.0, 1),
+                    "ride_minutes": round(ride_s / 60.0, 1),
+                })
+
+    # Scheduled departures fill in what the operator cannot see yet. Live ETAs
+    # reach about 45 minutes ahead; a class two hours from now, or a route with
+    # no bus out at the moment, comes from Harvard's published headways. Where
+    # a route has live ETAs from a stop, the schedule only starts past the live
+    # horizon so the same bus is not listed twice. Everything here is marked
+    # "schedule" so the UI can say approximately.
+    horizon = now + timedelta(minutes=ARRIVAL_PLAN_LIVE_HORIZON_MIN)
+    for board, walk_to_board_m in board_candidates:
+        if str(board.id) in dest_ids:
+            continue
+        walk_to_board_s = walk_to_board_m / WALK_SPEED_MS
+        for route_id in harvard_schedule.ROUTES_WITH_SCHEDULE:
+            ride = ride_to_first_of(route_id, board.id, dest_ids, stops_by_id)
+            if ride is None:
+                continue
+            ride_s, alight_id = ride
+            anchor_id = harvard_schedule.anchor_stop_for(route_id)
+            if anchor_id is None:
+                continue
+            if anchor_id == str(board.id):
+                offset_s = 0.0
+            else:
+                to_board = ride_to_first_of(route_id, anchor_id, {str(board.id)}, stops_by_id)
+                if to_board is None:
+                    continue
+                offset_s = to_board[0]
+            window_start = horizon if route_id in live_routes_at.get(str(board.id), set()) else now
+            if window_start >= arrive_by:
+                continue
+            alight = stops_by_id[alight_id]
+            walk_s = walk_from(alight) / WALK_SPEED_MS
+            route = routes_by_id.get(route_id)
+            color = (getattr(route, "groupColor", None) or getattr(route, "color", None)) if route else None
+            offset = timedelta(seconds=offset_s)
+            for anchor_dep, _block in harvard_schedule.departures_in_window(route_id, window_start - offset, arrive_by):
+                depart_at = anchor_dep + offset
+                if depart_at < window_start or depart_at > arrive_by:
+                    continue
+                arrive_stop_at = depart_at + timedelta(seconds=ride_s)
+                arrive_dest_at = arrive_stop_at + timedelta(seconds=walk_s)
+                slack_s = (arrive_by - arrive_dest_at).total_seconds()
+                reachable = (depart_at - now).total_seconds() >= walk_to_board_s
+                options.append({
+                    "route_id": route_id,
+                    "route_name": route.name if route else route_id,
+                    "color": color,
+                    "board_stop": stopdict(board),
+                    "alight_stop": stopdict(alight),
+                    "depart_at": depart_at.isoformat(timespec="seconds"),
+                    "be_at_stop_by": (depart_at - timedelta(seconds=ARRIVAL_PLAN_STOP_BUFFER_S)).isoformat(timespec="seconds"),
+                    "arrive_stop_at": arrive_stop_at.isoformat(timespec="seconds"),
+                    "arrive_dest_at": arrive_dest_at.isoformat(timespec="seconds"),
+                    "slack_minutes": round(slack_s / 60.0, 1),
+                    "eta_source": "schedule",
+                    "viable": slack_s >= 0 and reachable,
                     "walk_to_stop_minutes": round(walk_to_board_s / 60.0, 1),
                     "ride_minutes": round(ride_s / 60.0, 1),
                 })
