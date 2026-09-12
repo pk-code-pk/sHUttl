@@ -143,6 +143,12 @@ async def startup_event():
     # Replay observed arrivals so a restart keeps the learned travel times.
     # Segment history takes days of service to accumulate; losing it on every
     # deploy would mean the model never leaves its fallback.
+    #
+    # Redis has to be attached before the replay, not after: on Render the file
+    # is recreated empty by every deploy, so a load() without it reads nothing
+    # and silently starts the model over.
+    if redis_client is not None:
+        ARRIVAL_STORE.attach_redis(redis_client)
     try:
         await asyncio.to_thread(ARRIVAL_STORE.load)
     except Exception as e:

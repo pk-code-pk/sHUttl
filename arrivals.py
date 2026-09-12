@@ -55,6 +55,12 @@ logger = logging.getLogger(__name__)
 DATA_DIR = os.getenv("SHUTTL_DATA_DIR", "data")
 ARRIVALS_PATH = os.path.join(DATA_DIR, "arrivals.jsonl")
 
+# The durable copy where Redis is configured. Roughly a fortnight of service at
+# the ~1,100 arrivals a day this system produces, which comfortably covers the
+# window segment times are learned over.
+REDIS_ARRIVALS_KEY = "arrivals:log"
+REDIS_ARRIVALS_MAX = int(os.getenv("ARRIVALS_MAX_ROWS", "20000"))
+
 # A fix further than this from the route geometry is not on the route: a
 # deadheading bus, a GPS spike, or a vehicle assigned to the wrong pattern.
 MAX_OFF_ROUTE_M = 250.0
@@ -128,6 +134,8 @@ class _ArrivalStore:
     def __init__(self):
         self._lock = threading.Lock()
         self._fh = None
+        # Set by attach_redis() at startup when REDIS_URL is configured.
+        self._redis = None
 
         # (route_id, from_stop, to_stop, bucket) -> recent durations in seconds
         self.segment_times: dict[tuple, deque] = defaultdict(
@@ -157,46 +165,100 @@ class _ArrivalStore:
                            exc_info=e)
             self._fh = False  # sentinel: tried and failed
 
+    def attach_redis(self, client) -> None:
+        """Use Redis as the durable log, in addition to the file.
+
+        Render's filesystem is recreated on every deploy, so the file alone
+        means the arrival log — and the segment times learned from it — reset
+        on each push. Segment history takes days of service to accumulate, so
+        in practice the learned model there never left its fallback and there
+        was no ground truth to score predictions against.
+        """
+        self._redis = client
+
     def append(self, a: Arrival):
         with self._lock:
             self._record(a)
+            payload = json.dumps({
+                "t": round(a.t, 1),
+                "route_id": a.route_id,
+                "stop_id": a.stop_id,
+                "vehicle_id": a.vehicle_id,
+            })
+
+            if self._redis is not None:
+                try:
+                    pipe = self._redis.pipeline()
+                    pipe.rpush(REDIS_ARRIVALS_KEY, payload)
+                    # A rolling window: old arrivals stop informing segment
+                    # times long before this, and an unbounded list is a slow
+                    # memory leak in a store shared with the cache.
+                    pipe.ltrim(REDIS_ARRIVALS_KEY, -REDIS_ARRIVALS_MAX, -1)
+                    pipe.execute()
+                except Exception as e:
+                    logger.warning("Failed to write arrival to Redis", exc_info=e)
+
             self._ensure_file()
             if self._fh:
                 try:
-                    self._fh.write(json.dumps({
-                        "t": round(a.t, 1),
-                        "route_id": a.route_id,
-                        "stop_id": a.stop_id,
-                        "vehicle_id": a.vehicle_id,
-                    }) + "\n")
+                    self._fh.write(payload + "\n")
                     self._fh.flush()
                 except OSError as e:
                     logger.warning("Failed to write arrival", exc_info=e)
 
+    def _replay(self, lines) -> int:
+        """Record each logged arrival in order. Caller holds the lock.
+
+        Ordering matters: segment times come from consecutive arrivals of one
+        vehicle, so the log has to be replayed in the order it was written.
+        """
+        loaded = 0
+        for line in lines:
+            if isinstance(line, bytes):
+                line = line.decode()
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+                self._record(Arrival(
+                    t=float(d["t"]),
+                    route_id=str(d["route_id"]),
+                    stop_id=str(d["stop_id"]),
+                    vehicle_id=str(d["vehicle_id"]),
+                ))
+                loaded += 1
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                continue
+        return loaded
+
     def load(self):
-        """Rebuild aggregates from the log. Called once at startup."""
+        """Rebuild aggregates from the log. Called once at startup.
+
+        Redis first where it is configured: on Render the file is always empty
+        at boot, so reading it would report an honest zero and quietly discard
+        every travel time the service has ever learned.
+        """
+        loaded = 0
+        if self._redis is not None:
+            try:
+                rows = self._redis.lrange(REDIS_ARRIVALS_KEY, 0, -1) or []
+            except Exception as e:
+                logger.warning("Could not read arrival log from Redis", exc_info=e)
+                rows = []
+            if rows:
+                with self._lock:
+                    loaded = self._replay(rows)
+                logger.info("Replayed observed arrivals from Redis", extra={
+                    "arrivals": loaded, "segments": len(self.segment_times),
+                })
+                return loaded
+
         if not os.path.exists(ARRIVALS_PATH):
             return 0
-        loaded = 0
         with self._lock:
-            # Ordering matters: segment times come from consecutive arrivals of
-            # one vehicle, so the log has to be replayed in the order written.
             with open(ARRIVALS_PATH) as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        d = json.loads(line)
-                        self._record(Arrival(
-                            t=float(d["t"]),
-                            route_id=str(d["route_id"]),
-                            stop_id=str(d["stop_id"]),
-                            vehicle_id=str(d["vehicle_id"]),
-                        ))
-                        loaded += 1
-                    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-                        continue
+                loaded = self._replay(fh)
         logger.info("Replayed observed arrivals", extra={
             "arrivals": loaded,
             "segments": len(self.segment_times),
