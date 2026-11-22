@@ -13,6 +13,9 @@ import { formatEtaSeconds, splitEtaLabel } from "../utils/time";
 import logo from "../assets/logo.svg";
 import { API_BASE_URL } from "@/config";
 import { describeFailure, getLocation } from "@/lib/geolocation";
+import { tapHaptic } from "@/lib/nativeHaptics";
+import { shareLinkNatively } from "@/lib/nativeShare";
+import { isNativeApp } from "@/lib/platform";
 import { NextBusPanel, type DepartureRun } from "./NextBusPanel";
 import { ClassesPanel } from "./ClassesPanel";
 import { Button } from "./ui/Button";
@@ -22,6 +25,7 @@ import { SegmentedControl } from "./ui/SegmentedControl";
 import { PanelSheet } from "./ui/PanelSheet";
 import { SNAP_DEFAULT, SNAP_HALF, SNAP_MINIMISED } from "./ui/sheetSnaps";
 import {
+    buildTripQuery,
     buildTripUrl,
     copyToClipboard,
     hasTripLink,
@@ -520,7 +524,14 @@ export const TripPlannerPanel = ({
             };
             setSharedEndpoints(endpoints);
             setShareState('idle');
-            const url = buildTripUrl(endpoints.origin, endpoints.destination, stops);
+            // In the app the shareable URL is on another origin (the public
+            // site, not capacitor://localhost) and replaceState throws on a
+            // cross-origin URL — which, inside this try, would report a trip
+            // that planned perfectly well as a failure. The query alone
+            // resolves against whatever the page's own address is.
+            const url = isNativeApp()
+                ? buildTripQuery(endpoints.origin, endpoints.destination, stops)
+                : buildTripUrl(endpoints.origin, endpoints.destination, stops);
             if (url) window.history.replaceState(null, '', url);
         } catch (e) {
             if (gen !== planGenRef.current) return;
@@ -538,6 +549,14 @@ export const TripPlannerPanel = ({
         const url = buildTripUrl(sharedEndpoints.origin, sharedEndpoints.destination, stops);
         if (!url) return;
         setShareUrl(url);
+        if (isNativeApp()) {
+            // The system sheet is its own confirmation, and closing it
+            // without picking anything is not a failure — so neither outcome
+            // touches shareState. Only a sheet that could not be shown at all
+            // falls through to the clipboard, which still gets the link out.
+            const outcome = await shareLinkNatively(url);
+            if (outcome !== 'failed') return;
+        }
         const ok = await copyToClipboard(url);
         // On failure the URL is shown for manual copying rather than claiming
         // it was copied — in-app browsers routinely block clipboard access,
@@ -633,6 +652,11 @@ export const TripPlannerPanel = ({
         }
         setPendingMode(null);
         onFocusRouteChange?.(null);
+        // In the app the switch is felt as well as seen. Here and in
+        // confirmModeSwitch rather than on the control's click, so the tap
+        // marks the mode actually changing — not a press that only raised
+        // the confirmation.
+        tapHaptic();
         setMode(next);
         revealFor(next);
     };
@@ -642,6 +666,7 @@ export const TripPlannerPanel = ({
         onTripChange(null);
         resetLiveState();
         onFocusRouteChange?.(null);
+        tapHaptic();
         setMode(pendingMode);
         revealFor(pendingMode);
         setPendingMode(null);
@@ -1128,7 +1153,7 @@ export const TripPlannerPanel = ({
                     </button>
 
                     <motion.button
-                        onClick={() => void handlePlanTrip()}
+                        onClick={() => { tapHaptic(); void handlePlanTrip(); }}
                         disabled={planning || !system || (!originStopId && !originUseCurrentLocation) || !destStopId}
                         whileTap={{ scale: 0.98 }}
                         animate={error ? { x: [0, -4, 4, -4, 4, 0] } : {}}
@@ -1220,7 +1245,7 @@ export const TripPlannerPanel = ({
                             <button
                                 type="button"
                                 onClick={handleShare}
-                                aria-label="Copy a link to this trip"
+                                aria-label={isNativeApp() ? "Share this trip" : "Copy a link to this trip"}
                                 className={clsx(
                                     "flex items-center gap-1 rounded-full px-2.5 py-1.5 transition-colors",
                                     shareState === 'copied'

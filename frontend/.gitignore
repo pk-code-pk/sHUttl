@@ -1,2 +1,11 @@
 .vercel
 .env*
+
+# Apple signing material. The APNs key (AuthKey_XXXXXXXXXX.p8) is downloaded
+# once and cannot be fetched again; its contents belong in the backend's
+# APNS_AUTH_KEY, never in the repo. Ignored here so a stray copy left next to
+# the Xcode project cannot be committed by accident.
+*.p8
+*.p12
+*.cer
+*.mobileprovision
