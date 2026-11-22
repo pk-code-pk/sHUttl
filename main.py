@@ -115,10 +115,19 @@ else:
 
 CORS_ALLOWED_ORIGINS = os.getenv("CORS_ALLOWED_ORIGINS", "*")
 
+# The iOS app is the same frontend served out of the app bundle, and a
+# WKWebView reports that as this origin no matter which API it talks to. It is
+# added here rather than left to the env var because it never varies by
+# deployment, and forgetting it fails in the one place nobody is watching: the
+# website keeps working and every request from the app is refused.
+NATIVE_APP_ORIGIN = "capacitor://localhost"
+
 if CORS_ALLOWED_ORIGINS.strip() == "*":
     origins = ["*"]
 else:
     origins = [o.strip() for o in CORS_ALLOWED_ORIGINS.split(",") if o.strip()]
+    if NATIVE_APP_ORIGIN not in origins:
+        origins.append(NATIVE_APP_ORIGIN)
 
 app.add_middleware(
     CORSMiddleware,
@@ -3337,14 +3346,42 @@ def api_arrival_plan(
     return plan_arrival(dest, arrive_by, lat, lng, origin_stop_id, system_id, origin_place)
 
 
-# Web Push reminders
+# Push reminders (Web Push for browsers, APNs for the iOS app)
 # ---------------------------------------------------------------------------
+
+from pydantic import field_validator, model_validator
+
+
+class ApnsSubscriptionIn(BaseModel):
+    # The device token iOS gave the app, in hex.
+    token: str
+
+    @field_validator("token")
+    @classmethod
+    def _token_is_hex(cls, v: str) -> str:
+        # Checked here, not at send time, because the token becomes part of
+        # the URL we call Apple on.
+        if not reminders_module.valid_apns_token(v):
+            raise ValueError("token must be a hex APNs device token")
+        return v
+
 
 class PushSubscribeBody(BaseModel):
     # The PushSubscription.toJSON() object from the browser, stored verbatim
     # because pywebpush wants exactly that shape back.
-    subscription: dict[str, Any]
+    subscription: Optional[dict[str, Any]] = None
+    # What the iOS app sends instead: it has no service worker to subscribe.
+    apns: Optional[ApnsSubscriptionIn] = None
     client_id: str = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def _exactly_one_transport(self):
+        # A client is one install with one way to reach it. Neither is a
+        # malformed request (and stays the 422 it was when `subscription` was
+        # required); both would leave us guessing which one to keep.
+        if (self.subscription is None) == (self.apns is None):
+            raise ValueError("provide exactly one of subscription or apns")
+        return self
 
 
 class ReminderIn(BaseModel):
@@ -3355,6 +3392,11 @@ class ReminderIn(BaseModel):
     origin_lat: Optional[float] = None
     origin_lng: Optional[float] = None
     origin_stop_id: Optional[str] = None
+    # The previous class's room, for a class reached straight from another.
+    # The client sends it with no stop and no fix, so without this field the
+    # stored reminder has no origin at all and the planner refuses it on
+    # every tick: the reminder never fires.
+    origin_place: Optional[str] = Field(default=None, max_length=200)
     lead_minutes: int = Field(default=reminders_module.DEFAULT_LEAD_MINUTES, ge=0, le=180)
     # Echoed back from GET so a client re-PUTting its list keeps sent state.
     sent_at: Optional[str] = None
@@ -3372,8 +3414,37 @@ def api_push_public_key():
     return {"public_key": reminders_module.VAPID_PUBLIC_KEY}
 
 
+@app.get("/push/config")
+def api_push_config():
+    """Which push transports this server can send through.
+
+    Always 200, unlike /push/public_key: the app asks before it knows whether
+    there is anything to enable, and "no" is an answer, not an error.
+    """
+    web_push = reminders_module.vapid_configured()
+    return {
+        "web_push": web_push,
+        "vapid_public_key": reminders_module.VAPID_PUBLIC_KEY if web_push else None,
+        "apns": reminders_module.apns_configured(),
+    }
+
+
 @app.post("/push/subscribe", dependencies=[Depends(OptionalRateLimiter(times=10, seconds=60))])
 def api_push_subscribe(body: PushSubscribeBody):
+    if body.apns is not None:
+        try:
+            # Read first so a re-registration with the same token keeps what
+            # earlier sends learned about it (see apns_subscription).
+            previous = REMINDER_STORE.get_subscription(body.client_id)
+            REMINDER_STORE.set_subscription(
+                body.client_id,
+                reminders_module.apns_subscription(body.apns.token, previous),
+            )
+        except (RedisError, OSError) as e:
+            logger.warning("Could not store push subscription", exc_info=e)
+            raise HTTPException(status_code=503, detail="Reminder store unavailable")
+        return {"ok": True}
+
     sub = body.subscription
     if not sub.get("endpoint") or not isinstance(sub.get("keys"), dict):
         raise HTTPException(status_code=400, detail="subscription must include endpoint and keys")

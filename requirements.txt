@@ -9,3 +9,5 @@ pywebpush
 py-vapid
 openai
 python-multipart
+httpx[http2]
+cryptography
