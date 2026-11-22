@@ -5,10 +5,13 @@ in order. Do the steps from top to bottom; each one is a single action with
 the result you should see. The text to paste into App Store Connect is in
 [`APP_STORE_LISTING.md`](APP_STORE_LISTING.md).
 
-**Read this first.** The iOS work was done on Linux. No part of it has been
-compiled, signed or run on an iPhone or in a simulator; it was checked
-against the installed packages' own sources and against a mocked bridge in a
-desktop browser. Expect the first build in Xcode to need some fixing. What
+**Read this first.** The iOS work was done on Linux. The project compiles:
+the `iOS build` job in GitHub Actions builds it, unsigned, on a macOS runner
+(see [No Mac: build in the cloud](#no-mac-build-in-the-cloud)). It has never
+been signed, installed or run, on an iPhone or in a simulator; its behaviour
+was checked against the installed packages' own sources and against a mocked
+bridge in a desktop browser. Expect the first run on a phone to need some
+fixing. What
 exactly was and was not checked is listed in
 [What was not verified](#what-was-not-verified), and Part 7 is the test that
 finds the problems.
@@ -166,12 +169,12 @@ in more detail.
       sell this; search "rent a Mac in the cloud"). You get a remote desktop
       with Xcode. Plugging in your own iPhone is not possible, so on-device
       testing has to go through TestFlight (Part 9) instead of step 32.
-    - **A hosted macOS build service** (GitHub Actions macOS runners, Xcode
-      Cloud and similar). This can produce and upload builds with no Mac of
-      your own, but nothing in this repository sets it up, signing has to be
-      configured by hand, and fixing a first-ever build without Xcode in
-      front of you is hard. Treat it as a later convenience, not as the way
-      to do the first release.
+    - **Build in the cloud with GitHub Actions.** This repository has two
+      jobs for it, and the repository is public, so the macOS runners cost
+      nothing. See [No Mac: build in the cloud](#no-mac-build-in-the-cloud).
+      It replaces Parts 4 to 6 and steps 40 to 42; on-device testing then
+      goes through TestFlight (Part 9) instead of step 32. The upload job has
+      not been run yet, because it needs your Apple account.
 
 18. **Install Xcode from the Mac App Store**, open it once, and let it
     install the iOS components it offers. Use the current release: Capacitor
@@ -187,6 +190,64 @@ in more detail.
     or with a version manager.
     *Expect:* `node -v` prints `v22.12.0` or higher. (`@capacitor/cli` needs
     22; Vite needs 22.12.)
+
+## No Mac: build in the cloud
+
+Skip this section if you are using a Mac; carry on with Part 5.
+
+Two GitHub Actions jobs live in `.github/workflows/`:
+
+| Job | What it does | Needs |
+| :--- | :--- | :--- |
+| `iOS build` (`ios-build.yml`) | Compiles the app, unsigned, for the simulator and for a device. Runs by itself on every push that touches `frontend/`. | Nothing |
+| `iOS TestFlight` (`ios-testflight.yml`) | Builds, signs and uploads a build to App Store Connect. Run by hand. | The four secrets and one variable below |
+
+The upload job is **untested**: it could not be run without an Apple
+Developer account. It uses Xcode's automatic signing, authenticated with an
+App Store Connect API key. If it fails, the job's log (and the
+`xcodebuild-logs` attachment on the failed run) names the step.
+
+Do Parts 1 to 3 first. Then:
+
+- **Register the bundle ID.** With a Mac, Xcode does this in step 28;
+  without one you do it by hand. In your Apple Developer account open
+  Certificates, Identifiers & Profiles, go to Identifiers, and add an App ID
+  with the bundle ID `live.shuttl.app` and the Push Notifications capability
+  ticked. If the name is taken, pick another and change `appId` in
+  `frontend/capacitor.config.ts`, `PRODUCT_BUNDLE_IDENTIFIER` (twice) in
+  `frontend/ios/App/App.xcodeproj/project.pbxproj`, and `APNS_BUNDLE_ID` on
+  the backend to match.
+- **Do Part 8** (create the app record). The upload is refused unless the
+  record already exists in App Store Connect.
+
+- **Create an App Store Connect API key.** In App Store Connect, open Users
+  and Access and find the section for integrations and API keys. Create a
+  team key with the **Admin** role (automatic signing has to create signing
+  assets, which lesser roles cannot). Download the `.p8` file; it can be
+  downloaded once. Note the **Key ID** beside the key and the **Issuer ID**
+  shown above the list. This is a different key from the push key in Part 3.
+- **Find your Team ID.** It is the ten-character code on the membership
+  page of your Apple Developer account.
+- **Add the secrets.** In the GitHub repository open Settings, then Secrets
+  and variables, then Actions. Under Secrets add:
+  - `ASC_KEY_ID`: the Key ID
+  - `ASC_ISSUER_ID`: the Issuer ID
+  - `ASC_PRIVATE_KEY`: the whole contents of the `.p8` file, including the
+    `BEGIN` and `END` lines
+  - `APPLE_TEAM_ID`: the Team ID
+- **Add the variable.** On the same page, under Variables, add
+  `VITE_API_BASE_URL` with the `https://` address of the backend (`BACKEND`).
+- **Merge this work into the default branch.** GitHub only offers a
+  hand-run job once its file is on the default branch.
+- **Run it.** In the repository's Actions tab choose `iOS TestFlight`, then
+  Run workflow.
+  *Expect:* a green run after roughly ten minutes, then the build appearing
+  in App Store Connect under TestFlight as in step 43. The build number is
+  the job's run number, so there is nothing to raise by hand between
+  uploads.
+
+Then continue from step 43. Everything in Part 7 is tested on the TestFlight
+build instead of an Xcode build.
 
 ## Part 5: Build the app bundle
 
@@ -455,17 +516,19 @@ An iPhone-only app needs iPhone screenshots only.
 
 ## What was not verified
 
-Plainly: **none of the iOS work has been compiled or run.** It was written
-on Linux, where there is no Xcode. The list below is what each part's author
-could not confirm. Part 7 exercises nearly all of it.
+Plainly: **none of the iOS work has been run.** It was written on Linux,
+where there is no Xcode. The one thing confirmed since is that it compiles:
+the `iOS build` job builds the project unsigned on a macOS runner. Nothing
+has been signed, installed or launched. The list below is what each part's
+author could not confirm. Part 7 exercises nearly all of it.
 
 **The Xcode project**
 
-- `project.pbxproj`, `AppDelegate.swift`, `LaunchScreen.storyboard`, the
-  asset catalog, `App.entitlements` and `PrivacyInfo.xcprivacy` have never
-  been opened by Xcode. The project file was edited with a parser and
-  re-read; the plists parse; the storyboard is well-formed XML. That is the
-  extent of it.
+- `project.pbxproj`, `AppDelegate.swift`, `LaunchScreen.storyboard` and the
+  asset catalog build without errors in the `iOS build` job. That job does
+  not sign, so `App.entitlements` has never been applied to a build, and
+  nothing has checked `PrivacyInfo.xcprivacy` beyond that it parses.
+- The `iOS TestFlight` job has never been run.
 - That automatic signing turns on Push Notifications for the App ID from the
   entitlements file alone, and that a distribution build gets the production
   push entitlement in place of `development`. Both are how Xcode normally

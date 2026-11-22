@@ -280,7 +280,7 @@ python validate_arrivals.py
 ### iOS app
 
 The iPhone app is this same frontend, bundled with [Capacitor](https://capacitorjs.com)
-and built from `frontend/ios`. It needs a Mac with Xcode; from `frontend/`:
+and built from `frontend/ios`. On a Mac with Xcode, from `frontend/`:
 
 ```bash
 npm ci
@@ -294,8 +294,11 @@ full path from a fresh clone to the App Store, including the Apple account
 and push-notification setup, is in
 [`docs/ios/RELEASE_CHECKLIST.md`](docs/ios/RELEASE_CHECKLIST.md); the store
 listing text is in [`docs/ios/APP_STORE_LISTING.md`](docs/ios/APP_STORE_LISTING.md).
-None of the iOS project has been compiled yet; the checklist says what that
-means.
+Without a Mac, two GitHub Actions jobs do the same work: `iOS build` compiles
+the project on every push, and `iOS TestFlight` signs and uploads a build
+once the Apple credentials are in the repository's secrets. The project
+compiles there; it has not yet been signed or run on a phone, and the
+checklist says what that means.
 
 ## Contributing
 

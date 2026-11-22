@@ -67,9 +67,28 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             | tee "$RUNNER_TEMP/xcodebuild.log" | tail -n 400
 
-      - name: Upload build log
+      # The configuration that ships, for the architecture that ships. Still
+      # unsigned: this proves the Release build compiles and links for a
+      # phone, not that it can be signed.
+      - name: Build Release for a device (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project ios/App/App.xcodeproj \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            | tee "$RUNNER_TEMP/xcodebuild-release.log" | tail -n 400
+
+      - name: Upload build logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: xcodebuild-log
-          path: ${{ runner.temp }}/xcodebuild.log
+          name: xcodebuild-logs
+          path: |
+            ${{ runner.temp }}/xcodebuild.log
+            ${{ runner.temp }}/xcodebuild-release.log
+          if-no-files-found: ignore
