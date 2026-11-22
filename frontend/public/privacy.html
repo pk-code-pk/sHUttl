@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Privacy — sHUttl</title>
+  <meta name="description" content="What the sHUttl website and iOS app collect, why, where it goes and how long it is kept." />
+  <meta name="theme-color" content="#0a0a0a" />
+  <meta name="color-scheme" content="dark" />
+  <link rel="icon" href="/favicon_package/favicon.ico" sizes="any" />
+
+  <!--
+    One static file, on purpose. No script, no stylesheet, no font and no
+    image is fetched from anywhere: a page about what the app sends where
+    should not itself send anything anywhere. Vite copies public/ as-is, so
+    this is served at /privacy.html and is not part of the React app.
+
+    Every statement below describes what the code does. If the code changes
+    (reminders.py for what is stored and when it is deleted, main.py's
+    /parse-schedule for the screenshots, main.tsx for analytics), change this
+    page in the same commit and move the date.
+  -->
+  <style>
+    :root {
+      --ground: #0a0a0a;
+      --panel: #151515;
+      --line: #2a2a2a;
+      --text: #e6e6e6;
+      --muted: #a3a3a3;
+      --accent: #f0788a;
+      --crimson: #a51c30;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      background: var(--ground);
+      color: var(--text);
+      -webkit-text-size-adjust: 100%;
+      text-size-adjust: 100%;
+    }
+
+    body {
+      margin: 0;
+      padding:
+        max(24px, env(safe-area-inset-top))
+        max(20px, env(safe-area-inset-right))
+        max(40px, env(safe-area-inset-bottom))
+        max(20px, env(safe-area-inset-left));
+      font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    main {
+      max-width: 680px;
+      margin: 0 auto;
+    }
+
+    .brand {
+      margin: 0 0 28px;
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }
+
+    .brand a { color: var(--text); text-decoration: none; }
+    .brand span { color: var(--crimson); }
+
+    h1 {
+      margin: 0 0 4px;
+      font-size: 30px;
+      line-height: 1.2;
+      letter-spacing: -0.01em;
+    }
+
+    .dated {
+      margin: 0 0 28px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    h2 {
+      margin: 40px 0 10px;
+      padding-top: 24px;
+      border-top: 1px solid var(--line);
+      font-size: 20px;
+      line-height: 1.3;
+    }
+
+    h3 {
+      margin: 26px 0 6px;
+      font-size: 16px;
+    }
+
+    p { margin: 0 0 14px; }
+
+    ul {
+      margin: 0 0 14px;
+      padding-left: 22px;
+    }
+
+    li { margin-bottom: 8px; }
+
+    a { color: var(--accent); }
+
+    strong { color: #fff; font-weight: 600; }
+
+    .summary {
+      margin: 0 0 8px;
+      padding: 16px 18px 4px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+
+    .summary ul { padding-left: 20px; }
+
+    /* A table is the honest shape for "what, where, how long", but four
+       columns do not fit a phone. Below 620px each row becomes a card with
+       its column names written out. */
+    table {
+      width: 100%;
+      margin: 0 0 14px;
+      border-collapse: collapse;
+      font-size: 14.5px;
+      line-height: 1.5;
+    }
+
+    th, td {
+      padding: 10px 12px 10px 0;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    td:first-child { color: #fff; font-weight: 600; }
+
+    @media (max-width: 620px) {
+      h1 { font-size: 26px; }
+
+      thead { display: none; }
+
+      table, tbody, tr, td { display: block; width: 100%; }
+
+      tr {
+        margin-bottom: 12px;
+        padding: 12px 14px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+      }
+
+      td {
+        padding: 0 0 8px;
+        border: 0;
+      }
+
+      td:last-child { padding-bottom: 0; }
+
+      td[data-label]::before {
+        content: attr(data-label);
+        display: block;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+    }
+
+    footer {
+      margin-top: 44px;
+      padding-top: 20px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13.5px;
+    }
+  </style>
+</head>
+
+<body>
+  <main>
+    <p class="brand"><a href="/">s<span>HU</span>ttl</a></p>
+
+    <h1>Privacy</h1>
+    <p class="dated">Last updated November 2026. Covers the website at shuttl.live and the sHUttl app for iPhone.</p>
+
+    <div class="summary">
+      <ul>
+        <li><strong>No account.</strong> sHUttl never asks for your name, email address, phone number or Harvard login.</li>
+        <li><strong>Your location is used to answer the question you asked</strong> (which stop is nearest, how to get from here to there) and is not kept as a history.</li>
+        <li><strong>Your class schedule stays on your device.</strong> Only if you switch on reminders does the next week of class times and rooms go to the sHUttl server, and each one is deleted when the class starts.</li>
+        <li><strong>Schedule screenshots are read by OpenAI</strong> and are not saved by the sHUttl server.</li>
+        <li><strong>No ads, no sale of data, no tracking across other apps or sites.</strong></li>
+      </ul>
+    </div>
+
+    <h2>Who runs this</h2>
+    <p>
+      sHUttl is an independent student project. It is not affiliated with, operated by or endorsed by
+      Harvard University. It reads the public live shuttle tracker and published timetable, and nothing
+      about you is sent to Harvard by sHUttl.
+    </p>
+
+    <h2>What sHUttl handles, and why</h2>
+
+    <h3>Your location</h3>
+    <p>
+      Asked for only so the app can find the stops near you, show what is leaving from them, and plan a
+      trip from where you are. On iPhone this is the "While Using the App" permission; the app never
+      reads your location in the background.
+    </p>
+    <ul>
+      <li>
+        When you use one of those features, your coordinates are sent to the sHUttl server with the
+        request so it can work out the answer. The server does not save them to a database.
+      </li>
+      <li>
+        A planned trip's answer is cached for 15 seconds, filed under the start and end coordinates
+        rounded to about 10 metres, so that an identical request straight afterwards is fast.
+      </li>
+      <li>
+        <strong>The one case where a location is stored:</strong> if reminders are on and a class starts
+        within the next hour, your current location is saved with that reminder so the server can plan
+        from where you actually are. It is deleted with the reminder when the class starts.
+      </li>
+      <li>
+        If you share a trip that starts from your location, the link you share contains those
+        coordinates. It goes wherever you send it.
+      </li>
+    </ul>
+    <p>You can refuse location and pick a stop by hand instead; everything still works.</p>
+
+    <h3>Your class schedule</h3>
+    <p>
+      The Classes tab reads your schedule from screenshots you choose. On iPhone that may involve the
+      camera or your photo library, but only for the pictures you pick. The iPhone app asks for your
+      permission before the first screenshot is sent, and sends nothing if you decline.
+    </p>
+    <ul>
+      <li>
+        The screenshots are uploaded to the sHUttl server, which passes them to OpenAI to be read into
+        a list of classes (course, section, days, times, room, term dates). The sHUttl server holds
+        them in memory for that one request and does not write them to disk or a database.
+      </li>
+      <li>
+        OpenAI processes the images under its own API terms. OpenAI states that data sent through its
+        API is not used to train its models, and that it may keep API requests for a limited period to
+        monitor for abuse. Do not upload a screenshot that shows anything you would not want OpenAI to
+        receive.
+      </li>
+      <li>
+        The resulting list of classes is stored <strong>on your device</strong>, in the app's or
+        browser's local storage. It is not uploaded, unless you turn on reminders (next section).
+      </li>
+      <li>
+        If the reading fails, a short excerpt of the unreadable reply may be written to the server's
+        error log.
+      </li>
+    </ul>
+
+    <h3>Reminders ("Remind me")</h3>
+    <p>Off unless you switch it on. When it is on, the sHUttl server stores:</p>
+    <ul>
+      <li>
+        <strong>A random install ID</strong> created on your device. It is not your Apple ID, device
+        serial number or advertising identifier, and it is not linked to your name.
+      </li>
+      <li>
+        <strong>A notification address</strong>: on iPhone, the device token Apple issues to the app;
+        in a browser, the push subscription your browser creates. It is what lets a notification reach
+        you and nothing else.
+      </li>
+      <li>
+        <strong>Your classes for the next seven days</strong>: for each one its title, start time,
+        room, and where you will be coming from (your chosen home stop, the previous class's room, or
+        the location described above).
+      </li>
+    </ul>
+    <p>
+      The server uses these to work out which shuttle gets you to each class and to send one "leave
+      now" notification. The notification's text (class, stop, route, times) is delivered through
+      Apple's push service on iPhone, or your browser maker's push service on the web.
+    </p>
+
+    <h3>Things kept only on your device</h3>
+    <p>
+      Your class list, your home stop, your light or dark map choice, whether reminders are on, and the
+      random install ID. Deleting the app, or clearing site data for shuttl.live in a browser, removes
+      all of it.
+    </p>
+
+    <h3>Website analytics</h3>
+    <p>
+      The website uses Vercel Web Analytics to count page views. According to Vercel it uses no cookies
+      and records aggregate details such as the page, the referring site, and browser, device type and
+      country. <strong>The iPhone app does not load it</strong> and contains no analytics or
+      advertising code.
+    </p>
+
+    <h3>Server logs and your IP address</h3>
+    <p>
+      Like any service on the internet, the servers see your IP address when your device connects.
+      The sHUttl server uses it for a few minutes to limit how many requests one address can make. The
+      companies hosting the server and the website keep routine request logs for a limited time, and
+      those can include the IP address and the address of the request, which for a nearby-stops or
+      trip request includes the coordinates sent. sHUttl does not use these logs to build a profile of
+      anyone.
+    </p>
+
+    <h2>Where it goes</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Who</th>
+          <th>What they receive</th>
+          <th>Why</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>sHUttl server</td>
+          <td data-label="Receives">Location with a request; schedule screenshots (passed on, not kept); and, with reminders on, the install ID, notification address and upcoming classes.</td>
+          <td data-label="Why">To plan trips, read schedules and send reminders. Run on rented cloud hosting.</td>
+        </tr>
+        <tr>
+          <td>OpenAI</td>
+          <td data-label="Receives">The schedule screenshots you upload.</td>
+          <td data-label="Why">To read them into a list of classes.</td>
+        </tr>
+        <tr>
+          <td>Apple (iPhone app)</td>
+          <td data-label="Receives">The text of each reminder notification, addressed to your device token.</td>
+          <td data-label="Why">Apple's push service is the only way to deliver a notification to an iPhone.</td>
+        </tr>
+        <tr>
+          <td>Your browser's push service (website)</td>
+          <td data-label="Receives">Each reminder notification, encrypted for your browser.</td>
+          <td data-label="Why">The same job, for browsers. Run by the browser's maker (for example Google, Mozilla or Apple).</td>
+        </tr>
+        <tr>
+          <td>CARTO</td>
+          <td data-label="Receives">Requests for the pieces of map you are looking at, which come from your IP address.</td>
+          <td data-label="Why">CARTO serves the background map. It does not receive your location, schedule or install ID from sHUttl.</td>
+        </tr>
+        <tr>
+          <td>Vercel (website only)</td>
+          <td data-label="Receives">The page requests themselves, and the page-view analytics described above.</td>
+          <td data-label="Why">Vercel hosts shuttl.live.</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>Nobody else. Nothing is sold, rented or shared for advertising.</p>
+
+    <h2>How long it is kept</h2>
+    <ul>
+      <li><strong>Location sent with a request:</strong> not stored, beyond the 15-second trip cache and routine request logs.</li>
+      <li><strong>Schedule screenshots:</strong> not stored by the sHUttl server. OpenAI's retention is set by OpenAI.</li>
+      <li>
+        <strong>Reminders (class title, time, room, starting point):</strong> each is deleted
+        automatically once that class's start time has passed, so nothing is older than about seven
+        days. The whole set is replaced whenever your class list changes.
+      </li>
+      <li>
+        <strong>Notification address:</strong> deleted the moment you turn "Remind me" off. It is also
+        deleted if Apple or your browser's push service reports that it no longer works, for example
+        after the app is deleted. Otherwise it is kept for as long as reminders stay on.
+      </li>
+      <li><strong>Rate-limit counters by IP address:</strong> a few minutes.</li>
+    </ul>
+    <p>
+      Turning reminders off deletes your notification address straight away, so nothing further can
+      be sent to you. Reminders already on the server are not removed at that instant; they expire on
+      the schedule above.
+    </p>
+
+    <h2>Turning things off</h2>
+    <ul>
+      <li>
+        <strong>Location:</strong> on iPhone, open the Settings app and find sHUttl under Privacy &amp; Security &gt;
+        Location Services. In a browser, use the site's location permission. Then pick a stop by hand in the app.
+      </li>
+      <li>
+        <strong>Reminders:</strong> tap "Remind me" in the Classes tab to switch it off. You can also
+        turn off notifications for sHUttl in iPhone Settings, or for shuttl.live in your browser.
+      </li>
+      <li><strong>Your schedule:</strong> the trash button ("Clear schedule") in the Classes tab removes it from the device.</li>
+      <li><strong>Camera and photos:</strong> only used when you choose a screenshot. You can remove the permissions in iPhone Settings.</li>
+      <li><strong>Everything on the device:</strong> delete the app, or clear site data for shuttl.live.</li>
+    </ul>
+
+    <h2>What sHUttl does not do</h2>
+    <ul>
+      <li>No accounts, sign-in, or contact details.</li>
+      <li>No advertising and no advertising identifiers.</li>
+      <li>No tracking of you across other companies' apps or websites.</li>
+      <li>No sale of personal data.</li>
+      <li>No reading of your location in the background.</li>
+    </ul>
+
+    <h2>Children</h2>
+    <p>
+      sHUttl is a transit tool for a university campus. It is not directed at children under 13 and
+      does not knowingly collect information from them.
+    </p>
+
+    <h2>Changes</h2>
+    <p>
+      If what sHUttl collects changes, this page changes with it and the date at the top moves.
+    </p>
+
+    <h2>Questions and requests</h2>
+    <p>
+      sHUttl is open source. For a question about privacy, or to ask for something to be removed,
+      open an issue on the project's GitHub repository:
+      <a href="https://github.com/pk-code-pk/sHUttl/issues">github.com/pk-code-pk/sHUttl/issues</a>.
+      Please do not post personal details in a public issue. Because sHUttl never learns who you are,
+      there is no way to look up "your" data by name; turning reminders off in the app is what removes
+      your notification address from the server.
+    </p>
+
+    <footer>
+      sHUttl is an independent student project and is not affiliated with or endorsed by Harvard University.
+    </footer>
+  </main>
+</body>
+
+</html>

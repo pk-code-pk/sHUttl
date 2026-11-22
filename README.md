@@ -277,6 +277,26 @@ travel order:
 python validate_arrivals.py
 ```
 
+### iOS app
+
+The iPhone app is this same frontend, bundled with [Capacitor](https://capacitorjs.com)
+and built from `frontend/ios`. It needs a Mac with Xcode; from `frontend/`:
+
+```bash
+npm ci
+npm run ios:sync   # check the backend address, vite build, copy into the Xcode project
+npm run ios:open   # open it in Xcode
+```
+
+`VITE_API_BASE_URL` must be set to the deployed backend's `https://` address
+for that build (in `frontend/.env.production`); `ios:sync` stops if it is not. The
+full path from a fresh clone to the App Store, including the Apple account
+and push-notification setup, is in
+[`docs/ios/RELEASE_CHECKLIST.md`](docs/ios/RELEASE_CHECKLIST.md); the store
+listing text is in [`docs/ios/APP_STORE_LISTING.md`](docs/ios/APP_STORE_LISTING.md).
+None of the iOS project has been compiled yet; the checklist says what that
+means.
+
 ## Contributing
 
 Contributions are welcome. Please ensure that any pull requests maintain the
