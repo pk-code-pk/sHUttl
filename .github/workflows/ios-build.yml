@@ -1,0 +1,75 @@
+# Compile check for the iOS app.
+#
+# The app is the Vite build inside a Capacitor shell (frontend/ios). Nobody
+# needs a Mac to find out whether it still compiles: this builds it for the
+# simulator, unsigned, so it needs no Apple account and no secrets.
+name: iOS build
+
+on:
+  push:
+    branches: [main, 'claude/**']
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/ios-build.yml'
+  pull_request:
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/ios-build.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ios-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  simulator:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      # The URL is baked into the bundle at build time. A compile check never
+      # calls it, so a placeholder keeps this job free of configuration.
+      - name: Build web bundle and sync into the iOS project
+        run: npm run ios:sync
+        env:
+          VITE_API_BASE_URL: https://example.invalid
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          xcodebuild -list -project ios/App/App.xcodeproj
+
+      - name: Build for the simulator (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project ios/App/App.xcodeproj \
+            -scheme App \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            | tee "$RUNNER_TEMP/xcodebuild.log" | tail -n 400
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: ${{ runner.temp }}/xcodebuild.log
