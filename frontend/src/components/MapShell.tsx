@@ -4,7 +4,7 @@ import { MapCard } from './MapCard';
 import { SHEET_RESTING_FRACTION } from './ui/sheetSnaps';
 import type { DepartureRun } from './NextBusPanel';
 import type { LngLatBoundsLike } from 'maplibre-gl';
-import { Moon, Navigation as NavigationIcon, Route as RouteIcon, Settings, Sun, X } from 'lucide-react';
+import { LocateFixed, Maximize2, Moon, Route as RouteIcon, Settings, Sun, X } from 'lucide-react';
 import clsx from 'clsx';
 import { ShuttleMarker } from './ShuttleMarker';
 import { buttonVariants, cn } from './ui/styles';
@@ -12,6 +12,8 @@ import { NEUTRAL_ROUTE_COLOR, bboxOf, relativeLuminance, textOnRouteColor } from
 import type { Stop, Vehicle, RoutePath, TripResponse, TripSegment } from './types';
 import { API_BASE_URL, MAP_MAX_ZOOM, MAP_MIN_ZOOM, MAP_STYLE_DARK, MAP_STYLE_LIGHT } from '@/config';
 import { nativeSafeArea, setStatusBarGround } from '@/lib/nativeShell';
+import { getLocation } from '@/lib/geolocation';
+import { NoticesPill } from './NoticesPill';
 
 /** The read-only status pill, shared by the mobile top bar and the desktop
  * bottom bar. They had drifted to different grounds, paddings and text sizes
@@ -51,6 +53,12 @@ interface MapShellProps {
     /** The expanded departure's run: geometry and stops. Drawn like a trip,
      * with the whole route thin beneath it for orientation. */
     focusRun?: DepartureRun | null;
+    /** The Routes tab's single-route view: with a focused route, draw only
+     * that route's line and buses, so it can be read on its own. */
+    isolateRoute?: boolean;
+    /** A place to fly to, such as a stop tapped in the Routes tab. The nonce
+     * makes a second tap on the same stop fly again. */
+    focusPoint?: { lat: number; lng: number; nonce: number } | null;
 }
 
 /* Route ids arrive from two endpoints — /routes and /departures — and the
@@ -96,7 +104,7 @@ function fitOptions() {
 
 const toLngLatBounds = (b: Bbox): LngLatBoundsLike => [[b[0], b[1]], [b[2], b[3]]];
 
-export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonce = 0, focusRun = null }: MapShellProps) => {
+export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonce = 0, focusRun = null, isolateRoute = false, focusPoint = null }: MapShellProps) => {
     const mapRef = useRef<MapRef>(null);
     const [mapReady, setMapReady] = useState(false);
 
@@ -238,7 +246,18 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
 
     // ---------------------------------------------------------------- bounds
 
-    const systemBbox = useMemo(() => bboxOf(stops.map((s) => [s.lng, s.lat] as [number, number])), [stops]);
+    // Campus framing: stops and buses only on regional routes (the M2, which
+    // runs to Longwood) are left out, or the launch view would shrink campus
+    // to fit a route most riders only use from Harvard Square. The backend
+    // flags them on /stops and /vehicles, which the map always has.
+    const systemBbox = useMemo(
+        () => bboxOf(
+            stops
+                .filter((s) => !(s as Stop & { regional?: boolean }).regional)
+                .map((s) => [s.lng, s.lat] as [number, number]),
+        ),
+        [stops],
+    );
 
     // The launch/overview view. Stops define the network, but a bus can sit
     // just outside their envelope, so vehicles are folded in to guarantee
@@ -246,7 +265,11 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
     const overviewBbox = useMemo<Bbox | null>(() => {
         if (!systemBbox) return null;
         const pts: [number, number][] = [[systemBbox[0], systemBbox[1]], [systemBbox[2], systemBbox[3]]];
-        for (const v of vehicles) if (typeof v.lat === 'number' && typeof v.lng === 'number') pts.push([v.lng, v.lat]);
+        for (const v of vehicles) {
+            if (typeof v.lat !== 'number' || typeof v.lng !== 'number') continue;
+            if ((v as Vehicle & { regional?: boolean }).regional) continue;
+            pts.push([v.lng, v.lat]);
+        }
         return bboxOf(pts);
     }, [systemBbox, vehicles]);
 
@@ -314,6 +337,69 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
         if (target) map.fitBounds(toLngLatBounds(target), fitOptions());
     };
 
+    // The arrow button used to be "recenter on the network", and it looked
+    // exactly like the you-are-here button every other map app has, so riders
+    // tapped it to find themselves and were thrown out to the whole network.
+    // It now goes to the rider. Tapped again while the map is still sitting on
+    // them, it shows the network (or the selected route), so the overview is
+    // one tap further away rather than gone. Any drag or zoom by hand clears
+    // that, and the next tap goes back to the rider.
+    const centeredOnUser = useRef(false);
+    const [noticeCount, setNoticeCount] = useState(0);
+    const [locating, setLocating] = useState(false);
+    const [onUser, setOnUser] = useState(false);
+    const markOnUser = (v: boolean) => { centeredOnUser.current = v; setOnUser(v); };
+
+    const flyToUser = (at: { lat: number; lng: number }) => {
+        const map = mapRef.current;
+        if (!map) return;
+        map.flyTo({
+            center: [at.lng, at.lat],
+            zoom: Math.max(map.getZoom(), 16),
+            padding: fitOptions().padding,
+            duration: 650,
+        });
+        markOnUser(true);
+    };
+
+    // A stop tapped in the Routes tab.
+    // focusPoint is a new object on every tap (its nonce changes), so a re-tap
+    // on the same stop flies again.
+    useEffect(() => {
+        const map = mapRef.current;
+        if (!map || !mapReady || !focusPoint) return;
+        centeredOnUser.current = false;
+        // The locate button stops showing "on you" once the map moves away.
+        map.once('movestart', () => setOnUser(false));
+        map.flyTo({ center: [focusPoint.lng, focusPoint.lat], zoom: Math.max(map.getZoom(), 16), padding: fitOptions().padding, duration: 650 });
+    }, [focusPoint, mapReady]);
+
+    // While the map is sitting on the rider, keep it there as they walk.
+    useEffect(() => {
+        const map = mapRef.current;
+        if (!map || !userLocation || !centeredOnUser.current) return;
+        map.easeTo({ center: [userLocation.lng, userLocation.lat], padding: fitOptions().padding, duration: 500 });
+    }, [userLocation]);
+
+    const locateOrOverview = () => {
+        if (centeredOnUser.current) {
+            markOnUser(false);
+            recenter();
+            return;
+        }
+        if (userLocation) {
+            flyToUser(userLocation);
+            return;
+        }
+        // No fix yet: this tap is the explicit request, so it may prompt.
+        setLocating(true);
+        void getLocation(true).then((result) => {
+            setLocating(false);
+            if (result.coords) flyToUser(result.coords);
+            else recenter();
+        });
+    };
+
     // ------------------------------------------------------------- geometry
 
     // Which routes draw: all visible ones when Show Routes is on; otherwise
@@ -335,6 +421,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
             .filter((r) => {
                 if (!r.path?.length) return false;
                 const isFocus = focusRoute != null && sameRoute(r.route_id, focusRoute.route_id);
+                if (isolateRoute && focusRoute) return isFocus;
                 return isFocus || (showRoutes && routeVisibility[r.route_id] !== false);
             })
             .sort((a, b) => {
@@ -358,7 +445,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
                 };
             });
         return { type: 'FeatureCollection' as const, features };
-    }, [routes, focusRoute, showRoutes, routeVisibility, trip, focusRun]);
+    }, [routes, focusRoute, showRoutes, routeVisibility, trip, focusRun, isolateRoute]);
 
     const tripGeoJson = useMemo(() => {
         // No trip yet but a departure expanded: its run takes the trip layer,
@@ -442,6 +529,11 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
                     // events, not console errors. Without this a broken
                     // basemap is a silent dark rectangle.
                     onError={(e) => console.error('[map]', e.error?.message ?? e.error ?? e)}
+                    // A drag or pinch by hand means the map is no longer
+                    // sitting on the rider, so the locate button goes back to
+                    // locating. Moves the app makes itself carry no
+                    // originalEvent and leave it alone.
+                    onMoveStart={(e) => { if (e.originalEvent && centeredOnUser.current) markOnUser(false); }}
                     style={{ width: '100%', height: '100%' }}
                     onLoad={(e) => {
                         e.target.touchZoomRotate.disableRotation();
@@ -501,13 +593,19 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
                     })}
 
                     {userLocation && (
-                        <Marker longitude={userLocation.lng} latitude={userLocation.lat} anchor="center" style={{ zIndex: 6 }}>
-                            <div className="user-location-container"><div className="user-location-dot" /></div>
+                        // Above buses (10) but below a selected bus (20): the rider
+                        // standing at a stop should not vanish under the bus there.
+                        <Marker longitude={userLocation.lng} latitude={userLocation.lat} anchor="center" style={{ zIndex: 15, pointerEvents: 'none' }}>
+                            <div className="user-location-container" aria-label="Your location">
+                                <div className="user-location-halo" />
+                                <div className="user-location-dot" />
+                            </div>
                         </Marker>
                     )}
 
                     {vehicles
                         .filter((v): v is Vehicle & { lat: number; lng: number } => typeof v.lat === 'number' && typeof v.lng === 'number')
+                        .filter((v) => !(isolateRoute && focusRouteId) || sameRoute(v.route_id, focusRouteId))
                         .map((v) => (
                             <ShuttleMarker
                                 key={v.id}
@@ -580,8 +678,22 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
                         : <span className="whitespace-nowrap"><span className="hidden md:inline">{stops.length} stops • </span>{busCount(vehicles.length)}</span>
                     : <span className="whitespace-nowrap"><span className="md:hidden">Select system</span><span className="hidden md:inline">Select a system to begin</span></span>}
             </div>
+            {/* Service notices sit under the status pill; the data warning
+                below makes room for them when both are showing. */}
+            {systemId && (
+                <div className="pointer-events-none fixed left-4 top-[calc(var(--safe-top)+60px)] z-[1000] md:absolute md:left-auto md:right-6 md:top-[calc(var(--safe-top)+68px)]">
+                    <NoticesPill systemId={systemId} onCountChange={setNoticeCount} />
+                </div>
+            )}
             {(vehiclesError || routesError) && (
-                <p className="animate-pulse-subtle pointer-events-none fixed left-4 top-[calc(var(--safe-top)+60px)] z-[1000] rounded-full border border-crimson-mid/40 bg-crimson-deep/30 px-3 py-1 text-[10px] font-medium text-crimson-light backdrop-blur-sm md:absolute md:left-auto md:right-6 md:top-[calc(var(--safe-top)+68px)]">
+                <p
+                    className={cn(
+                        'animate-pulse-subtle pointer-events-none fixed left-4 z-[1000] rounded-full border border-crimson-mid/40 bg-crimson-deep/30 px-3 py-1 text-[10px] font-medium text-crimson-light backdrop-blur-sm md:absolute md:left-auto md:right-6',
+                        noticeCount > 0
+                            ? 'top-[calc(var(--safe-top)+100px)] md:top-[calc(var(--safe-top)+108px)]'
+                            : 'top-[calc(var(--safe-top)+60px)] md:top-[calc(var(--safe-top)+68px)]',
+                    )}
+                >
                     {vehiclesError && routesError ? 'Real-time data unavailable' : vehiclesError ? 'Vehicle tracking unavailable' : 'Route information unavailable'}
                 </p>
             )}
@@ -591,12 +703,15 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
                 <div className="pointer-events-none fixed right-4 top-[calc(var(--safe-top)+1rem)] z-[1000] flex items-center gap-1.5 md:absolute md:bottom-6 md:right-6 md:top-auto md:gap-2">
                     <button
                         type="button"
-                        onClick={recenter}
-                        title="Recenter"
-                        aria-label="Recenter map"
-                        className={cn(buttonVariants({ variant: 'overlay', size: 'icon' }), 'pointer-events-auto text-white')}
+                        onClick={locateOrOverview}
+                        title={onUser ? 'Show all routes' : 'Show my location'}
+                        aria-label={onUser ? 'Show all routes' : 'Show my location'}
+                        aria-busy={locating}
+                        className={cn(buttonVariants({ variant: onUser ? 'selected' : 'overlay', size: 'icon' }), 'pointer-events-auto text-white')}
                     >
-                        <NavigationIcon size={14} className="fill-current -translate-x-[1px] translate-y-[1px]" />
+                        {locating
+                            ? <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/25 border-t-white" />
+                            : onUser ? <Maximize2 size={14} /> : <LocateFixed size={15} />}
                     </button>
                     <button
                         type="button"

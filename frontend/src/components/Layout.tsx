@@ -1,4 +1,5 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { subscribeToLocation } from "@/lib/geolocation";
 import { TripPlannerPanel } from "./TripPlannerPanel";
 import { MapShell } from "./MapShell";
 import type { TripResponse } from "./types";
@@ -16,7 +17,11 @@ interface LayoutProps {
 }
 
 export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
+    // Fed by every fix any panel obtains, and followed from then on (see
+    // lib/geolocation). It used to be set only by Plan Trip's "use current
+    // location", so a rider who stayed on Next Bus Out never saw themselves.
     const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
+    useEffect(() => subscribeToLocation(setUserLocation), []);
     // Route Next Bus Out has expanded, for the map to draw and frame. Lifted
     // here because the panel and the map are siblings.
     // Along with the id, a count of how many times focus has been set. Two
@@ -26,6 +31,22 @@ export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
     const [focus, setFocus] = useState<{ id: string | null; run: DepartureRun | null; nonce: number }>({ id: null, run: null, nonce: 0 });
     const setFocusRouteId = useCallback(
         (id: string | null, run?: DepartureRun | null) => setFocus((f) => ({ id, run: run ?? null, nonce: f.nonce + 1 })),
+        [],
+    );
+
+    // The Routes tab's single-route view. It reuses the focus path (draw and
+    // frame the route) and adds isolation: only that route's line and buses.
+    const [isolateRoute, setIsolateRoute] = useState(false);
+    const setRouteView = useCallback(
+        (id: string | null) => {
+            setIsolateRoute(id !== null);
+            setFocusRouteId(id);
+        },
+        [setFocusRouteId],
+    );
+    const [focusPoint, setFocusPoint] = useState<{ lat: number; lng: number; nonce: number } | null>(null);
+    const showPoint = useCallback(
+        (p: { lat: number; lng: number }) => setFocusPoint((cur) => ({ lat: p.lat, lng: p.lng, nonce: (cur?.nonce ?? 0) + 1 })),
         [],
     );
 
@@ -40,6 +61,8 @@ export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
                     focusRouteId={focus.id}
                     focusRun={focus.run}
                     focusNonce={focus.nonce}
+                    isolateRoute={isolateRoute}
+                    focusPoint={focusPoint}
                 />
             </div>
 
@@ -76,8 +99,9 @@ export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
                         system={system}
                         trip={trip}
                         onTripChange={onTripChange}
-                        onUserLocationChange={setUserLocation}
                         onFocusRouteChange={setFocusRouteId}
+                        onRouteViewChange={setRouteView}
+                        onShowPoint={showPoint}
                     />
                 </div>
 

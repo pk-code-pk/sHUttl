@@ -63,12 +63,19 @@ def check_stops(stops):
     if missing_coords:
         failures.append(f"{len(missing_coords)} stops with impossible latitude")
 
-    # Everything should land inside Cambridge/Allston.
-    out_of_area = [
-        s.name
-        for s in stops
-        if not (42.34 <= s.latitude <= 42.40 and -71.15 <= s.longitude <= -71.10)
-    ]
+    # Everything should land inside Cambridge/Allston, except stops served
+    # only by the M2, which runs on to Kenmore and Longwood: those should be in
+    # Boston/Cambridge.
+    def regional_only(s):
+        routes = set(s.routesAndPositions)
+        return bool(routes) and routes <= {"M2"}
+
+    def inside(s):
+        if regional_only(s):
+            return 42.32 <= s.latitude <= 42.40 and -71.15 <= s.longitude <= -71.07
+        return 42.34 <= s.latitude <= 42.40 and -71.15 <= s.longitude <= -71.10
+
+    out_of_area = [s.name for s in stops if not inside(s)]
     if out_of_area:
         failures.append(f"stops outside Harvard's area: {out_of_area[:3]}")
     print(f"  {len(stops) - len(out_of_area)}/{len(stops)} stops inside the expected bounding box")

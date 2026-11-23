@@ -5,11 +5,13 @@ from collections import defaultdict, deque
 import datetime
 from datetime import datetime 
 from datetime import timedelta
+from campus_time import CAMPUS_TZ, campus_iso, campus_now, campus_now_aware, to_campus_naive
 import math 
 import re
 import os
 import json
 import logging
+import hashlib
 import time
 from typing import Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -25,6 +27,8 @@ from ridesystems_client import (
     DEFAULT_SYSTEM_ID,
     get_all_systems,
     get_platform_etas,
+    get_service_alerts,
+    run_serves_stop,
 )
 
 # Route geometry, now sourced from Ride Systems rather than GTFS shapes.txt.
@@ -32,6 +36,7 @@ from ridesystems_client import (
 # PassioGO on 2026-07-01, so there is no second feed to reconcile against and no
 # GTFS export with live service in it. See ridesystems_client.py.
 from ridesystems_client import distance_along_route_m, get_route_stop_ids
+import m2_client
 import arrivals as arrivals_module
 import reminders as reminders_module
 from pydantic import BaseModel, Field
@@ -247,7 +252,7 @@ async def _vehicle_position_poller():
             # get_vehicles is a blocking network call — run in a thread so we don't
             # stall the async event loop.
             vehicles = await asyncio.to_thread(get_vehicles, DEFAULT_SYSTEM_ID)
-            now = datetime.now()
+            now = campus_now()
 
             # Detect arrivals before updating VEHICLE_STATE: detection needs the
             # previous fix, and it keeps its own track of that.
@@ -730,6 +735,9 @@ def vehicledict(vehicle, route_color=None):
         "lng": lng,
         "heading": getattr(vehicle, "heading", None),
         "color": route_color,
+        # On a route that runs well beyond campus (the M2): the map leaves it
+        # out of its overview framing.
+        "regional": getattr(vehicle, "routeId", None) == m2_client.ROUTE_ID,
     }
 
 
@@ -800,6 +808,9 @@ def list_stops(system_id: int = DEFAULT_SYSTEM_ID):
                 serving[str(pid)].append(r.id)
         for row in data:
             row["routes"] = sorted(serving.get(str(row.get("id")), []))
+            # Served only by a route that runs well beyond campus (the M2's
+            # Longwood and Kenmore stops). The map's overview leaves these out.
+            row["regional"] = bool(row["routes"]) and all(r == m2_client.ROUTE_ID for r in row["routes"])
     except Exception as e:
         # A stop list without route badges is still a usable stop list.
         logger.warning("Could not attach routes to stops", exc_info=e)
@@ -914,6 +925,9 @@ def route_paths_for_system(system_id: int = DEFAULT_SYSTEM_ID) -> list[dict[str,
             "short_name": getattr(route_obj, "shortName", None),
             "color": color,
             "path": path,
+            # Runs well beyond campus (the M2 to Longwood). The map leaves it
+            # out of its overview framing so campus is not shrunk to fit it.
+            "regional": rid == m2_client.ROUTE_ID,
         })
 
     # Upgrade the stop-to-stop path to the operator's real street geometry.
@@ -932,6 +946,110 @@ def route_paths_for_system(system_id: int = DEFAULT_SYSTEM_ID) -> list[dict[str,
             ]
 
     return result
+
+
+_notices_cache: tuple[list[dict], float] = ([], 0.0)
+NOTICES_TTL_S = 120
+
+
+def _harvard_notices() -> list[dict]:
+    out = []
+    for project in get_service_alerts() or []:
+        for a in project.get("Alerts") or []:
+            title = " ".join(str(a.get("Title") or "").split())
+            body = " ".join(str(a.get("Detail") or "").split())
+            if not (title or body):
+                continue
+            routes = [str(i.get("No")) for i in ((a.get("Routes") or {}).get("Items") or []) if i.get("No")]
+            out.append({
+                "id": "hu-" + hashlib.sha1(f"{title}|{body}".encode()).hexdigest()[:12],
+                "title": title or "Service notice",
+                "body": body,
+                # The operator states the window in words ("until 11/26/2026").
+                "when": (str(a.get("Duration")).strip() or None) if a.get("Duration") else None,
+                "routes": routes,
+                "source": "Harvard Transportation",
+            })
+    return out
+
+
+@app.get("/notices", dependencies=[Depends(OptionalRateLimiter(times=30, seconds=60))])
+def api_notices():
+    """Active service notices: Harvard's, and the Longwood Collective's that
+    concern the M2. Either source failing leaves the other's notices."""
+    global _notices_cache
+    cached, at = _notices_cache
+    if time.time() - at < NOTICES_TTL_S:
+        return {"notices": cached}
+    notices: list[dict] = []
+    try:
+        notices.extend(_harvard_notices())
+    except Exception as e:
+        logger.warning("Harvard service alerts unavailable", exc_info=e)
+    try:
+        for n in m2_client.get_alerts():
+            if n.get("until"):
+                n["when"] = "until " + datetime.fromtimestamp(n.pop("until"), CAMPUS_TZ).strftime("%-m/%-d/%Y")
+            else:
+                n.pop("until", None)
+                n["when"] = None
+            notices.append(n)
+    except Exception as e:
+        logger.warning("M2 alerts unavailable", exc_info=e)
+    _notices_cache = (notices, time.time())
+    return {"notices": notices}
+
+
+ROUTE_STOP_ETA_COUNT = 2  # next and following, per stop
+
+
+@app.get("/route_stops", dependencies=[Depends(OptionalRateLimiter(times=30, seconds=60))])
+def api_route_stops(route_id: str = Query(..., min_length=1, max_length=32), system_id: int = DEFAULT_SYSTEM_ID):
+    """One route's stops in the order a bus reaches them, with the next arrivals at each.
+
+    For the Routes tab: pick a route, see where it goes and when its buses get
+    to each stop. Arrival times are the operator's predictions for that route
+    at that stop (the same source Next Bus Out prefers), with the run label so
+    a stop can say where the next bus is heading. Fetched in parallel; each is
+    cached for PLATFORM_ET_TTL_S, so a panel refreshing every 20 s costs at
+    most one operator request per stop.
+    """
+    stops_by_id = {str(s.id): s for s in get_stops(system_id)}
+    route = next((r for r in get_routes(system_id) if norm_id(getattr(r, "myid", None) or r.id) == norm_id(route_id)), None)
+    if route is None:
+        raise HTTPException(status_code=404, detail="Unknown route")
+    rid = str(getattr(route, "myid", None) or route.id)
+
+    stop_ids = [sid for sid in get_route_stop_ids(rid) if sid in stops_by_id]
+
+    def arrivals_at(sid: str) -> list[dict]:
+        try:
+            etas = [e for e in get_platform_etas(sid) if norm_id(e.route_id) == norm_id(rid)]
+        except Exception:
+            return []
+        etas.sort(key=lambda e: e.eta_minutes)
+        return [
+            {"minutes": e.eta_minutes, "headsign": e.destination or None, "scheduled": bool(e.scheduled)}
+            for e in etas[:ROUTE_STOP_ETA_COUNT]
+        ]
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        arrivals = list(pool.map(arrivals_at, stop_ids))
+
+    try:
+        buses = sum(1 for v in get_vehicles(system_id) if norm_id(getattr(v, "routeId", None)) == norm_id(rid))
+    except HTTPException:
+        buses = None
+
+    return {
+        "route_id": rid,
+        "route_name": route.name,
+        "short_name": getattr(route, "shortName", None),
+        "color": getattr(route, "groupColor", None) or getattr(route, "color", None),
+        "buses": buses,
+        "stops": [{**stopdict(stops_by_id[sid]), "arrivals": arr} for sid, arr in zip(stop_ids, arrivals)],
+        "generated_at": campus_now_aware().isoformat(timespec="seconds"),
+    }
 
 
 @app.get("/route_paths")
@@ -1089,6 +1207,7 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
 
     result = [] 
     next_bus_cache = vehicle_indexes.get("next_bus_cache", {})
+    stops_by_id = None  # built on first use, for ride times
 
     for route in routes:
         seg_id = route.get("route_id")
@@ -1096,9 +1215,12 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
         
         start_stop = route.get("start_stop", {})
         boarding_stop_id = str(start_stop.get("id") or start_stop.get("stop_id") or "")
-        
-        # Request-level cache check
-        cache_key = (seg_key, boarding_stop_id)
+        end_stop = route.get("end_stop") or {}
+        alight_stop_id = str(end_stop.get("id") or end_stop.get("stop_id") or "")
+
+        # Request-level cache check. Keyed on the alighting stop too: which of
+        # the route's buses counts depends on whether its run goes there.
+        cache_key = (seg_key, boarding_stop_id, alight_stop_id)
         if cache_key in next_bus_cache:
             r = dict(route)
             r["next_bus"] = next_bus_cache[cache_key]
@@ -1207,7 +1329,7 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
         v_lat = float(v_lat_raw)
         v_lng = float(v_lng_raw)
 
-        prev_states.append({"lat": v_lat, "lng": v_lng, "t": datetime.now()})
+        prev_states.append({"lat": v_lat, "lng": v_lng, "t": campus_now()})
         if len(prev_states) > 4:
             prev_states = prev_states[-4:]
         VEHICLE_STATE[key] = prev_states
@@ -1284,28 +1406,24 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
             eta_source = "distance_model"
             learned_fraction = learned.learned_fraction if learned else 0.0
 
-        # Calculate Segment Ride ETA
+        # Ride time, boarding stop to alighting stop: the sum of the same
+        # per-hop times the departure board and the arrival planner use
+        # (hop_estimate: learned segment times where measured, distance plus
+        # dwell otherwise). This used to divide straight-line distance by the
+        # chosen bus's current speed, which was measured from GPS jitter and
+        # once came out at 55 mph, so Plan Trip and Next Bus Out quoted the
+        # same ride at 1.4 and 4.7 minutes.
         ride_eta_s = None
         segment_eta_s = None
         leg_stops = route.get("stops", [])
-        if leg_stops and len(leg_stops) >= 2 and speed_ms > 0:
-            seg_dist = 0.0
-            for i in range(len(leg_stops) - 1):
-                s1 = leg_stops[i]
-                s2 = leg_stops[i+1]
-                dm = distance_m(s1["lat" if "lat" in s1 else "latitude"], s1["lng" if "lng" in s1 else "longitude"], 
-                                s2["lat" if "lat" in s2 else "latitude"], s2["lng" if "lng" in s2 else "longitude"])
-                seg_dist += dm
-            
-            # seg_dist is a sum of straight-line hop distances. speed_ms has already been
-            # inflated by SPEED_TORTUOSITY_CORRECTION to approximate along-route speed.
-            # Dividing straight-line distance by inflated speed made ride ETAs ~20% too short.
-            # Apply the same tortuosity factor to seg_dist so both sides use along-route units.
-            # Dwell applies to the ride too: every stop between boarding and
-            # destination costs the same stopped time, minus the final one,
-            # where arrival is what we are timing.
-            ride_dwell_s = max(0, len(leg_stops) - 2) * DWELL_S_PER_STOP
-            ride_eta_s = (seg_dist * SPEED_TORTUOSITY_CORRECTION) / speed_ms + ride_dwell_s
+        leg_ids = [str(st.get("id") or st.get("stop_id") or "") for st in leg_stops]
+        if len(leg_ids) >= 2 and all(leg_ids):
+            if stops_by_id is None:
+                stops_by_id = {str(st.id): st for st in get_stops(system_id)}
+            ride_eta_s = sum(
+                hop_estimate(seg_id, a, b, stops_by_id)[0]
+                for a, b in zip(leg_ids, leg_ids[1:])
+            )
             if eta_to_boarding_stop_s is not None:
                 segment_eta_s = eta_to_boarding_stop_s + ride_eta_s
 
@@ -1320,6 +1438,12 @@ def enrich_routes_with_next_bus(routes, origin_stop, vehicle_indexes, system_id:
         try:
             for e in get_platform_etas(str(boarding_stop_id)):
                 if norm_id(e.route_id) == seg_key:
+                    # Skip a bus whose run does not reach the rider's stop: the
+                    # soonest Quad Express at Law School may be heading straight
+                    # back to the Quad. None means the operator's data cannot
+                    # tell, and the bus is kept as before.
+                    if alight_stop_id and run_serves_stop(e.route_id, e.destination, alight_stop_id) is False:
+                        continue
                     candidate_s = float(e.eta_minutes) * 60.0
                     if operator_eta_s is None or candidate_s < operator_eta_s:
                         operator_eta_s = candidate_s
@@ -1431,12 +1555,8 @@ def enrich_trip_skeleton(
                 def _stop_seq(s, _rid=rid_str):
                     rap = getattr(s, "routesAndPositions", {}) or {}
                     positions = rap.get(_rid)
-                    if isinstance(positions, (list, tuple)) and positions:
-                        return min(int(p) for p in positions)
-                    try:
-                        return int(positions)
-                    except (TypeError, ValueError):
-                        return 9999
+                    seq = _route_sequence(positions)
+                    return 9999 if seq is None else seq
                 sorted_route_stop_objs = sorted(all_route_stops, key=_stop_seq)
                 full_route_stops = [stopdict(s) for s in sorted_route_stop_objs]
 
@@ -1595,6 +1715,18 @@ def enrich_trip_skeleton(
         "total_walk_m": origin_walk + dest_walk,
     }
 
+def _route_sequence(pos) -> int | None:
+    """A stop's place along a route, from routesAndPositions' [direction, sequence]."""
+    if isinstance(pos, (list, tuple)):
+        if not pos:
+            return None
+        pos = pos[-1]
+    try:
+        return int(pos)
+    except (TypeError, ValueError):
+        return None
+
+
 def build_route_graph(stops: list):
     stop_by_id = {} 
     routes_to_stops = defaultdict(list) 
@@ -1604,12 +1736,13 @@ def build_route_graph(stops: list):
 
         routes = getattr(s, "routesAndPositions", {}) 
         for rid, pos in routes.items():
-            # pos is usually [seq_id] or [seq_id1, seq_id2]
-            if isinstance(pos, (list, tuple)):
-                for p_id in pos:
-                    routes_to_stops[rid].append((sid, s, p_id))
-            else:
-                routes_to_stops[rid].append((sid, s, pos))
+            # ridesystems_client gives [direction, sequence]. Both used to be
+            # read as sequence numbers, so every stop also sat at position 0
+            # and about half the graph's edges joined stops no bus runs
+            # between, which is what transfer plans were built from.
+            seq = _route_sequence(pos)
+            if seq is not None:
+                routes_to_stops[rid].append((sid, s, seq))
     graph = defaultdict(list)
 
     for rid, lst in routes_to_stops.items():
@@ -2497,32 +2630,43 @@ def api_trip(
     has_single_bus = any(c["num_transfers"] == 0 for c in enriched_candidates)
     if has_single_bus:
         enriched_candidates = [c for c in enriched_candidates if c["num_transfers"] == 0]
-    def _candidate_sort_key(c: dict) -> tuple:
-        live = c["has_live_bus"]
-        transfers = c["num_transfers"]
-        kind = c["kind"]
-        if live and transfers == 0 and kind == "base_no_transfer":
-            cat = 1
-        elif live and kind == "walk_modified":
-            cat = 2
-        elif live and transfers >= 1 and kind == "base_transfer":
-            cat = 3
-        elif not live and transfers == 0 and kind == "base_no_transfer":
-            cat = 4
-        elif not live and kind == "walk_modified":
-            cat = 5
-        elif not live and transfers >= 1 and kind == "base_transfer":
-            cat = 6
-        else:
-            cat = 999
-        # Tiebreaker: within the same category and walk distance, prefer lower ETA
-        eta = float("inf")
-        for seg in c.get("segments", []):
+    def _arrival_estimate(c: dict) -> tuple[float, bool]:
+        """Seconds from now until the rider reaches the destination, and
+        whether they can make the first bus at all.
+
+        Walk to the stop or wait for the bus, whichever is longer, then each
+        ride (waiting again at a transfer if that bus is later), then the walk
+        at the far end. Infinite when a leg has no ETA.
+        """
+        trip = c.get("trip") or {}
+        walk_in_s = float((trip.get("origin") or {}).get("distance_m") or 0.0) / WALK_SPEED_MS
+        walk_out_s = float((trip.get("destination") or {}).get("distance_m") or 0.0) / WALK_SPEED_MS
+        t = walk_in_s
+        catchable = True
+        for i, seg in enumerate(c.get("segments", [])):
             nb = seg.get("next_bus") or {}
-            v = nb.get("eta_to_boarding_stop_s")
-            if v is not None and v < eta:
-                eta = v
-        return (cat, c["total_walk_m"], eta)
+            wait = nb.get("eta_to_boarding_stop_s")
+            ride = nb.get("ride_eta_s")
+            if wait is None or ride is None:
+                return float("inf"), False
+            # Same test Next Bus Out applies to its rows.
+            if i == 0 and float(wait) < walk_in_s:
+                catchable = False
+            t = max(t, float(wait)) + float(ride)
+        return t + walk_out_s, catchable
+
+    def _candidate_sort_key(c: dict) -> tuple:
+        # By when the rider gets there. This used to rank by category, then by
+        # total walking distance, then by ETA, so a bus arriving in 29 minutes
+        # beat one arriving in 12 because its stop was three metres closer.
+        arrive_s, catchable = _arrival_estimate(c)
+        if arrive_s == float("inf"):
+            tier = 2          # no live estimate for some leg
+        elif not catchable:
+            tier = 1          # gone before the rider can reach the stop
+        else:
+            tier = 0
+        return (tier, arrive_s, c["total_walk_m"])
 
     enriched_candidates.sort(key=_candidate_sort_key)
 
@@ -2705,7 +2849,7 @@ def api_stop_etas(stop_id: str, system_id: int = DEFAULT_SYSTEM_ID):
 
     return {
         "stop": stopdict(stop),
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "generated_at": campus_now_aware().isoformat(timespec="seconds"),
         "ours": ours,
         "vendor": vendor,
     }
@@ -2839,7 +2983,7 @@ def downstream_stops(route_id: str, boarding_stop_id: str, depart_in_min: float)
         out.append({
             **stopdict(stop),
             "minutes": cumulative_s / 60.0,
-            "arrives_at": (datetime.now() + timedelta(seconds=cumulative_s)).strftime("%-I:%M"),
+            "arrives_at": (campus_now() + timedelta(seconds=cumulative_s)).strftime("%-I:%M"),
             "source": source,
         })
         prev_id = sid
@@ -2915,7 +3059,7 @@ def api_departures(
             "nearest_stop_distance_m": dist,
             "out_of_range": True,
             "departures": [],
-            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "generated_at": campus_now_aware().isoformat(timespec="seconds"),
         }
 
     # The operator's per-stop predictions carry a destination headsign, which
@@ -3012,7 +3156,7 @@ def api_departures(
         "out_of_range": False,
         "stops_considered": len(nearby),
         "departures": departures,
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "generated_at": campus_now_aware().isoformat(timespec="seconds"),
     }
 
 
@@ -3067,18 +3211,21 @@ def resolve_location(query: str, system_id: int = DEFAULT_SYSTEM_ID):
     return [], query, 0.0, None
 
 
-def _departures_from_stop(stop, system_id: int) -> dict[str, list[tuple[float, str, str | None]]]:
-    """Upcoming departures per route as (minutes, eta_source, route_name).
+def _departures_from_stop(stop, system_id: int) -> dict[str, list[tuple[float, str, str | None, str | None]]]:
+    """Upcoming departures per route as (minutes, eta_source, route_name, run label).
+
+    The run label is the operator's destination headsign, or None for our own
+    estimates, so a caller can drop buses whose run does not reach its stop.
 
     The same preference order /departures uses — operator predictions when
     they exist (every trip they list, not only the first), our own projection
     where they have none — so the planner's departure clock is the one the
     departure board already shows.
     """
-    out: dict[str, list[tuple[float, str, str | None]]] = defaultdict(list)
+    out: dict[str, list[tuple[float, str, str | None, str | None]]] = defaultdict(list)
     try:
         for e in get_platform_etas(stop.id):
-            out[e.route_id].append((float(e.eta_minutes), "operator", e.route_name))
+            out[e.route_id].append((float(e.eta_minutes), "operator", e.route_name, e.destination))
     except HTTPException:
         logger.warning("Operator ETAs unavailable for stop", extra={"stop_id": stop.id})
 
@@ -3087,7 +3234,7 @@ def _departures_from_stop(stop, system_id: int) -> dict[str, list[tuple[float, s
             if out.get(o["route_id"]):
                 continue
             src = "learned" if (o.get("eta_source") or "").startswith("learned") else "estimated"
-            out[o["route_id"]].append((o["eta_minutes"], src, o.get("route_name")))
+            out[o["route_id"]].append((o["eta_minutes"], src, o.get("route_name"), None))
     except HTTPException:
         pass
     return out
@@ -3127,10 +3274,10 @@ def plan_arrival(
     origin_place: str | None = None,
 ) -> dict:
     """The work behind /arrival_plan, callable without HTTP (validate_arrival_plan.py)."""
-    # Everything else in this file clocks in naive local time; meet it there.
-    if arrive_by.tzinfo is not None:
-        arrive_by = arrive_by.astimezone().replace(tzinfo=None)
-    now = datetime.now()
+    # Everything else in this file clocks in naive Boston time (campus_time);
+    # meet it there.
+    arrive_by = to_campus_naive(arrive_by)
+    now = campus_now()
 
     stops = get_stops(system_id)
     if not stops:
@@ -3208,7 +3355,11 @@ def plan_arrival(
             route = routes_by_id.get(route_id)
             color = (getattr(route, "groupColor", None) or getattr(route, "color", None)) if route else None
 
-            for eta_min, source, vendor_name in deps:
+            for eta_min, source, vendor_name, run_label in deps:
+                # A bus on a run that ends before the rider's stop is not an
+                # option (see run_serves_stop).
+                if run_label and run_serves_stop(route_id, run_label, alight_id) is False:
+                    continue
                 depart_at = now + timedelta(minutes=eta_min)
                 arrive_stop_at = depart_at + timedelta(seconds=ride_s)
                 arrive_dest_at = arrive_stop_at + timedelta(seconds=walk_s)
@@ -3222,10 +3373,10 @@ def plan_arrival(
                     "color": color,
                     "board_stop": stopdict(board),
                     "alight_stop": stopdict(alight),
-                    "depart_at": depart_at.isoformat(timespec="seconds"),
-                    "be_at_stop_by": (depart_at - timedelta(seconds=ARRIVAL_PLAN_STOP_BUFFER_S)).isoformat(timespec="seconds"),
-                    "arrive_stop_at": arrive_stop_at.isoformat(timespec="seconds"),
-                    "arrive_dest_at": arrive_dest_at.isoformat(timespec="seconds"),
+                    "depart_at": campus_iso(depart_at),
+                    "be_at_stop_by": campus_iso(depart_at - timedelta(seconds=ARRIVAL_PLAN_STOP_BUFFER_S)),
+                    "arrive_stop_at": campus_iso(arrive_stop_at),
+                    "arrive_dest_at": campus_iso(arrive_dest_at),
                     "slack_minutes": round(slack_s / 60.0, 1),
                     "eta_source": source,
                     "viable": slack_s >= 0 and reachable,
@@ -3283,10 +3434,10 @@ def plan_arrival(
                     "color": color,
                     "board_stop": stopdict(board),
                     "alight_stop": stopdict(alight),
-                    "depart_at": depart_at.isoformat(timespec="seconds"),
-                    "be_at_stop_by": (depart_at - timedelta(seconds=ARRIVAL_PLAN_STOP_BUFFER_S)).isoformat(timespec="seconds"),
-                    "arrive_stop_at": arrive_stop_at.isoformat(timespec="seconds"),
-                    "arrive_dest_at": arrive_dest_at.isoformat(timespec="seconds"),
+                    "depart_at": campus_iso(depart_at),
+                    "be_at_stop_by": campus_iso(depart_at - timedelta(seconds=ARRIVAL_PLAN_STOP_BUFFER_S)),
+                    "arrive_stop_at": campus_iso(arrive_stop_at),
+                    "arrive_dest_at": campus_iso(arrive_dest_at),
                     "slack_minutes": round(slack_s / 60.0, 1),
                     "eta_source": "schedule",
                     "viable": slack_s >= 0 and reachable,
@@ -3311,10 +3462,10 @@ def plan_arrival(
             "confidence": confidence,
         },
         "origin_stop": stopdict(origin),
-        "arrive_by": arrive_by.isoformat(timespec="seconds"),
+        "arrive_by": campus_iso(arrive_by),
         "options": options,
         "recommended": recommended,
-        "generated_at": now.isoformat(timespec="seconds"),
+        "generated_at": campus_iso(now),
     }
 
 
@@ -3651,7 +3802,7 @@ def _normalize_class(raw: Any) -> Optional[dict]:
 
     term_start = _norm_date(raw.get("term_start"))
     term_end = _norm_date(raw.get("term_end"))
-    today = datetime.now().date()
+    today = campus_now().date()
     if term_start is None:
         term_start = today.isoformat()
     if term_end is None:

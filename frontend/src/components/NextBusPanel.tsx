@@ -311,7 +311,7 @@ export const NextBusPanel = ({ systemId, onShowOnMap }: NextBusPanelProps) => {
                         nearest stop ({data.nearest_stop.name}).
                     </p>
                     <p className="mt-1 text-[10px] text-neutral-500">
-                        Next Bus Out works on campus. Use Plan Trip to route from here.
+                        Next Bus works on campus. Use Plan Trip to route from here.
                     </p>
                 </div>
             )}

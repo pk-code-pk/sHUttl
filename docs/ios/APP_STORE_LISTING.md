@@ -75,17 +75,23 @@ Live shuttle positions, arrival times and door-to-door trip plans for Harvard's 
 ```
 sHUttl shows where Harvard's campus shuttles are right now and tells you which one to catch.
 
-NEXT BUS OUT
+NEXT BUS
 Open the app and see what is leaving from the stops near you, with live arrival times. Prefer not to share your location? Pick a stop instead.
 
 PLAN TRIP
 Choose where you are starting and where you are going. sHUttl plans the whole trip: the walk to the stop, the shuttle to board, any transfer, and the walk at the other end. Plans are built from where the buses actually are, not only from where a timetable says they should be. Send a planned trip to a friend from the share sheet.
 
+ROUTES
+Pick a route to see only that route on the map, every stop it serves in order, and when its next buses reach each one.
+
+THE M2
+The M2 to Central, MIT, Kenmore and Longwood is on the map with live buses and arrival times, and Plan Trip will put you on it.
+
 CLASSES
 Add screenshots of your course enrollment page and sHUttl reads your classes from them. For each class in the coming week it works out which shuttle gets you there on time. Switch on Remind me and you get a notification when it is time to leave for the stop.
 
 LIVE MAP
-Every tracked shuttle on a fast, clean map, in dark or light. Filter the map to the routes you care about.
+Every tracked shuttle on a fast, clean map, in dark or light, with your own position and a button to jump to it. Filter the map to the routes you care about. Stop closures, schedule changes and holiday service show up as notices on the map.
 
 GOOD TO KNOW
 - Free. No account, no sign-in, no ads.
@@ -93,9 +99,9 @@ GOOD TO KNOW
 - Arrival times are estimates. Shuttles do not run at all hours, and when none are running the app says so.
 - Also available in any browser at https://shuttl.live
 
-sHUttl is an independent student project. It is not affiliated with, endorsed by or operated by Harvard University. Shuttle positions come from the university's public shuttle tracker.
+sHUttl is an independent student project. It is not affiliated with, endorsed by or operated by Harvard University or the Longwood Collective. Shuttle positions come from the operators' public shuttle trackers.
 ```
-[1,523]
+[1,942]
 
 ### Keywords (limit 100, comma separated, no spaces)
 
@@ -258,7 +264,7 @@ one:
    attachment field, and also put it somewhere it can be downloaded from a
    phone (an unlisted link).
 2. **YOU: a screen recording made on your iPhone** (checklist step 46)
-   showing: launch, the location prompt, Next Bus Out with real departures, a
+   showing: launch, the location prompt, Next Bus with real departures, a
    planned trip, the share sheet, importing the schedule, switching on
    Remind me with the notification prompt, and a reminder notification
    arriving and being tapped. Reminders fire about ten minutes before the
@@ -271,28 +277,29 @@ one:
 Replace the two bracketed links, then paste.
 
 ```
-sHUttl is a live map and trip planner for the Harvard University campus shuttle network in Cambridge and Boston, Massachusetts. It is an independent student project and is not affiliated with or endorsed by Harvard University; the name of the university is used only to say which shuttle network the app covers.
+sHUttl is a live map and trip planner for the Harvard University campus shuttle network in Cambridge and Boston, Massachusetts, plus the M2 shuttle to Longwood. It is an independent student project and is not affiliated with or endorsed by Harvard University; the name of the university is used only to say which shuttle network the app covers.
 
 NO LOGIN. There is no account, no sign-in and no purchase. All features are available immediately.
 
 HOW THE APP IS BUILT. The interface is bundled inside the app (Capacitor); it is not a website loaded at launch. Only live data (vehicle positions, arrival times, trip plans) is fetched from our API. Native features: location (While Using), push notifications through APNs, the system share sheet, haptics, and status bar and safe-area handling.
 
-WHAT YOU WILL SEE, AND WHEN. Shuttles run mostly on weekdays from about 7:00 am to after midnight US Eastern Time, with less service on weekends and during university recesses. If you open the app when none are running, the map shows the stops without moving vehicles, Next Bus Out says "No buses running nearby. Shuttles may be out of service right now.", and Plan Trip may have no trip to offer. This is the app working as intended, not an error. A weekday between 9:00 am and 9:00 pm Eastern shows it at its best.
+WHAT YOU WILL SEE, AND WHEN. Shuttles run mostly on weekdays from about 7:00 am to after midnight US Eastern Time, with less service on weekends and during university recesses. If you open the app when none are running, the map shows the stops without moving vehicles, Next Bus says "No buses running nearby. Shuttles may be out of service right now.", and Plan Trip may have no trip to offer. This is the app working as intended, not an error. A weekday between 9:00 am and 9:00 pm Eastern shows it at its best.
 
-IF YOU ARE NOT ON CAMPUS. Next Bus Out uses your location. Away from Cambridge it says "You are N km from the nearest stop ... Next Bus Out works on campus. Use Plan Trip to route from here." To see it as a rider would, tap the pin button at the top right of the Next Bus Out panel and choose any stop. In the Simulator, a custom location of 42.3744, -71.1169 (Harvard Yard) also works.
+IF YOU ARE NOT ON CAMPUS. Next Bus uses your location. Away from Cambridge it says "You are N km from the nearest stop ... Next Bus works on campus. Use Plan Trip to route from here." To see it as a rider would, tap the pin button at the top right of the Next Bus panel and choose any stop. In the Simulator, a custom location of 42.3744, -71.1169 (Harvard Yard) also works.
 
 HOW TO TRY EACH FEATURE
 1. Location: on first launch the app asks for location While Using the App. If you decline, it tells you where to turn it on and offers "Pick a stop"; everything works without location.
 2. Trip planning: tap Plan Trip. In From type "Quad" and choose the stop; in To type "SEC" and choose the stop; tap the Plan Trip button. The route is drawn on the map with step-by-step directions.
 3. Share sheet: with a trip planned, tap Share. The iOS share sheet opens with a link to the same trip.
-4. Classes and schedule import: tap Classes, then Upload Screenshots. The app first asks permission to send the screenshots to OpenAI, a third-party AI service, which reads them into a class list; tap Allow. Then choose the sample screenshot attached to this submission (also at [SAMPLE SCREENSHOT LINK]). The app lists the classes it read and plans a shuttle for each upcoming one. Nothing is uploaded before Allow is tapped, and the question links to the privacy policy.
-5. Push notifications: after a schedule is imported, a "Remind me" switch appears in Classes. Turning it on shows the iOS notification permission prompt. A reminder is then sent about 10 minutes before the rider needs to be at the stop for each class, so it cannot be triggered on demand. This recording shows one arriving and being opened: [DEMO VIDEO LINK]
+4. Routes: tap Routes and choose any route marked as running. The map shows only that route and its buses, and the list shows each stop with its next arrivals. The locate button (top right of the map) centres the map on you.
+5. Classes and schedule import: tap Classes, then Upload Screenshots. The app first asks permission to send the screenshots to OpenAI, a third-party AI service, which reads them into a class list; tap Allow. Then choose the sample screenshot attached to this submission (also at [SAMPLE SCREENSHOT LINK]). The app lists the classes it read and plans a shuttle for each upcoming one. Nothing is uploaded before Allow is tapped, and the question links to the privacy policy.
+6. Push notifications: after a schedule is imported, a "Remind me" switch appears in Classes. Turning it on shows the iOS notification permission prompt. A reminder is then sent about 10 minutes before the rider needs to be at the stop for each class, so it cannot be triggered on demand. This recording shows one arriving and being opened: [DEMO VIDEO LINK]
 
 PERMISSIONS. Location: to find nearby stops and plan from where the rider is. Camera and Photos: only when the rider chooses a schedule screenshot. Notifications: only for the leave-now reminders the rider switches on.
 
 PRIVACY POLICY: https://shuttl.live/privacy.html (also linked inside the app: on the first-launch screen and at the end of the Classes tab)
 ```
-[3,370 with the placeholders]
+[3,612 with the placeholders]
 
 Before pasting, check three things against the build you are submitting,
 because they were written from the code and not from a running app:
@@ -317,7 +324,7 @@ Between three and five is plenty (the limit is ten). Suggested set, in this
 order, taken while shuttles are running:
 
 1. The live map with several shuttles visible, panel at rest.
-2. Next Bus Out with real departures listed.
+2. Next Bus with real departures listed.
 3. A planned trip: route drawn on the map, itinerary open.
 4. Classes with a week of classes and their shuttle plans.
 5. The light basemap, for contrast with the first.

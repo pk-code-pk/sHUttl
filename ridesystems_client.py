@@ -50,6 +50,8 @@ from typing import Any, Optional
 import requests
 from fastapi import HTTPException
 
+import m2_client
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -846,8 +848,17 @@ def _build_mapdata() -> _MapData:
         },
     )
 
+    all_stops = list(stops_by_tag.values())
+    # The M2 is not in this feed; it is merged in from Passio (m2_client.py).
+    # Its failure leaves the Harvard routes exactly as they were.
+    try:
+        m2_client.extend_mapdata(all_stops, routes, route_shapes, all_route_patterns,
+                                 route_stop_coords, RSStop, RSRoute, RSPattern)
+    except Exception as e:
+        logger.warning("Could not merge the M2 into map data", exc_info=e)
+
     return _MapData(
-        stops=list(stops_by_tag.values()),
+        stops=all_stops,
         routes=routes,
         route_shapes=route_shapes,
         route_patterns=all_route_patterns,
@@ -1011,7 +1022,9 @@ def get_vehicles(system_id: Optional[int] = None) -> list[RSVehicle]:
 
         with ThreadPoolExecutor(max_workers=max(1, _VEHICLE_POOL_SIZE)) as pool:
             futures = {
-                pool.submit(_fetch_route_vehicles, r, md.project_tag): r for r in md.routes
+                pool.submit(_fetch_route_vehicles, r, md.project_tag): r
+                for r in md.routes
+                if r.myid != m2_client.ROUTE_ID
             }
             for fut, route in futures.items():
                 try:
@@ -1035,6 +1048,10 @@ def get_vehicles(system_id: Optional[int] = None) -> list[RSVehicle]:
             )
 
         _apply_headings(vehicles)
+        try:
+            vehicles.extend(m2_client.get_vehicles(RSVehicle))
+        except Exception as e:
+            logger.warning("M2 vehicles unavailable", exc_info=e)
         _vehicles_cache = (vehicles, time.time())
         return vehicles
 
@@ -1216,7 +1233,25 @@ _platform_et_lock = threading.Lock()
 
 
 def get_platform_etas(stop_id: str) -> list[VendorEta]:
-    """Operator arrival predictions for one stop, soonest first.
+    """Operator arrival predictions for one stop, soonest first: Harvard's
+    from Ride Systems, plus the M2's from Passio where the M2 stops there."""
+    etas = list(_harvard_platform_etas(stop_id))
+    if m2_client.serves(str(stop_id)):
+        try:
+            heading = m2_client.heading_at(str(stop_id))
+            etas.extend(
+                VendorEta(route_id=m2_client.ROUTE_ID, route_name=m2_client.ROUTE_NAME,
+                          destination=heading, eta_minutes=m)
+                for m in m2_client.arrivals_at(str(stop_id))
+            )
+        except Exception as e:
+            logger.warning("M2 arrival predictions unavailable", exc_info=e)
+        etas.sort(key=lambda e: e.eta_minutes)
+    return etas
+
+
+def _harvard_platform_etas(stop_id: str) -> list[VendorEta]:
+    """Ride Systems' arrival predictions for one stop, soonest first.
 
     These are not used for routing. main.py's own projection engine still
     produces the ETAs the app shows; this exists so the two can be compared.
@@ -1268,6 +1303,99 @@ def get_platform_etas(stop_id: str) -> list[VendorEta]:
             _platform_et_cache.clear()
 
     return etas
+
+
+# ---------------------------------------------------------------------------
+# Does a given run reach a given stop?
+#
+# A route's buses do not all go everywhere the route goes. The operator labels
+# each run with where it is heading ("QUAD", "MEMH & QUAD", "SEC"), and the
+# soonest Quad Express at Law School may be one heading straight back to the
+# Quad rather than on to the Science Center. Choosing it for a rider going to
+# the Science Center told them to board the wrong bus.
+#
+# The operator's predictions carry no vehicle id, so the test uses the labels:
+# a run that serves a stop is predicted there under the same label, or under a
+# shortened tail of it once it has passed the earlier places named ("QUAD &
+# SEC" becomes "SEC" after the Quad). And a run serves the places its label
+# names, even where the operator lists nothing (a terminus often has no
+# arrivals of its own).
+# ---------------------------------------------------------------------------
+
+# Label words for multi-word places, matched before splitting on "&" so that
+# "MASS & GARDEN" stays one place.
+_DESTINATION_PHRASES = {
+    "MASS & GARDEN": "Mass Ave & Garden St",
+    "LAMONT LIBRARY": "Lamont Library",
+}
+_DESTINATION_WORDS = {
+    "MEMH": "Memorial Hall",
+    "QUAD": "Radcliffe Quad",
+    "SEC": "SEC",
+    "MATHER": "Mather and Dunster House",
+    "HSQN": "Harvard Square (Northbound)",
+    "HSQS": "Harvard Square (Southbound)",
+}
+
+
+def destination_tokens(destination: str) -> list[str]:
+    """A run label as the places it names, in order: "MEMH & QUAD" -> ["MEMH", "QUAD"]."""
+    text = (destination or "").upper().strip()
+    placeholders: dict[str, str] = {}
+    for i, phrase in enumerate(sorted(_DESTINATION_PHRASES, key=len, reverse=True)):
+        if phrase in text:
+            key = f"\x00{i}\x00"
+            placeholders[key] = phrase
+            text = text.replace(phrase, key)
+    tokens = [t.strip() for t in text.split("&") if t.strip()]
+    return [placeholders.get(t, t) for t in tokens]
+
+
+def _destination_stop_names(tokens: list[str]) -> set[str]:
+    names = set()
+    for t in tokens:
+        name = _DESTINATION_PHRASES.get(t) or _DESTINATION_WORDS.get(t)
+        if name:
+            names.add(name)
+    return names
+
+
+def run_serves_stop(route_id: str, destination: str, stop_id: str) -> Optional[bool]:
+    """Whether a run of `route_id` labelled `destination` reaches `stop_id`.
+
+    True or False when the operator's data settles it; None when it cannot
+    (the operator lists nothing for the route at that stop), in which case the
+    caller should keep its previous behaviour rather than guess.
+    """
+    # The M2 is one loop: every bus serves every stop on it.
+    if str(route_id).strip() == m2_client.ROUTE_ID:
+        return m2_client.serves(str(stop_id))
+
+    tokens = destination_tokens(destination)
+    if not tokens:
+        return None
+
+    stop = next((s for s in get_mapdata().stops if s.id == str(stop_id)), None)
+    if stop is not None and stop.name in _destination_stop_names(tokens):
+        return True
+
+    try:
+        at_stop = [e for e in get_platform_etas(str(stop_id)) if e.route_id.strip() == str(route_id).strip()]
+    except Exception:
+        return None
+    if not at_stop:
+        # Nothing listed, which is usual at a terminus. A terminus is a place
+        # some label names, and a run whose label does not name it is not
+        # going there ("MEMH" at SEC). Anywhere else, unknown.
+        named_places = set(_DESTINATION_PHRASES.values()) | set(_DESTINATION_WORDS.values())
+        if stop is not None and stop.name in named_places:
+            return False
+        return None
+    for e in at_stop:
+        listed = destination_tokens(e.destination)
+        if listed and len(listed) <= len(tokens) and tokens[-len(listed):] == listed:
+            return True
+    return False
 
 
 def get_service_alerts() -> list[dict]:

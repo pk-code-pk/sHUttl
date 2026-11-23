@@ -171,10 +171,123 @@ function request(): Promise<Attempt> {
     inFlight = (isNativeApp() ? requestFromApp() : requestFromBrowser()).then((result) => {
         last = result;
         inFlight = null;
+        if (result.coords) {
+            publish(result.coords);
+            startFollowing();
+        }
         return result;
     });
 
     return inFlight;
+}
+
+// ---------------------------------------------------------------------------
+// Following the rider
+//
+// The map's you-are-here dot used to be drawn from whichever single fix Plan
+// Trip had last been handed, so it was missing whenever the rider had only
+// used Next Bus Out, and frozen where it was first placed once they walked
+// off. Now every fix, from any caller, is published to subscribers, and once
+// one fix has succeeded (so permission is already granted and watching cannot
+// raise a prompt) the position is followed while the page is visible.
+//
+// The watch asks for high accuracy where the one-shot request does not: the
+// one-shot picks stops hundreds of metres apart, the dot has to sit on the
+// right side of the street. It stops whenever the page or app is hidden, and
+// when nothing is subscribed, so it costs nothing in the background.
+// ---------------------------------------------------------------------------
+
+type LocationListener = (coords: Coords) => void;
+
+const listeners = new Set<LocationListener>();
+let latest: Coords | null = null;
+let stopWatching: (() => void) | null = null;
+
+function publish(coords: Coords) {
+    latest = coords;
+    listeners.forEach((listener) => listener(coords));
+}
+
+function onFollowedFix(coords: Coords) {
+    // Keep the one-shot cache fresh too, so a panel asking for a fix gets the
+    // position the dot is showing rather than one from minutes ago.
+    last = { coords, at: Date.now() };
+    publish(coords);
+}
+
+function startFollowing() {
+    if (stopWatching || !latest || listeners.size === 0) return;
+    if (typeof document !== "undefined" && document.hidden) return;
+
+    if (!isNativeApp()) {
+        if (!navigator.geolocation) return;
+        const id = navigator.geolocation.watchPosition(
+            (pos) => onFollowedFix({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+            // A watch error is not worth surfacing: the dot simply stays at the
+            // last good fix, and the panels have their own error handling.
+            () => undefined,
+            { enableHighAccuracy: true, maximumAge: 10 * 1000, timeout: 30 * 1000 },
+        );
+        stopWatching = () => navigator.geolocation.clearWatch(id);
+        return;
+    }
+
+    // The plugin hands back the watch id asynchronously. A stop requested
+    // before it arrives is remembered and applied as soon as it does.
+    let cancelled = false;
+    let watchId: string | null = null;
+    let clear: ((id: string) => void) | null = null;
+    stopWatching = () => {
+        cancelled = true;
+        if (watchId && clear) clear(watchId);
+    };
+    void import("@capacitor/geolocation")
+        .then(({ Geolocation }) => {
+            clear = (id) => void Geolocation.clearWatch({ id }).catch(() => undefined);
+            return Geolocation.watchPosition(
+                { enableHighAccuracy: true, maximumAge: 10 * 1000, timeout: 30 * 1000 },
+                (pos) => {
+                    if (pos) onFollowedFix({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+                },
+            );
+        })
+        .then((id) => {
+            watchId = id;
+            if (cancelled && clear) clear(id);
+        })
+        .catch(() => {
+            // Watching failed to start. Allow a later attempt.
+            if (!cancelled) stopWatching = null;
+        });
+}
+
+function stopFollowing() {
+    stopWatching?.();
+    stopWatching = null;
+}
+
+if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", () => {
+        if (document.hidden) stopFollowing();
+        else startFollowing();
+    });
+}
+
+/**
+ * Be told the rider's position whenever it is known or changes. Never asks for
+ * permission by itself: it starts reporting once some explicit request (a
+ * panel, or the map's locate button) has produced a fix.
+ *
+ * Returns the unsubscribe function.
+ */
+export function subscribeToLocation(listener: LocationListener): () => void {
+    listeners.add(listener);
+    if (latest) listener(latest);
+    startFollowing();
+    return () => {
+        listeners.delete(listener);
+        if (listeners.size === 0) stopFollowing();
+    };
 }
 
 /**

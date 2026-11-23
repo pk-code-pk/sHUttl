@@ -105,13 +105,18 @@ def check_detection():
         # either end can fall outside it. That is the harness stepping, not the
         # detector, so what is asserted is that the detections are an ordered
         # subsequence of the expected passes — nothing out of order, nothing
-        # invented — with at most one missing.
+        # invented — with only passes at the lap's ends missing.
         missing = len(expected) - len(got)
         ordered = _is_ordered_subsequence(got, expected)
+        # Passes the lap cannot reach: within one step of either end. A closed
+        # loop (the M2's shape returns to its first stop) has one at each end.
+        lap_len = index.length
+        at_ends = sum(1 for _sid, arc in stop_arcs if arc < 50.0 or arc > lap_len - 50.0)
+        allowed_missing = max(1, at_ends)
 
         passes = len(expected)
         repeats = passes - len(set(expected))
-        status = "OK" if ordered and 0 <= missing <= 1 else "FAIL"
+        status = "OK" if ordered and 0 <= missing <= allowed_missing else "FAIL"
         print(
             f"  {status:4} {route.myid:5} {len(got):2}/{passes:2} passes"
             f"{f' ({repeats} stops served twice)' if repeats else ''}"
@@ -124,7 +129,7 @@ def check_detection():
                 f"route {route.myid} detections do not follow travel order: "
                 f"got {got[:6]}... expected {expected[:6]}..."
             )
-        elif missing > 1:
+        elif missing > allowed_missing:
             failures.append(f"route {route.myid} missed {missing} stop passes")
         elif missing < 0:
             failures.append(f"route {route.myid} fired {-missing} extra arrivals")
