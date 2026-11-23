@@ -40,6 +40,8 @@ import math
 import os
 import threading
 import time
+
+from campus_time import campus_from_timestamp
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Optional
@@ -101,8 +103,10 @@ SEGMENT_HISTORY = 24
 # has nothing to do with a Sunday at 9am. 168 buckets is coarse enough to fill
 # in a couple of weeks of service.
 def _time_bucket(ts: float) -> int:
-    lt = time.localtime(ts)
-    return lt.tm_wday * 24 + lt.tm_hour
+    # Boston wall-clock hour, not the server's: the morning peak is 8am in
+    # Cambridge whatever zone the host runs in, and DST moves it with the clock.
+    lt = campus_from_timestamp(ts)
+    return lt.weekday() * 24 + lt.hour
 
 
 # A segment estimate below this many observations is not trusted on its own.

@@ -1270,6 +1270,95 @@ def get_platform_etas(stop_id: str) -> list[VendorEta]:
     return etas
 
 
+# ---------------------------------------------------------------------------
+# Does a given run reach a given stop?
+#
+# A route's buses do not all go everywhere the route goes. The operator labels
+# each run with where it is heading ("QUAD", "MEMH & QUAD", "SEC"), and the
+# soonest Quad Express at Law School may be one heading straight back to the
+# Quad rather than on to the Science Center. Choosing it for a rider going to
+# the Science Center told them to board the wrong bus.
+#
+# The operator's predictions carry no vehicle id, so the test uses the labels:
+# a run that serves a stop is predicted there under the same label, or under a
+# shortened tail of it once it has passed the earlier places named ("QUAD &
+# SEC" becomes "SEC" after the Quad). And a run serves the places its label
+# names, even where the operator lists nothing (a terminus often has no
+# arrivals of its own).
+# ---------------------------------------------------------------------------
+
+# Label words for multi-word places, matched before splitting on "&" so that
+# "MASS & GARDEN" stays one place.
+_DESTINATION_PHRASES = {
+    "MASS & GARDEN": "Mass Ave & Garden St",
+    "LAMONT LIBRARY": "Lamont Library",
+}
+_DESTINATION_WORDS = {
+    "MEMH": "Memorial Hall",
+    "QUAD": "Radcliffe Quad",
+    "SEC": "SEC",
+    "MATHER": "Mather and Dunster House",
+    "HSQN": "Harvard Square (Northbound)",
+    "HSQS": "Harvard Square (Southbound)",
+}
+
+
+def destination_tokens(destination: str) -> list[str]:
+    """A run label as the places it names, in order: "MEMH & QUAD" -> ["MEMH", "QUAD"]."""
+    text = (destination or "").upper().strip()
+    placeholders: dict[str, str] = {}
+    for i, phrase in enumerate(sorted(_DESTINATION_PHRASES, key=len, reverse=True)):
+        if phrase in text:
+            key = f"\x00{i}\x00"
+            placeholders[key] = phrase
+            text = text.replace(phrase, key)
+    tokens = [t.strip() for t in text.split("&") if t.strip()]
+    return [placeholders.get(t, t) for t in tokens]
+
+
+def _destination_stop_names(tokens: list[str]) -> set[str]:
+    names = set()
+    for t in tokens:
+        name = _DESTINATION_PHRASES.get(t) or _DESTINATION_WORDS.get(t)
+        if name:
+            names.add(name)
+    return names
+
+
+def run_serves_stop(route_id: str, destination: str, stop_id: str) -> Optional[bool]:
+    """Whether a run of `route_id` labelled `destination` reaches `stop_id`.
+
+    True or False when the operator's data settles it; None when it cannot
+    (the operator lists nothing for the route at that stop), in which case the
+    caller should keep its previous behaviour rather than guess.
+    """
+    tokens = destination_tokens(destination)
+    if not tokens:
+        return None
+
+    stop = next((s for s in get_mapdata().stops if s.id == str(stop_id)), None)
+    if stop is not None and stop.name in _destination_stop_names(tokens):
+        return True
+
+    try:
+        at_stop = [e for e in get_platform_etas(str(stop_id)) if e.route_id.strip() == str(route_id).strip()]
+    except Exception:
+        return None
+    if not at_stop:
+        # Nothing listed, which is usual at a terminus. A terminus is a place
+        # some label names, and a run whose label does not name it is not
+        # going there ("MEMH" at SEC). Anywhere else, unknown.
+        named_places = set(_DESTINATION_PHRASES.values()) | set(_DESTINATION_WORDS.values())
+        if stop is not None and stop.name in named_places:
+            return False
+        return None
+    for e in at_stop:
+        listed = destination_tokens(e.destination)
+        if listed and len(listed) <= len(tokens) and tokens[-len(listed):] == listed:
+            return True
+    return False
+
+
 def get_service_alerts() -> list[dict]:
     """Operator service alerts. Empty list when service is running normally."""
     payload = _get_json("api/transit/ServiceAlert")

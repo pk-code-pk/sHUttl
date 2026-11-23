@@ -11,3 +11,4 @@ openai
 python-multipart
 httpx[http2]
 cryptography
+tzdata

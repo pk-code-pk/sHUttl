@@ -42,6 +42,8 @@ import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+
+from campus_time import CAMPUS_TZ, campus_aware, campus_now_aware
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -99,8 +101,8 @@ _APNS_TOKEN_RE = re.compile(r"(?:[0-9a-fA-F]{2}){32,100}")
 def parse_iso(value: Any) -> Optional[datetime]:
     """ISO string -> aware datetime, or None if unparseable.
 
-    Browsers send `Z`-suffixed UTC; the planner in main.py works in naive local
-    time. Treat naive as local so both compare correctly.
+    Browsers send `Z`-suffixed UTC; the planner in main.py works in naive
+    Boston time (campus_time). Treat naive as Boston so both compare correctly.
     """
     if isinstance(value, datetime):
         dt = value
@@ -111,13 +113,11 @@ def parse_iso(value: Any) -> Optional[datetime]:
             return None
     else:
         return None
-    if dt.tzinfo is None:
-        dt = dt.astimezone()
-    return dt
+    return campus_aware(dt)
 
 
 def now_aware() -> datetime:
-    return datetime.now().astimezone()
+    return campus_now_aware()
 
 
 def _clock(dt: datetime, tz) -> str:
@@ -804,7 +804,9 @@ def run_tick(
                 store.mark_sent(client_id, r["id"], now)
                 continue
 
-            payload = build_notification(r, recommended, arrive_by.tzinfo)
+            # Clock times in the text are Boston times. arrive_by arrives from
+            # the browser in UTC, so its own zone is the wrong one to show.
+            payload = build_notification(r, recommended, CAMPUS_TZ)
             try:
                 learned = send(subscription, payload)
             except SubscriptionGone:
