@@ -233,7 +233,7 @@ async function enableNativePush(): Promise<void> {
         throw new SubscribeError('error', 'Could not ask for notification permission.');
     }
     if (!granted) {
-        throw new SubscribeError('denied', 'Notifications are turned off for sHUttl.');
+        throw new SubscribeError('denied', 'Notifications are turned off for Crimson Shuttl.');
     }
     await sendNativeToken();
 }

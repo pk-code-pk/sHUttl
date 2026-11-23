@@ -321,7 +321,7 @@ function describeAppFailure(failure: GeolocationFailure): string {
             return "This version of the app cannot share your location. Pick a stop below.";
         case "denied":
             return (
-                "Location is off for sHUttl. Turn it on in Settings > sHUttl > " +
+                "Location is off for Crimson Shuttl. Turn it on in Settings > Crimson Shuttl > " +
                 "Location, or pick a stop below."
             );
         case "timeout":

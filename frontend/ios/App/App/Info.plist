@@ -7,7 +7,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>sHUttl</string>
+	<string>Crimson Shuttl</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -22,8 +22,18 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Crimson Shuttl uses the camera only when you choose to take a photo of your class schedule, so it can read your classes into the Classes tab.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Crimson Shuttl uses your location to find nearby shuttle stops and plan trips from where you are. It is not used to track you or build a location history.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Crimson Shuttl uses your location to find nearby shuttle stops and plan trips from where you are. It is not used to track you or build a location history.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Crimson Shuttl reads only the schedule screenshots you pick, so it can read your classes into the Classes tab.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -59,15 +69,5 @@
 	</array>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<true/>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>sHUttl uses your location to find nearby shuttle stops and plan trips from where you are. It is not used to track you or build a location history.</string>
-	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>sHUttl uses your location to find nearby shuttle stops and plan trips from where you are. It is not used to track you or build a location history.</string>
-	<key>NSCameraUsageDescription</key>
-	<string>sHUttl uses the camera only when you choose to take a photo of your class schedule, so it can read your classes into the Classes tab.</string>
-	<key>NSPhotoLibraryUsageDescription</key>
-	<string>sHUttl reads only the schedule screenshots you pick, so it can read your classes into the Classes tab.</string>
-	<key>ITSAppUsesNonExemptEncryption</key>
-	<false/>
 </dict>
 </plist>
