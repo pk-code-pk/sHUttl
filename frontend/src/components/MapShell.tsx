@@ -4,7 +4,7 @@ import { MapCard } from './MapCard';
 import { SHEET_RESTING_FRACTION } from './ui/sheetSnaps';
 import type { DepartureRun } from './NextBusPanel';
 import type { LngLatBoundsLike } from 'maplibre-gl';
-import { Moon, Navigation as NavigationIcon, Route as RouteIcon, Settings, Sun, X } from 'lucide-react';
+import { LocateFixed, Maximize2, Moon, Route as RouteIcon, Settings, Sun, X } from 'lucide-react';
 import clsx from 'clsx';
 import { ShuttleMarker } from './ShuttleMarker';
 import { buttonVariants, cn } from './ui/styles';
@@ -12,6 +12,7 @@ import { NEUTRAL_ROUTE_COLOR, bboxOf, relativeLuminance, textOnRouteColor } from
 import type { Stop, Vehicle, RoutePath, TripResponse, TripSegment } from './types';
 import { API_BASE_URL, MAP_MAX_ZOOM, MAP_MIN_ZOOM, MAP_STYLE_DARK, MAP_STYLE_LIGHT } from '@/config';
 import { nativeSafeArea, setStatusBarGround } from '@/lib/nativeShell';
+import { getLocation } from '@/lib/geolocation';
 
 /** The read-only status pill, shared by the mobile top bar and the desktop
  * bottom bar. They had drifted to different grounds, paddings and text sizes
@@ -314,6 +315,56 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
         if (target) map.fitBounds(toLngLatBounds(target), fitOptions());
     };
 
+    // The arrow button used to be "recenter on the network", and it looked
+    // exactly like the you-are-here button every other map app has, so riders
+    // tapped it to find themselves and were thrown out to the whole network.
+    // It now goes to the rider. Tapped again while the map is still sitting on
+    // them, it shows the network (or the selected route), so the overview is
+    // one tap further away rather than gone. Any drag or zoom by hand clears
+    // that, and the next tap goes back to the rider.
+    const centeredOnUser = useRef(false);
+    const [locating, setLocating] = useState(false);
+    const [onUser, setOnUser] = useState(false);
+    const markOnUser = (v: boolean) => { centeredOnUser.current = v; setOnUser(v); };
+
+    const flyToUser = (at: { lat: number; lng: number }) => {
+        const map = mapRef.current;
+        if (!map) return;
+        map.flyTo({
+            center: [at.lng, at.lat],
+            zoom: Math.max(map.getZoom(), 16),
+            padding: fitOptions().padding,
+            duration: 650,
+        });
+        markOnUser(true);
+    };
+
+    // While the map is sitting on the rider, keep it there as they walk.
+    useEffect(() => {
+        const map = mapRef.current;
+        if (!map || !userLocation || !centeredOnUser.current) return;
+        map.easeTo({ center: [userLocation.lng, userLocation.lat], padding: fitOptions().padding, duration: 500 });
+    }, [userLocation]);
+
+    const locateOrOverview = () => {
+        if (centeredOnUser.current) {
+            markOnUser(false);
+            recenter();
+            return;
+        }
+        if (userLocation) {
+            flyToUser(userLocation);
+            return;
+        }
+        // No fix yet: this tap is the explicit request, so it may prompt.
+        setLocating(true);
+        void getLocation(true).then((result) => {
+            setLocating(false);
+            if (result.coords) flyToUser(result.coords);
+            else recenter();
+        });
+    };
+
     // ------------------------------------------------------------- geometry
 
     // Which routes draw: all visible ones when Show Routes is on; otherwise
@@ -442,6 +493,11 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
                     // events, not console errors. Without this a broken
                     // basemap is a silent dark rectangle.
                     onError={(e) => console.error('[map]', e.error?.message ?? e.error ?? e)}
+                    // A drag or pinch by hand means the map is no longer
+                    // sitting on the rider, so the locate button goes back to
+                    // locating. Moves the app makes itself carry no
+                    // originalEvent and leave it alone.
+                    onMoveStart={(e) => { if (e.originalEvent && centeredOnUser.current) markOnUser(false); }}
                     style={{ width: '100%', height: '100%' }}
                     onLoad={(e) => {
                         e.target.touchZoomRotate.disableRotation();
@@ -501,8 +557,13 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
                     })}
 
                     {userLocation && (
-                        <Marker longitude={userLocation.lng} latitude={userLocation.lat} anchor="center" style={{ zIndex: 6 }}>
-                            <div className="user-location-container"><div className="user-location-dot" /></div>
+                        // Above buses (10) but below a selected bus (20): the rider
+                        // standing at a stop should not vanish under the bus there.
+                        <Marker longitude={userLocation.lng} latitude={userLocation.lat} anchor="center" style={{ zIndex: 15, pointerEvents: 'none' }}>
+                            <div className="user-location-container" aria-label="Your location">
+                                <div className="user-location-halo" />
+                                <div className="user-location-dot" />
+                            </div>
                         </Marker>
                     )}
 
@@ -591,12 +652,15 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
                 <div className="pointer-events-none fixed right-4 top-[calc(var(--safe-top)+1rem)] z-[1000] flex items-center gap-1.5 md:absolute md:bottom-6 md:right-6 md:top-auto md:gap-2">
                     <button
                         type="button"
-                        onClick={recenter}
-                        title="Recenter"
-                        aria-label="Recenter map"
-                        className={cn(buttonVariants({ variant: 'overlay', size: 'icon' }), 'pointer-events-auto text-white')}
+                        onClick={locateOrOverview}
+                        title={onUser ? 'Show all routes' : 'Show my location'}
+                        aria-label={onUser ? 'Show all routes' : 'Show my location'}
+                        aria-busy={locating}
+                        className={cn(buttonVariants({ variant: onUser ? 'selected' : 'overlay', size: 'icon' }), 'pointer-events-auto text-white')}
                     >
-                        <NavigationIcon size={14} className="fill-current -translate-x-[1px] translate-y-[1px]" />
+                        {locating
+                            ? <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/25 border-t-white" />
+                            : onUser ? <Maximize2 size={14} /> : <LocateFixed size={15} />}
                     </button>
                     <button
                         type="button"

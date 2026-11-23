@@ -144,40 +144,62 @@
   transform: translate(-50%, -50%) scale(1.3);
 }
 
-/* User location marker (blue pulsing dot) */
+/* User location marker.
+
+   It used to be a 12px dot with a glow, which was easy to lose among stop
+   dots and bus arrows. Now: a larger dot with a thick white ring (the ring is
+   what makes it findable on both basemaps, as in every map app) and a dark
+   hairline outside the ring for the light map, plus an expanding halo that
+   draws the eye to it.
+
+   Crimson, not the conventional blue: the basemap's roads and water are
+   blue, and a blue you-are-here dot disappeared into them. */
 .user-location-container {
-  width: 24px;
-  height: 24px;
-  cursor: pointer;
+  position: relative;
+  width: 56px;
+  height: 56px;
+  pointer-events: none;
+}
+
+.user-location-halo {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: rgba(212, 115, 127, 0.28);
+  border: 1px solid rgba(212, 115, 127, 0.55);
+  animation: here-halo 2.2s ease-out infinite;
 }
 
 .user-location-dot {
   position: absolute;
   top: 50%;
   left: 50%;
-  width: 12px;
-  height: 12px;
+  width: 18px;
+  height: 18px;
   transform: translate(-50%, -50%);
   border-radius: 9999px;
-  /* Crimson, not the conventional blue: the basemap's roads and water are
-     blue, and a blue you-are-here dot disappeared into them. */
   background: var(--color-crimson-light);
-  border: 2px solid #ffffff;
-  box-shadow: 0 0 10px rgba(212, 115, 127, 0.8), 0 0 24px rgba(212, 115, 127, 0.4);
-  animation: pulse-here 2s ease-in-out infinite;
+  border: 3px solid #ffffff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 2px 8px rgba(0, 0, 0, 0.55);
 }
 
-@keyframes pulse-here {
-
-  0%,
-  100% {
-    box-shadow: 0 0 10px rgba(212, 115, 127, 0.8), 0 0 24px rgba(212, 115, 127, 0.4);
-    transform: translate(-50%, -50%) scale(1);
+@keyframes here-halo {
+  0% {
+    transform: scale(0.3);
+    opacity: 0.95;
   }
 
-  50% {
-    box-shadow: 0 0 16px rgba(212, 115, 127, 1), 0 0 36px rgba(212, 115, 127, 0.6);
-    transform: translate(-50%, -50%) scale(1.1);
+  100% {
+    transform: scale(1);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .user-location-halo {
+    animation: none;
+    transform: scale(0.6);
+    opacity: 0.6;
   }
 }
 

@@ -1,4 +1,5 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { subscribeToLocation } from "@/lib/geolocation";
 import { TripPlannerPanel } from "./TripPlannerPanel";
 import { MapShell } from "./MapShell";
 import type { TripResponse } from "./types";
@@ -16,7 +17,11 @@ interface LayoutProps {
 }
 
 export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
+    // Fed by every fix any panel obtains, and followed from then on (see
+    // lib/geolocation). It used to be set only by Plan Trip's "use current
+    // location", so a rider who stayed on Next Bus Out never saw themselves.
     const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
+    useEffect(() => subscribeToLocation(setUserLocation), []);
     // Route Next Bus Out has expanded, for the map to draw and frame. Lifted
     // here because the panel and the map are siblings.
     // Along with the id, a count of how many times focus has been set. Two
@@ -76,7 +81,6 @@ export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
                         system={system}
                         trip={trip}
                         onTripChange={onTripChange}
-                        onUserLocationChange={setUserLocation}
                         onFocusRouteChange={setFocusRouteId}
                     />
                 </div>
