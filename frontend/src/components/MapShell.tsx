@@ -346,13 +346,16 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
     };
 
     // A stop tapped in the Routes tab.
+    // focusPoint is a new object on every tap (its nonce changes), so a re-tap
+    // on the same stop flies again.
     useEffect(() => {
         const map = mapRef.current;
         if (!map || !mapReady || !focusPoint) return;
-        markOnUser(false);
+        centeredOnUser.current = false;
+        // The locate button stops showing "on you" once the map moves away.
+        map.once('movestart', () => setOnUser(false));
         map.flyTo({ center: [focusPoint.lng, focusPoint.lat], zoom: Math.max(map.getZoom(), 16), padding: fitOptions().padding, duration: 650 });
-        // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the nonce: a re-tap flies again
-    }, [focusPoint?.nonce, mapReady]);
+    }, [focusPoint, mapReady]);
 
     // While the map is sitting on the rider, keep it there as they walk.
     useEffect(() => {
