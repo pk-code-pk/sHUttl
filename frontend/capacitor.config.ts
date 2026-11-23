@@ -5,7 +5,9 @@ import type { CapacitorConfig } from '@capacitor/cli';
 // API responses, so the UI appears before the network does.
 const config: CapacitorConfig = {
     appId: 'live.shuttl.app',
-    appName: 'sHUttl',
+    // The home-screen name. It has to match the App Store name closely enough
+    // for App Review (guideline 2.3.8); the in-app logo is still sHUttl.
+    appName: 'Crimson Shuttl',
     webDir: 'dist',
     backgroundColor: '#0a0a0a',
     ios: {

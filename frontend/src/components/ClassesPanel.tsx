@@ -718,7 +718,7 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
                 // An app has no "site" and no browser settings; the switch
                 // that undoes a refusal lives in the iOS Settings app.
                 setRemindError(isNativeApp()
-                    ? 'Notifications are off for sHUttl. Turn them on in Settings > Notifications > sHUttl.'
+                    ? 'Notifications are off for Crimson Shuttl. Turn them on in Settings > Notifications > Crimson Shuttl.'
                     : 'Notifications blocked for this site. Allow them in browser settings.');
             } else {
                 setRemindError(e instanceof Error ? e.message : 'Could not change reminders.');
