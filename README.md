@@ -48,6 +48,26 @@ window — so there is no static timetable for Harvard shuttles in any machine
 readable form. Harvard publishes schedules as PDF only. sHUttl is therefore
 live-data-only; the "scheduled" fallback tier it used to have has no source.
 
+### The M2
+
+The M2 (Harvard Square, Central, MIT, Kenmore, Longwood) is run by the
+Longwood Collective, not Harvard, and since January 2026 is tracked by Passio,
+so it is not in the Ride Systems feed. [`m2_client.py`](m2_client.py) reads
+Passio's public, keyless feeds for it (system 6986, GTFS route 8526) and
+merges it into the Harvard system as one more route, so the map, Next Bus,
+Routes and Plan Trip all include it:
+
+| Feed | Provides |
+| :--- | :--- |
+| `passio3.com/longwoodcollective/passioTransit/gtfs/google_transit.zip` | The loop's stops, order and street shape |
+| `.../gtfs/realtime/vehiclePositions.json` | Live M2 buses |
+| `.../gtfs/realtime/tripUpdates.json` | Arrival predictions per stop |
+| `.../gtfs/realtime/serviceAlerts.json` | Notices (only those about the M2 are kept) |
+
+M2 stops that coincide with Harvard stops (Quincy Square, Widener Gate, Sever
+Gate, Lamont Library) are merged into them. The M2 fails soft: with Passio
+unreachable, or `M2_ENABLED=false`, the Harvard routes are unaffected.
+
 ## Architecture
 
 ### Backend

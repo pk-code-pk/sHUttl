@@ -363,7 +363,7 @@ build a fresh clone until step 24 has run.**
     | :--- | :--- | :--- |
     | a | Delete the app if installed, run it fresh, and watch the launch. | A dark launch screen with the logo, then the animated logo, then the map. No white flash. The clock and battery at the top are readable throughout. |
     | b | Wait for the location prompt and allow it while using the app. | The iOS location prompt appears during or just after the logo animation, showing the sentence from `Info.plist` about finding nearby stops. |
-    | c | Look at Next Bus Out. | "Nearest:" and a stop name, and departures listed. Off campus: "You are N km from the nearest stop" and a pointer to Plan Trip. |
+    | c | Look at Next Bus. | "Nearest:" and a stop name, and departures listed. Off campus: "You are N km from the nearest stop" and a pointer to Plan Trip. |
     | d | Look at the edges of the screen. | The status pill at top left and the buttons at top right sit below the notch or Dynamic Island. The bottom sheet clears the home indicator. |
     | e | Drag the bottom sheet up and down; pinch and pan the map; press and hold a button. | The sheet snaps with a light tap of haptic feedback. The map zooms and pans normally. Holding a button does not select text or show a copy menu. |
     | f | Tap the map style button to switch to the light map and back. | The clock and battery stay readable on both. |
