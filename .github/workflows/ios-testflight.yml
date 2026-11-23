@@ -86,8 +86,16 @@ jobs:
           raw = os.environ["ASC_PRIVATE_KEY"].replace("\\n", "\n").replace("\\r", "")
           body = re.sub(r"-----(BEGIN|END)[A-Z ]*-----", "", raw)
           body = re.sub(r"[^A-Za-z0-9+/=]", "", body)
+          # The shape of what arrived, never its content: enough to tell a
+          # truncated paste from a mangled one.
+          lines = raw.splitlines()
+          print(f"ASC_PRIVATE_KEY: {len(raw)} characters, {len(lines)} lines, "
+                f"line lengths {[len(l) for l in lines][:12]}, "
+                f"{len(body)} base64 characters (a .p8 key has about 200)")
           if len(body) < 100:
-              sys.exit("ASC_PRIVATE_KEY does not look like a .p8 key: too short after cleaning")
+              sys.exit("ASC_PRIVATE_KEY is missing most of the key. Paste the whole "
+                       "AuthKey file into the secret again: the BEGIN line, all four "
+                       "lines of characters, and the END line.")
           pem = "-----BEGIN PRIVATE KEY-----\n" + "\n".join(textwrap.wrap(body, 64)) + "\n-----END PRIVATE KEY-----\n"
           open(sys.argv[1], "w").write(pem)
           PY
