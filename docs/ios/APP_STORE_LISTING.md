@@ -274,16 +274,18 @@ one:
 
 ### Notes (limit 4000)
 
-Replace the two bracketed links, then paste.
+Paste as is. The sample schedule screenshot is attached to the submission as a review attachment.
 
 ```
 sHUttl is a live map and trip planner for the Harvard University campus shuttle network in Cambridge and Boston, Massachusetts, plus the M2 shuttle to Longwood. It is an independent student project and is not affiliated with or endorsed by Harvard University; the name of the university is used only to say which shuttle network the app covers.
+
+NAME. The App Store and home-screen name is Crimson Shuttl. The logo inside the app reads sHUttl, the project's name; it is the same app as https://shuttl.live.
 
 NO LOGIN. There is no account, no sign-in and no purchase. All features are available immediately.
 
 HOW THE APP IS BUILT. The interface is bundled inside the app (Capacitor); it is not a website loaded at launch. Only live data (vehicle positions, arrival times, trip plans) is fetched from our API. Native features: location (While Using), push notifications through APNs, the system share sheet, haptics, and status bar and safe-area handling.
 
-WHAT YOU WILL SEE, AND WHEN. Shuttles run mostly on weekdays from about 7:00 am to after midnight US Eastern Time, with less service on weekends and during university recesses. If you open the app when none are running, the map shows the stops without moving vehicles, Next Bus says "No buses running nearby. Shuttles may be out of service right now.", and Plan Trip may have no trip to offer. This is the app working as intended, not an error. A weekday between 9:00 am and 9:00 pm Eastern shows it at its best.
+WHAT YOU WILL SEE, AND WHEN. Shuttles run mostly on weekdays from about 7:00 am to after midnight US Eastern Time, with less service on weekends and during university recesses. If you open the app when none are running, the map shows the stops without moving vehicles, Next Bus says "No buses running nearby. Shuttles may be out of service right now.", and Plan Trip may have no trip to offer. This is the app working as intended, not an error. A weekday between 9:00 am and 9:00 pm Eastern shows it at its best. Thanksgiving week: there are no regular shuttles on Thursday November 26 (one special All Cambridge shuttle runs 11 am to 7 pm) or Friday November 27; the app shows this as a notice on the map (the pill under the bus count).
 
 IF YOU ARE NOT ON CAMPUS. Next Bus uses your location. Away from Cambridge it says "You are N km from the nearest stop ... Next Bus works on campus. Use Plan Trip to route from here." To see it as a rider would, tap the pin button at the top right of the Next Bus panel and choose any stop. In the Simulator, a custom location of 42.3744, -71.1169 (Harvard Yard) also works.
 
@@ -292,14 +294,14 @@ HOW TO TRY EACH FEATURE
 2. Trip planning: tap Plan Trip. In From type "Quad" and choose the stop; in To type "SEC" and choose the stop; tap the Plan Trip button. The route is drawn on the map with step-by-step directions.
 3. Share sheet: with a trip planned, tap Share. The iOS share sheet opens with a link to the same trip.
 4. Routes: tap Routes and choose any route marked as running. The map shows only that route and its buses, and the list shows each stop with its next arrivals. The locate button (top right of the map) centres the map on you.
-5. Classes and schedule import: tap Classes, then Upload Screenshots. The app first asks permission to send the screenshots to OpenAI, a third-party AI service, which reads them into a class list; tap Allow. Then choose the sample screenshot attached to this submission (also at [SAMPLE SCREENSHOT LINK]). The app lists the classes it read and plans a shuttle for each upcoming one. Nothing is uploaded before Allow is tapped, and the question links to the privacy policy.
-6. Push notifications: after a schedule is imported, a "Remind me" switch appears in Classes. Turning it on shows the iOS notification permission prompt. A reminder is then sent about 10 minutes before the rider needs to be at the stop for each class, so it cannot be triggered on demand. This recording shows one arriving and being opened: [DEMO VIDEO LINK]
+5. Classes and schedule import: tap Classes, then Upload Screenshots. The app first asks permission to send the screenshots to OpenAI, a third-party AI service, which reads them into a class list; tap Allow. Then choose the sample schedule screenshot attached to this submission (made-up courses in real campus buildings). The app lists the classes it read and plans a shuttle for each upcoming one. Nothing is uploaded before Allow is tapped, and the question links to the privacy policy.
+6. Push notifications: after a schedule is imported, a "Remind me" switch appears in Classes. Turning it on shows the iOS notification permission prompt. A reminder is then sent about 10 minutes before the rider needs to be at the stop for each class, so it cannot be triggered on demand.
 
 PERMISSIONS. Location: to find nearby stops and plan from where the rider is. Camera and Photos: only when the rider chooses a schedule screenshot. Notifications: only for the leave-now reminders the rider switches on.
 
 PRIVACY POLICY: https://shuttl.live/privacy.html (also linked inside the app: on the first-launch screen and at the end of the Classes tab)
 ```
-[3,612 with the placeholders]
+[3,946]
 
 Before pasting, check three things against the build you are submitting,
 because they were written from the code and not from a running app:
