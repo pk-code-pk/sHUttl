@@ -28,6 +28,8 @@ export interface RoutePath {
     short_name: string | null;
     color: string | null;
     path: RoutePoint[];
+    /** Runs well beyond campus (the M2): left out of the map's overview. */
+    regional?: boolean;
 }
 
 export interface NextBusInfo {

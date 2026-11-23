@@ -34,6 +34,7 @@ from ridesystems_client import (
 # PassioGO on 2026-07-01, so there is no second feed to reconcile against and no
 # GTFS export with live service in it. See ridesystems_client.py.
 from ridesystems_client import distance_along_route_m, get_route_stop_ids
+import m2_client
 import arrivals as arrivals_module
 import reminders as reminders_module
 from pydantic import BaseModel, Field
@@ -732,6 +733,9 @@ def vehicledict(vehicle, route_color=None):
         "lng": lng,
         "heading": getattr(vehicle, "heading", None),
         "color": route_color,
+        # On a route that runs well beyond campus (the M2): the map leaves it
+        # out of its overview framing.
+        "regional": getattr(vehicle, "routeId", None) == m2_client.ROUTE_ID,
     }
 
 
@@ -802,6 +806,9 @@ def list_stops(system_id: int = DEFAULT_SYSTEM_ID):
                 serving[str(pid)].append(r.id)
         for row in data:
             row["routes"] = sorted(serving.get(str(row.get("id")), []))
+            # Served only by a route that runs well beyond campus (the M2's
+            # Longwood and Kenmore stops). The map's overview leaves these out.
+            row["regional"] = bool(row["routes"]) and all(r == m2_client.ROUTE_ID for r in row["routes"])
     except Exception as e:
         # A stop list without route badges is still a usable stop list.
         logger.warning("Could not attach routes to stops", exc_info=e)
@@ -916,6 +923,9 @@ def route_paths_for_system(system_id: int = DEFAULT_SYSTEM_ID) -> list[dict[str,
             "short_name": getattr(route_obj, "shortName", None),
             "color": color,
             "path": path,
+            # Runs well beyond campus (the M2 to Longwood). The map leaves it
+            # out of its overview framing so campus is not shrunk to fit it.
+            "regional": rid == m2_client.ROUTE_ID,
         })
 
     # Upgrade the stop-to-stop path to the operator's real street geometry.

@@ -50,6 +50,8 @@ from typing import Any, Optional
 import requests
 from fastapi import HTTPException
 
+import m2_client
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -846,8 +848,17 @@ def _build_mapdata() -> _MapData:
         },
     )
 
+    all_stops = list(stops_by_tag.values())
+    # The M2 is not in this feed; it is merged in from Passio (m2_client.py).
+    # Its failure leaves the Harvard routes exactly as they were.
+    try:
+        m2_client.extend_mapdata(all_stops, routes, route_shapes, all_route_patterns,
+                                 route_stop_coords, RSStop, RSRoute, RSPattern)
+    except Exception as e:
+        logger.warning("Could not merge the M2 into map data", exc_info=e)
+
     return _MapData(
-        stops=list(stops_by_tag.values()),
+        stops=all_stops,
         routes=routes,
         route_shapes=route_shapes,
         route_patterns=all_route_patterns,
@@ -1011,7 +1022,9 @@ def get_vehicles(system_id: Optional[int] = None) -> list[RSVehicle]:
 
         with ThreadPoolExecutor(max_workers=max(1, _VEHICLE_POOL_SIZE)) as pool:
             futures = {
-                pool.submit(_fetch_route_vehicles, r, md.project_tag): r for r in md.routes
+                pool.submit(_fetch_route_vehicles, r, md.project_tag): r
+                for r in md.routes
+                if r.myid != m2_client.ROUTE_ID
             }
             for fut, route in futures.items():
                 try:
@@ -1035,6 +1048,10 @@ def get_vehicles(system_id: Optional[int] = None) -> list[RSVehicle]:
             )
 
         _apply_headings(vehicles)
+        try:
+            vehicles.extend(m2_client.get_vehicles(RSVehicle))
+        except Exception as e:
+            logger.warning("M2 vehicles unavailable", exc_info=e)
         _vehicles_cache = (vehicles, time.time())
         return vehicles
 
@@ -1216,7 +1233,25 @@ _platform_et_lock = threading.Lock()
 
 
 def get_platform_etas(stop_id: str) -> list[VendorEta]:
-    """Operator arrival predictions for one stop, soonest first.
+    """Operator arrival predictions for one stop, soonest first: Harvard's
+    from Ride Systems, plus the M2's from Passio where the M2 stops there."""
+    etas = list(_harvard_platform_etas(stop_id))
+    if m2_client.serves(str(stop_id)):
+        try:
+            heading = m2_client.heading_at(str(stop_id))
+            etas.extend(
+                VendorEta(route_id=m2_client.ROUTE_ID, route_name=m2_client.ROUTE_NAME,
+                          destination=heading, eta_minutes=m)
+                for m in m2_client.arrivals_at(str(stop_id))
+            )
+        except Exception as e:
+            logger.warning("M2 arrival predictions unavailable", exc_info=e)
+        etas.sort(key=lambda e: e.eta_minutes)
+    return etas
+
+
+def _harvard_platform_etas(stop_id: str) -> list[VendorEta]:
+    """Ride Systems' arrival predictions for one stop, soonest first.
 
     These are not used for routing. main.py's own projection engine still
     produces the ETAs the app shows; this exists so the two can be compared.
@@ -1332,6 +1367,10 @@ def run_serves_stop(route_id: str, destination: str, stop_id: str) -> Optional[b
     (the operator lists nothing for the route at that stop), in which case the
     caller should keep its previous behaviour rather than guess.
     """
+    # The M2 is one loop: every bus serves every stop on it.
+    if str(route_id).strip() == m2_client.ROUTE_ID:
+        return m2_client.serves(str(stop_id))
+
     tokens = destination_tokens(destination)
     if not tokens:
         return None

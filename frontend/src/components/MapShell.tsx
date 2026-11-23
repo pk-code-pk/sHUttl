@@ -245,7 +245,18 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
 
     // ---------------------------------------------------------------- bounds
 
-    const systemBbox = useMemo(() => bboxOf(stops.map((s) => [s.lng, s.lat] as [number, number])), [stops]);
+    // Campus framing: stops and buses only on regional routes (the M2, which
+    // runs to Longwood) are left out, or the launch view would shrink campus
+    // to fit a route most riders only use from Harvard Square. The backend
+    // flags them on /stops and /vehicles, which the map always has.
+    const systemBbox = useMemo(
+        () => bboxOf(
+            stops
+                .filter((s) => !(s as Stop & { regional?: boolean }).regional)
+                .map((s) => [s.lng, s.lat] as [number, number]),
+        ),
+        [stops],
+    );
 
     // The launch/overview view. Stops define the network, but a bus can sit
     // just outside their envelope, so vehicles are folded in to guarantee
@@ -253,7 +264,11 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
     const overviewBbox = useMemo<Bbox | null>(() => {
         if (!systemBbox) return null;
         const pts: [number, number][] = [[systemBbox[0], systemBbox[1]], [systemBbox[2], systemBbox[3]]];
-        for (const v of vehicles) if (typeof v.lat === 'number' && typeof v.lng === 'number') pts.push([v.lng, v.lat]);
+        for (const v of vehicles) {
+            if (typeof v.lat !== 'number' || typeof v.lng !== 'number') continue;
+            if ((v as Vehicle & { regional?: boolean }).regional) continue;
+            pts.push([v.lng, v.lat]);
+        }
         return bboxOf(pts);
     }, [systemBbox, vehicles]);
 
