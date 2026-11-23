@@ -155,6 +155,30 @@
     </div>
   </noscript>
 
+  <!--
+    iOS app only. A no-op in every browser: window.Capacitor is injected by
+    the app's shell before the page loads, and on the website it does not
+    exist yet when this runs.
+
+    The app keeps its launch screen up, and the screen dead to touches, until
+    the page reports that it has rendered (see hideNativeSplash). If the
+    bundle fails to load, or throws before React mounts, that report never
+    comes. This timer is set before any module runs so that it cannot be taken
+    down with them: after six seconds the launch screen goes regardless.
+    Hiding it twice is harmless.
+  -->
+  <script>
+    (function () {
+      var cap = window.Capacitor;
+      if (!cap || typeof cap.isNativePlatform !== 'function' || !cap.isNativePlatform()) return;
+      setTimeout(function () {
+        try {
+          cap.nativePromise('SplashScreen', 'hide', {}).catch(function () {});
+        } catch (e) { /* nothing left to try */ }
+      }, 6000);
+    })();
+  </script>
+
   <script type="module" src="/src/main.tsx"></script>
 </body>
 

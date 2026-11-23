@@ -11,9 +11,18 @@
  * `client_id` is a random id kept in localStorage rather than anything tied to
  * the Google account: the server never sees who the rider is, only that the
  * same browser is speaking again.
+ *
+ * The iOS app is the same code with a different transport. A WKWebView has no
+ * service worker and no PushManager, so there the endpoint is an APNs device
+ * token (see nativePush.ts) and the server's readiness comes from
+ * /push/config rather than from a VAPID key. Everything else — the client id,
+ * the enabled flag, the reminder list — is shared, and every native branch
+ * sits behind isNativeApp() so a browser runs exactly what it always has.
  */
 
 import { API_BASE_URL } from '@/config';
+import { nativePushPermission, nativePushToken, nativePushUnregister } from '@/lib/nativePush';
+import { isNativeApp } from '@/lib/platform';
 
 const CLIENT_ID_KEY = 'shuttl.push.client_id';
 const ENABLED_KEY = 'shuttl.push.enabled';
@@ -90,6 +99,39 @@ export async function fetchPublicKey(): Promise<string | null> {
     }
 }
 
+/** Whether the server can send through APNs. False when it has no Apple
+ * credentials or cannot be reached, which hides the toggle for the same reason
+ * a missing VAPID key does. */
+async function fetchApnsConfigured(): Promise<boolean> {
+    try {
+        const res = await fetch(`${API_BASE_URL}/push/config`);
+        if (!res.ok) return false;
+        const data = (await res.json()) as { apns?: boolean };
+        return data.apns === true;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * How this client can be reached. A browser needs the server's VAPID key to
+ * subscribe; the app needs nothing from the server but the knowledge that it
+ * can send, because iOS mints the token on its own.
+ */
+export type PushChannel = { kind: 'web'; publicKey: string } | { kind: 'apns' };
+
+/** The channel reminders would use here, or null when there is none — which
+ * hides the toggle. One question for the panel to ask, whichever platform it
+ * is running on. */
+export async function fetchPushChannel(): Promise<PushChannel | null> {
+    if (isNativeApp()) {
+        return (await fetchApnsConfigured()) ? { kind: 'apns' } : null;
+    }
+    if (!isPushSupported()) return null;
+    const publicKey = await fetchPublicKey();
+    return publicKey ? { kind: 'web', publicKey } : null;
+}
+
 /** VAPID keys arrive base64url-encoded; PushManager wants raw bytes. */
 export function urlBase64ToUint8Array(base64: string): Uint8Array<ArrayBuffer> {
     const padding = '='.repeat((4 - (base64.length % 4)) % 4);
@@ -118,7 +160,12 @@ export class SubscribeError extends Error {
  * click that got us here, and a service-worker registration in between can be
  * slow enough to lose the gesture on some browsers.
  */
-export async function enablePush(publicKey: string): Promise<void> {
+export async function enablePush(channel: PushChannel): Promise<void> {
+    if (channel.kind === 'apns') {
+        await enableNativePush();
+        return;
+    }
+    const { publicKey } = channel;
     if (!isPushSupported()) {
         throw new SubscribeError('unsupported', 'This browser cannot receive push notifications.');
     }
@@ -146,6 +193,74 @@ export async function enablePush(publicKey: string): Promise<void> {
     if (!res.ok) throw new SubscribeError('error', `Could not register for reminders (${res.status}).`);
 }
 
+/** Get a device token from iOS and hand it to the server. Assumes permission
+ * has already been settled; register() never prompts on its own. */
+async function sendNativeToken(): Promise<void> {
+    let token: string;
+    try {
+        token = await nativePushToken();
+    } catch (e) {
+        // The reason iOS gives is for a developer, not a rider; keep it in
+        // the log and say something that can be acted on.
+        console.warn('APNs registration failed', e);
+        throw new SubscribeError(
+            'error',
+            'Could not set up notifications on this device. Check your connection and try again.',
+        );
+    }
+    const res = await fetch(`${API_BASE_URL}/push/subscribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apns: { token }, client_id: getClientId() }),
+    });
+    if (!res.ok) throw new SubscribeError('error', `Could not register for reminders (${res.status}).`);
+}
+
+/**
+ * The app's enablePush: the system permission dialog, then a device token,
+ * then the server.
+ *
+ * iOS shows its dialog once per install. After a refusal the same call just
+ * reports "denied" without showing anything, and the only way back is the
+ * Settings app — which is what the 'denied' reason tells the panel to say.
+ */
+async function enableNativePush(): Promise<void> {
+    let granted: boolean;
+    try {
+        granted = await nativePushPermission(true);
+    } catch (e) {
+        console.warn('Notification permission request failed', e);
+        throw new SubscribeError('error', 'Could not ask for notification permission.');
+    }
+    if (!granted) {
+        throw new SubscribeError('denied', 'Notifications are turned off for sHUttl.');
+    }
+    await sendNativeToken();
+}
+
+/**
+ * App start: if reminders are on, quietly re-register and re-send the token.
+ *
+ * An APNs token is not permanent — a restore from backup, a reinstall or an
+ * OS update can each change it — and the server may have dropped its record
+ * after Apple rejected the old one. Apple's guidance is to register on every
+ * launch for exactly this reason. Re-sending unconditionally is one small
+ * request per launch and repairs both cases.
+ *
+ * Nothing here may prompt or surface an error: the rider did not ask for
+ * anything. If permission has since been revoked in Settings this does
+ * nothing, and the toggle will explain itself the next time it is pressed.
+ */
+export async function refreshNativePush(): Promise<void> {
+    if (!isNativeApp() || !isReminderEnabled()) return;
+    try {
+        if (!(await nativePushPermission(false))) return;
+        await sendNativeToken();
+    } catch (e) {
+        console.warn('Could not refresh the push token', e);
+    }
+}
+
 /** Drop the server's record first, then the browser's. If the server call
  * fails the browser subscription is kept, so a retry can re-send it rather
  * than leaving the server pushing to an endpoint nobody listens on. */
@@ -156,6 +271,15 @@ export async function disablePush(): Promise<void> {
     );
     if (!res.ok && res.status !== 404) {
         throw new SubscribeError('error', `Could not turn reminders off (${res.status}).`);
+    }
+    if (isNativeApp()) {
+        // The server has already forgotten the token, which is what actually
+        // stops the reminders. Unregistering is tidying up; if it fails the
+        // toggle should still read "off", because it is.
+        await nativePushUnregister().catch((e: unknown) => {
+            console.warn('Could not unregister from APNs', e);
+        });
+        return;
     }
     if (!isPushSupported()) return;
     const reg = await navigator.serviceWorker.getRegistration(SW_PATH);

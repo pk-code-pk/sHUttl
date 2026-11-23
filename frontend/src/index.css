@@ -229,6 +229,67 @@ body {
   padding: 0;
 }
 
+/* Safe-area insets, named once. The page is laid out edge to edge
+   (viewport-fit=cover), so anything pinned to the top has to clear the status
+   bar and the notch itself. In a browser tab these are 0px — the browser's own
+   chrome is already in the way — so the classes built on them resolve to
+   exactly the offsets they replaced; in the iOS app, where the map runs under
+   the status bar, they are what keeps the controls out from under the clock. */
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* ---------------------------------------------------------------------------
+   iOS app only.
+
+   main.tsx puts .native-app on <html> inside the Capacitor shell and nowhere
+   else. Everything here is something a native app does and a web page should
+   not: on the website a rider can select a stop name to copy it, long-press a
+   link to open it in a new tab, and zoom the page if the type is too small.
+   In the app the same gestures hit what looks like native chrome, and a
+   selection handle or a link preview appearing on a button gives the web view
+   away.
+--------------------------------------------------------------------------- */
+html.native-app {
+  /* No selection and no callout on chrome. A long press on a button otherwise
+     selects its label and raises Copy / Look Up. */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  /* The grey flash WebKit paints over a tapped element. The buttons already
+     answer a press by scaling. */
+  -webkit-tap-highlight-color: transparent;
+  /* Panning only: no pinch or double-tap zoom of the page. The map is not
+     affected — MapLibre sets touch-action: none on its own container and
+     reads the touches itself, so its pinch is its own. */
+  touch-action: pan-x pan-y;
+}
+
+/* Fields stay fields: without this the rule above makes them impossible to
+   put a caret in, let alone select from. */
+html.native-app input,
+html.native-app textarea,
+html.native-app [contenteditable] {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* A long press on the logo otherwise lifts a draggable copy of it. */
+html.native-app img {
+  -webkit-user-drag: none;
+}
+
+/* The page itself never scrolls; the sheet and the lists inside it do. The
+   phone layout below already says so, but only under 768px — an iPad gets the
+   desktop layout, and there the document would still rubber-band. */
+html.native-app,
+html.native-app body {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
 /* MOBILE ONLY: Full viewport for edge-to-edge display */
 @media (max-width: 767px) {
 

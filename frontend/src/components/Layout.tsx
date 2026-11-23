@@ -47,7 +47,9 @@ export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
               UI Overlay Container 
               - pointer-events-none allows clicks to pass through to map
               - On mobile: fixed bottom-0 for bottom sheet
-              - On desktop: relative flex layout for side panel
+              - On desktop: relative flex layout for side panel. Its top
+                padding adds --safe-top (index.css): 0px in a browser, the
+                status bar's height on an iPad running the app.
             */}
             <div className="
                 pointer-events-none
@@ -57,6 +59,7 @@ export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
                 /* Desktop: reset positioning */
                 md:static md:inset-auto md:h-full md:w-full
                 flex flex-col md:flex-row md:justify-start md:items-start md:p-6
+                md:pt-[calc(var(--safe-top)+1.5rem)]
             ">
                 {/* 
                   Trip Planner Panel Container 

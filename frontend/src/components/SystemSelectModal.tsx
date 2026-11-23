@@ -1,5 +1,6 @@
 import { motion, AnimatePresence } from "motion/react";
 import { ChevronRight } from "lucide-react";
+import { PrivacyLink } from "./PrivacyLink";
 
 interface System {
     id: number;
@@ -59,6 +60,12 @@ export const SystemSelectModal = ({ onSelect, isOpen }: SystemSelectModalProps) 
                                 <ChevronRight className="text-red-200 group-hover:translate-x-1 transition-transform" />
                             </button>
                         </div>
+
+                        {/* iOS app only (renders nothing in a browser): the
+                            first screen a new install shows is the one place
+                            everybody passes through, so the policy is linked
+                            from here as well as from Classes. */}
+                        <PrivacyLink className="block text-center text-xs" />
 
                     </div>
                 </motion.div>

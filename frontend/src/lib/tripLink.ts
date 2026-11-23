@@ -15,6 +15,8 @@
  * uglier one that always works.
  */
 
+import { isNativeApp, PUBLIC_WEB_ORIGIN } from '@/lib/platform';
+
 export interface TripEndpointRef {
     /** Stop id, when the endpoint is a known stop. */
     stopId?: string;
@@ -139,13 +141,24 @@ export function buildTripQuery(
     return `?${new URLSearchParams({ from, to }).toString()}`;
 }
 
-/** Absolute URL for sharing. */
+/**
+ * Absolute URL for sharing.
+ *
+ * In the iOS app the page is served from `capacitor://localhost`, which means
+ * nothing on anyone else's phone, so a link built there points at the public
+ * site instead. That makes it a different origin from the page: fine to hand
+ * to the share sheet, but `history.replaceState` refuses it — use
+ * buildTripQuery for the address bar.
+ */
 export function buildTripUrl(
     origin: TripEndpointRef,
     destination: TripEndpointRef,
     stops: StopRef[],
 ): string {
     const query = buildTripQuery(origin, destination, stops);
+    if (isNativeApp()) {
+        return query ? `${PUBLIC_WEB_ORIGIN}/${query}` : PUBLIC_WEB_ORIGIN;
+    }
     if (!query) return window.location.origin;
     return `${window.location.origin}${window.location.pathname}${query}`;
 }

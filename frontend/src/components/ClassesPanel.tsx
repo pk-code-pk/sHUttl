@@ -31,19 +31,21 @@ import {
 import clsx from 'clsx';
 import { API_BASE_URL } from '@/config';
 import { describeFailure, getLocation } from '@/lib/geolocation';
+import { isNativeApp } from '@/lib/platform';
 import {
+    type PushChannel,
     type Reminder,
     SubscribeError,
     disablePush,
     enablePush,
-    fetchPublicKey,
-    isPushSupported,
+    fetchPushChannel,
     isReminderEnabled,
     putReminders,
     setReminderEnabled,
 } from '@/lib/reminders';
 import { textOnRouteColor } from './mapUtils';
-import { Alert, AlertActions, AlertContent, AlertDescription, AlertIcon } from './ui/Alert';
+import { PrivacyLink } from './PrivacyLink';
+import { Alert, AlertActions, AlertContent, AlertDescription, AlertIcon, AlertTitle } from './ui/Alert';
 import { buttonVariants, cn } from './ui/styles';
 
 // ---------------------------------------------------------------------------
@@ -81,6 +83,24 @@ function loadSchedule(): StoredClass[] {
 
 function saveSchedule(classes: StoredClass[]) {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(classes)); } catch { /* private mode */ }
+}
+
+// Whether the rider has agreed to their screenshots going to OpenAI.
+//
+// Asked in the iOS app only. App Review requires explicit permission before
+// personal data is shared with a third-party AI service (guideline 5.1.2),
+// and a line of small print under the upload button is a notice, not
+// permission. The website keeps the notice alone, as it always has, so in a
+// browser the answer is yes without anything being asked or stored.
+const AI_CONSENT_KEY = 'shuttl:classes:openai-consent';
+
+function loadAiConsent(): boolean {
+    if (!isNativeApp()) return true;
+    try { return localStorage.getItem(AI_CONSENT_KEY) === '1'; } catch { return false; }
+}
+
+function saveAiConsent() {
+    try { localStorage.setItem(AI_CONSENT_KEY, '1'); } catch { /* asked again next launch */ }
 }
 
 const hasMeeting = (c: StoredClass) => Boolean(c.days?.length && c.start_time && c.end_time);
@@ -400,6 +420,14 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
     const [dragOver, setDragOver] = useState(false);
     const fileRef = useRef<HTMLInputElement>(null);
 
+    // iOS app only (see loadAiConsent): nothing is uploaded until the rider
+    // has said yes once. In a browser aiConsent starts true and the question
+    // is never raised.
+    const [aiConsent, setAiConsent] = useState<boolean>(() => loadAiConsent());
+    const [askConsent, setAskConsent] = useState(false);
+    // Screenshots dropped on the panel before the answer, held until it comes.
+    const heldFiles = useRef<File[] | null>(null);
+
     // Generated events from stored schedule
     const [events, setEvents] = useState<ClassEvent[]>([]);
     useEffect(() => {
@@ -446,11 +474,13 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
     }, [events]);
 
     // Reminders
-    const [publicKey, setPublicKey] = useState<string | null | undefined>(undefined);
+    // How this client is reached — a VAPID key in a browser, APNs in the app —
+    // or null while unknown or unavailable, which keeps the toggle hidden.
+    const [pushChannel, setPushChannel] = useState<PushChannel | null>(null);
     const [remindOn, setRemindOn] = useState<boolean>(() => isReminderEnabled());
     const [remindBusy, setRemindBusy] = useState(false);
     const [remindError, setRemindError] = useState<string | null>(null);
-    const pushAvailable = isPushSupported() && Boolean(publicKey);
+    const pushAvailable = Boolean(pushChannel);
 
     // -- screenshot parse ------------------------------------------------------
 
@@ -484,14 +514,47 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
         e.preventDefault();
         setDragOver(false);
         const files = Array.from(e.dataTransfer.files);
-        if (files.length) void parseScreenshots(files);
-    }, [parseScreenshots]);
+        if (!files.length) return;
+        if (!aiConsent) {
+            heldFiles.current = files;
+            setAskConsent(true);
+            return;
+        }
+        void parseScreenshots(files);
+    }, [parseScreenshots, aiConsent]);
 
     const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
         const files = Array.from(e.target.files ?? []);
         if (files.length) void parseScreenshots(files);
         e.target.value = '';
     }, [parseScreenshots]);
+
+    // Every button that opens the picker goes through here, so the question
+    // is asked before the first screenshot is chosen rather than after.
+    const openPicker = () => {
+        if (!aiConsent) {
+            setAskConsent(true);
+            return;
+        }
+        fileRef.current?.click();
+    };
+
+    const allowUpload = () => {
+        saveAiConsent();
+        setAiConsent(true);
+        setAskConsent(false);
+        const held = heldFiles.current;
+        heldFiles.current = null;
+        if (held?.length) void parseScreenshots(held);
+        // Opened here, not on the next render: WebKit only lets a script open
+        // a file picker from inside the tap that asked for it.
+        else fileRef.current?.click();
+    };
+
+    const declineUpload = () => {
+        heldFiles.current = null;
+        setAskConsent(false);
+    };
 
     const removeClass = (id: string) => {
         const updated = schedule.filter(c => c.id !== id);
@@ -609,7 +672,7 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
 
     // -- reminders -------------------------------------------------------------
 
-    useEffect(() => { if (!isPushSupported()) { setPublicKey(null); return; } void fetchPublicKey().then(setPublicKey); }, []);
+    useEffect(() => { void fetchPushChannel().then(setPushChannel); }, []);
 
     useEffect(() => {
         if (!remindOn || !pushAvailable || !events.length || !hasOrigin) return;
@@ -637,7 +700,7 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
     }, [remindOn, pushAvailable, events, origins, hasOrigin]);
 
     const toggleRemind = async () => {
-        if (!publicKey || remindBusy) return;
+        if (!pushChannel || remindBusy) return;
         setRemindBusy(true);
         setRemindError(null);
         try {
@@ -646,13 +709,17 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
                 setReminderEnabled(false);
                 setRemindOn(false);
             } else {
-                await enablePush(publicKey);
+                await enablePush(pushChannel);
                 setReminderEnabled(true);
                 setRemindOn(true);
             }
         } catch (e) {
             if (e instanceof SubscribeError && e.reason === 'denied') {
-                setRemindError('Notifications blocked for this site. Allow them in browser settings.');
+                // An app has no "site" and no browser settings; the switch
+                // that undoes a refusal lives in the iOS Settings app.
+                setRemindError(isNativeApp()
+                    ? 'Notifications are off for sHUttl. Turn them on in Settings > Notifications > sHUttl.'
+                    : 'Notifications blocked for this site. Allow them in browser settings.');
             } else {
                 setRemindError(e instanceof Error ? e.message : 'Could not change reminders.');
             }
@@ -670,41 +737,52 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
                         <AlertContent><AlertDescription>{parseError}</AlertDescription></AlertContent>
                     </Alert>
                 )}
-                <div
-                    className={clsx(
-                        'flex flex-1 flex-col items-center justify-center gap-3 py-8 text-center rounded-xl border-2 border-dashed transition-colors cursor-pointer',
-                        dragOver ? 'border-crimson/60 bg-crimson/5' : 'border-white/10 bg-transparent',
-                    )}
-                    onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-                    onDragLeave={() => setDragOver(false)}
-                    onDrop={handleDrop}
-                    onClick={() => fileRef.current?.click()}
-                >
-                    <Camera size={22} className="text-crimson" />
-                    <div>
-                        <p className="text-[12px] font-semibold text-white">Screenshot your schedule</p>
-                        <p className="mt-1 max-w-[260px] text-[11px] leading-relaxed text-neutral-500">
-                            Open my.harvard → Enrollments and screenshot as you scroll.
-                            Drop them here in any order — a few at a time is fine, and you
-                            can add the rest later.
+                {/* One slot, two occupants: the file input below must stay
+                    mounted while the question is answered, because Allow
+                    opens the picker on that same element. */}
+                {askConsent ? (
+                    <UploadConsent onAllow={allowUpload} onDecline={declineUpload} />
+                ) : (
+                    <div
+                        className={clsx(
+                            'flex flex-1 flex-col items-center justify-center gap-3 py-8 text-center rounded-xl border-2 border-dashed transition-colors cursor-pointer',
+                            dragOver ? 'border-crimson/60 bg-crimson/5' : 'border-white/10 bg-transparent',
+                        )}
+                        onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                        onDragLeave={() => setDragOver(false)}
+                        onDrop={handleDrop}
+                        onClick={openPicker}
+                    >
+                        <Camera size={22} className="text-crimson" />
+                        <div>
+                            <p className="text-[12px] font-semibold text-white">Screenshot your schedule</p>
+                            <p className="mt-1 max-w-[260px] text-[11px] leading-relaxed text-neutral-500">
+                                Open my.harvard → Enrollments and screenshot as you scroll.
+                                Drop them here in any order — a few at a time is fine, and you
+                                can add the rest later.
+                            </p>
+                        </div>
+                        <div className={cn(buttonVariants({ variant: 'primary', size: 'md' }), 'pointer-events-none')}>
+                            <Upload size={14} />
+                            Upload Screenshots
+                        </div>
+                        {/* The sheet can be dragged back down over this, and a
+                            half-covered drop zone reads as an app that does
+                            nothing. Say where the rest of it went. */}
+                        <p className="flex items-center gap-1 text-[9px] text-neutral-500 md:hidden">
+                            <ChevronUp size={10} />
+                            Swipe up on the bar above for the full form
+                        </p>
+                        <p className="max-w-[280px] text-[9px] leading-relaxed text-neutral-600">
+                            Screenshots are sent to OpenAI to be read. sHUttl does not keep
+                            them; OpenAI handles them under its own API terms. Your schedule
+                            stays on this device unless you turn on reminders.
                         </p>
                     </div>
-                    <div className={cn(buttonVariants({ variant: 'primary', size: 'md' }), 'pointer-events-none')}>
-                        <Upload size={14} />
-                        Upload Screenshots
-                    </div>
-                    {/* The sheet can be dragged back down over this, and a
-                        half-covered drop zone reads as an app that does
-                        nothing. Say where the rest of it went. */}
-                    <p className="flex items-center gap-1 text-[9px] text-neutral-500 md:hidden">
-                        <ChevronUp size={10} />
-                        Swipe up on the bar above for the full form
-                    </p>
-                    <p className="max-w-[280px] text-[9px] leading-relaxed text-neutral-600">
-                        Screenshots are sent to OpenAI to be read, and are not stored by
-                        either service afterwards. Your schedule stays on this device.
-                    </p>
-                </div>
+                )}
+                {/* Outside the drop zone, where a tap would open the picker
+                    instead of the link. */}
+                {!askConsent && <PrivacyLink className="mt-2 self-center py-1" />}
                 <input
                     ref={fileRef}
                     type="file"
@@ -754,7 +832,7 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
                     </button>
                     <button
                         type="button"
-                        onClick={() => fileRef.current?.click()}
+                        onClick={openPicker}
                         aria-label="Add more screenshots"
                         className={buttonVariants({ variant: 'ghost', size: 'iconSm' })}
                     >
@@ -770,6 +848,10 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
                     </button>
                 </div>
             </div>
+
+            {askConsent && (
+                <UploadConsent onAllow={allowUpload} onDecline={declineUpload} className="mb-2 shrink-0" />
+            )}
 
             {/* Reminders */}
             {pushAvailable && (
@@ -937,12 +1019,52 @@ export const ClassesPanel = ({ systemId, onShowOnMap }: ClassesPanelProps) => {
                         </div>
                     ))}
                 </div>
+
+                <PrivacyLink className="block pt-3 text-center" />
             </div>
 
             <input ref={fileRef} type="file" accept="image/*" multiple className="hidden" onChange={handleFileChange} />
         </div>
     );
 };
+
+// ---------------------------------------------------------------------------
+// UploadConsent — the question the iOS app asks before the first upload
+// ---------------------------------------------------------------------------
+
+/** Says who receives the screenshots and waits for a yes. Only ever rendered
+ * in the app; see loadAiConsent for why the website does not ask. */
+const UploadConsent = ({
+    onAllow,
+    onDecline,
+    className,
+}: {
+    onAllow: () => void;
+    onDecline: () => void;
+    className?: string;
+}) => (
+    <Alert variant="info" className={className}>
+        <AlertIcon><Camera size={12} /></AlertIcon>
+        <AlertContent>
+            <AlertTitle>Send your screenshots to OpenAI?</AlertTitle>
+            <AlertDescription>
+                To read your classes, sHUttl sends the screenshots you choose to
+                OpenAI, a third-party AI service. sHUttl does not keep them; OpenAI
+                handles them under its own API terms. Crop out anything you would
+                not want to share.
+            </AlertDescription>
+            <PrivacyLink className="inline-block py-1" />
+            <AlertActions>
+                <button type="button" onClick={onAllow} className={buttonVariants({ variant: 'primary', size: 'sm' })}>
+                    Allow
+                </button>
+                <button type="button" onClick={onDecline} className={buttonVariants({ variant: 'secondary', size: 'sm' })}>
+                    Not now
+                </button>
+            </AlertActions>
+        </AlertContent>
+    </Alert>
+);
 
 // ---------------------------------------------------------------------------
 // ClassRow — same visual grammar as the old version

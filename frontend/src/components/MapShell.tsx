@@ -11,6 +11,7 @@ import { buttonVariants, cn } from './ui/styles';
 import { NEUTRAL_ROUTE_COLOR, bboxOf, relativeLuminance, textOnRouteColor } from './mapUtils';
 import type { Stop, Vehicle, RoutePath, TripResponse, TripSegment } from './types';
 import { API_BASE_URL, MAP_MAX_ZOOM, MAP_MIN_ZOOM, MAP_STYLE_DARK, MAP_STYLE_LIGHT } from '@/config';
+import { nativeSafeArea, setStatusBarGround } from '@/lib/nativeShell';
 
 /** The read-only status pill, shared by the mobile top bar and the desktop
  * bottom bar. They had drifted to different grounds, paddings and text sizes
@@ -84,9 +85,13 @@ function tripKeyOf(trip: TripResponse | null): string | null {
  * doorstep. */
 function fitOptions() {
     const narrow = window.innerWidth < 768;
+    // In the app the status bar covers the top of the map and the sheet rests
+    // a home-indicator's height taller (see PanelSheet); both are zero in a
+    // browser.
+    const safe = nativeSafeArea();
     return narrow
-        ? { padding: { top: 40, left: 30, right: 30, bottom: Math.round(window.innerHeight * SHEET_RESTING_FRACTION) + 24 }, maxZoom: 16, duration: 650 }
-        : { padding: { top: 60, left: 430, right: 60, bottom: 60 }, maxZoom: 16, duration: 650 };
+        ? { padding: { top: 40 + safe.top, left: 30, right: 30, bottom: Math.round(window.innerHeight * SHEET_RESTING_FRACTION) + 24 + safe.bottom }, maxZoom: 16, duration: 650 }
+        : { padding: { top: 60 + safe.top, left: 430, right: 60, bottom: 60 }, maxZoom: 16, duration: 650 };
 }
 
 const toLngLatBounds = (b: Bbox): LngLatBoundsLike => [[b[0], b[1]], [b[2], b[3]]];
@@ -127,6 +132,11 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
         });
     }, []);
     const isLight = basemap === 'light';
+
+    // In the app the status bar is drawn straight over the map, so its text
+    // has to be the ink colour for the ground too: white on the dark basemap
+    // is invisible on the light one. Does nothing in a browser.
+    useEffect(() => { setStatusBarGround(basemap); }, [basemap]);
 
     // ------------------------------------------------------------------ data
 
@@ -209,6 +219,9 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
         const hadTripBefore = previousTripRef.current !== null;
         const hasTripNow = trip !== null;
         if (!hadTripBefore && hasTripNow && showRoutes && !hasAutoDisabledRoutes.current) {
+            // A one-time reaction to the trip prop arriving, guarded by the
+            // ref above, so it cannot cascade.
+            // eslint-disable-next-line react-hooks/set-state-in-effect
             setShowRoutes(false);
             hasAutoDisabledRoutes.current = true;
         }
@@ -553,10 +566,14 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
 
                 Mobile: status top-left, all four actions top-right.
                 Desktop: status top-right of the map area, all four actions
-                bottom-right, byline centred under the map area. */}
+                bottom-right, byline centred under the map area.
+
+                Everything pinned to the top is offset by --safe-top (see
+                index.css): 0px in a browser tab, the height of the status bar
+                and notch in the iOS app, where the map runs underneath them. */}
 
             {/* Status */}
-            <div className={cn(STATUS_PILL, 'pointer-events-none fixed left-4 top-4 z-[1000] min-w-[32px] md:absolute md:left-auto md:right-6 md:top-6')}>
+            <div className={cn(STATUS_PILL, 'pointer-events-none fixed left-4 top-[calc(var(--safe-top)+1rem)] z-[1000] min-w-[32px] md:absolute md:left-auto md:right-6 md:top-[calc(var(--safe-top)+1.5rem)]')}>
                 {systemId
                     ? loading
                         ? '…'
@@ -564,14 +581,14 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
                     : <span className="whitespace-nowrap"><span className="md:hidden">Select system</span><span className="hidden md:inline">Select a system to begin</span></span>}
             </div>
             {(vehiclesError || routesError) && (
-                <p className="animate-pulse-subtle pointer-events-none fixed left-4 top-[60px] z-[1000] rounded-full border border-crimson-mid/40 bg-crimson-deep/30 px-3 py-1 text-[10px] font-medium text-crimson-light backdrop-blur-sm md:absolute md:left-auto md:right-6 md:top-[68px]">
+                <p className="animate-pulse-subtle pointer-events-none fixed left-4 top-[calc(var(--safe-top)+60px)] z-[1000] rounded-full border border-crimson-mid/40 bg-crimson-deep/30 px-3 py-1 text-[10px] font-medium text-crimson-light backdrop-blur-sm md:absolute md:left-auto md:right-6 md:top-[calc(var(--safe-top)+68px)]">
                     {vehiclesError && routesError ? 'Real-time data unavailable' : vehiclesError ? 'Vehicle tracking unavailable' : 'Route information unavailable'}
                 </p>
             )}
 
             {/* Actions */}
             {systemId && (
-                <div className="pointer-events-none fixed right-4 top-4 z-[1000] flex items-center gap-1.5 md:absolute md:bottom-6 md:right-6 md:top-auto md:gap-2">
+                <div className="pointer-events-none fixed right-4 top-[calc(var(--safe-top)+1rem)] z-[1000] flex items-center gap-1.5 md:absolute md:bottom-6 md:right-6 md:top-auto md:gap-2">
                     <button
                         type="button"
                         onClick={recenter}
@@ -636,7 +653,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
             {showRouteSettings && (
                 <div
                     ref={routeSettingsRef}
-                    className="fixed z-[1001] top-16 left-4 right-4 md:absolute md:top-auto md:bottom-16 md:left-auto md:right-6 md:w-72 rounded-xl bg-black/80 backdrop-blur-xl border border-white/10 shadow-2xl p-3 max-h-[60vh] overflow-y-auto"
+                    className="fixed z-[1001] top-[calc(var(--safe-top)+4rem)] left-4 right-4 md:absolute md:top-auto md:bottom-16 md:left-auto md:right-6 md:w-72 rounded-xl bg-black/80 backdrop-blur-xl border border-white/10 shadow-2xl p-3 max-h-[60vh] overflow-y-auto"
                 >
                     <div className="mb-2 flex items-center justify-between px-1">
                         <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-500">Filter routes</span>

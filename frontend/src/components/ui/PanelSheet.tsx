@@ -36,6 +36,8 @@
 
 import { motion, useMotionValue, animate, type PanInfo } from 'motion/react';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { tapHaptic } from '@/lib/nativeHaptics';
+import { nativeSafeArea } from '@/lib/nativeShell';
 import { cn } from './styles';
 import {
     SNAP_DEFAULT,
@@ -49,6 +51,11 @@ import {
 const FLICK_VELOCITY = 500;
 
 const SPRING = { type: 'spring', stiffness: 300, damping: 32, mass: 0.8 } as const;
+
+// How far below the top safe-area inset the map's top row of controls ends:
+// MapShell pins the status pill and the action buttons 1rem under the inset,
+// they are 36px tall (h-9), and 8px of map is left showing beneath them.
+const MAP_CONTROLS_CLEARANCE = 16 + 36 + 8;
 
 interface PanelSheetProps {
     isMobile: boolean;
@@ -75,14 +82,37 @@ export const PanelSheet = ({
     const snapRef = useRef(snap);
     snapRef.current = snap;
 
+    // The strips along the top and bottom edges that belong to the status bar
+    // and the home indicator. Only the iOS app reports them; in a browser
+    // both are 0 and stay 0.
+    const [safe, setSafe] = useState(() => nativeSafeArea());
+    const safeTop = safe.top;
+    const safeBottom = safe.bottom;
+
     useEffect(() => {
-        const onResize = () => setViewport(window.innerHeight);
+        const onResize = () => {
+            setViewport(window.innerHeight);
+            setSafe(nativeSafeArea());
+        };
         window.addEventListener('resize', onResize);
         return () => window.removeEventListener('resize', onResize);
     }, []);
 
     // Sheet top for each position, in px from the top of the viewport.
-    const offsets = SNAP_FRACTIONS.map((f) => Math.round(viewport * (1 - f)));
+    //
+    // In the app every position but the tallest stands a home-indicator strip
+    // higher: at the minimised position the visible sheet is barely taller
+    // than the mode switch, and without the lift the indicator sits on the
+    // switch's bottom edge. The expanded position is never lifted — that
+    // would put the grab handle under the status bar. Under a notch it is
+    // lowered instead: the map's top controls are pushed down by the inset
+    // (see MapShell), and at the usual 8% the sheet would close over them,
+    // where on the website they stay in view above it.
+    const offsets = SNAP_FRACTIONS.map((f, i) => {
+        const base = Math.round(viewport * (1 - f));
+        if (i !== SNAP_EXPANDED) return base - safeBottom;
+        return safeTop > 0 ? Math.max(base, safeTop + MAP_CONTROLS_CLEARANCE) : base;
+    });
 
     // Follow the snap index whenever it changes from outside — planning a trip
     // pulls the sheet back up, for instance.
@@ -90,10 +120,10 @@ export const PanelSheet = ({
         if (!isMobile || !viewport) return;
         const target = offsets[snap] ?? offsets[SNAP_DEFAULT];
         animate(y, target, SPRING);
-        // offsets is derived from viewport; listing it would re-run this on
-        // every render.
+        // offsets is derived from viewport and the two insets; listing it
+        // would re-run this on every render.
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [snap, isMobile, viewport, y]);
+    }, [snap, isMobile, viewport, safeTop, safeBottom, y]);
 
     const handleDragEnd = (_: unknown, info: PanInfo) => {
         const current = y.get();
@@ -117,7 +147,15 @@ export const PanelSheet = ({
         }
 
         animate(y, offsets[target], SPRING);
-        if (target !== from) onSnap(target);
+        if (target !== from) {
+            // In the app, arriving at a new position gets a light tap, the way
+            // a system sheet clicks into a detent. Fired on release rather
+            // than when the spring comes to rest: the spring's tail is long,
+            // and a tap that arrives after the sheet looks still reads as lag.
+            // Falling back to the position it came from is not an arrival.
+            tapHaptic();
+            onSnap(target);
+        }
     };
 
     if (!isMobile) {
@@ -180,6 +218,14 @@ export const PanelSheet = ({
                     'flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain touch-pan-y',
                     'px-4 pb-[env(safe-area-inset-bottom,16px)] pt-1',
                 )}
+                // The sheet is a full-height element pushed down, so its
+                // lower edge hangs below the screen by however far it is
+                // pushed. In the app the expanded position now sits lower
+                // than on the website (see offsets), which would put that
+                // much more of a long list out of reach; padding the content
+                // by the same distance ends it at the home indicator instead.
+                // The website's sheet is left exactly as it was.
+                style={safeTop > 0 ? { paddingBottom: offsets[SNAP_EXPANDED] + safeBottom } : undefined}
             >
                 {children}
             </div>

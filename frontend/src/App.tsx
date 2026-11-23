@@ -5,6 +5,9 @@ import { Layout } from "./components/Layout";
 import { SystemSelectModal } from "./components/SystemSelectModal";
 import type { TripResponse } from "./components/types";
 import { hasTripLink } from "./lib/tripLink";
+import { isNativeApp } from "./lib/platform";
+import { listenForNotificationTaps } from "./lib/nativePush";
+import { refreshNativePush } from "./lib/reminders";
 
 interface System {
   id: number;
@@ -41,6 +44,16 @@ function App() {
       setSystem({ id: 831, name: "Harvard Shuttles" });
     }
   }, [arrivedWithTripLink]);
+
+  // iOS app only. Both of these belong to the launch rather than to any panel:
+  // a tapped reminder has to be honoured even if Classes is never opened, and
+  // the device token has to be re-sent on every start because iOS is free to
+  // change it between launches. Neither prompts for anything.
+  useEffect(() => {
+    if (!isNativeApp()) return;
+    listenForNotificationTaps();
+    void refreshNativePush();
+  }, []);
 
   const handleSplashDone = () => {
     setShowSplash(false);
