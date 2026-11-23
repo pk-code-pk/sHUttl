@@ -34,6 +34,22 @@ export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
         [],
     );
 
+    // The Routes tab's single-route view. It reuses the focus path (draw and
+    // frame the route) and adds isolation: only that route's line and buses.
+    const [isolateRoute, setIsolateRoute] = useState(false);
+    const setRouteView = useCallback(
+        (id: string | null) => {
+            setIsolateRoute(id !== null);
+            setFocusRouteId(id);
+        },
+        [setFocusRouteId],
+    );
+    const [focusPoint, setFocusPoint] = useState<{ lat: number; lng: number; nonce: number } | null>(null);
+    const showPoint = useCallback(
+        (p: { lat: number; lng: number }) => setFocusPoint((cur) => ({ lat: p.lat, lng: p.lng, nonce: (cur?.nonce ?? 0) + 1 })),
+        [],
+    );
+
     return (
         <div className="fixed inset-0 md:relative md:w-full md:h-[100dvh] overflow-hidden bg-neutral-950 overscroll-none">
             {/* Background Map - fills entire screen */}
@@ -45,6 +61,8 @@ export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
                     focusRouteId={focus.id}
                     focusRun={focus.run}
                     focusNonce={focus.nonce}
+                    isolateRoute={isolateRoute}
+                    focusPoint={focusPoint}
                 />
             </div>
 
@@ -82,6 +100,8 @@ export const Layout = ({ system, trip, onTripChange }: LayoutProps) => {
                         trip={trip}
                         onTripChange={onTripChange}
                         onFocusRouteChange={setFocusRouteId}
+                        onRouteViewChange={setRouteView}
+                        onShowPoint={showPoint}
                     />
                 </div>
 

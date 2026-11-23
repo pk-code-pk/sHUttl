@@ -52,6 +52,12 @@ interface MapShellProps {
     /** The expanded departure's run: geometry and stops. Drawn like a trip,
      * with the whole route thin beneath it for orientation. */
     focusRun?: DepartureRun | null;
+    /** The Routes tab's single-route view: with a focused route, draw only
+     * that route's line and buses, so it can be read on its own. */
+    isolateRoute?: boolean;
+    /** A place to fly to, such as a stop tapped in the Routes tab. The nonce
+     * makes a second tap on the same stop fly again. */
+    focusPoint?: { lat: number; lng: number; nonce: number } | null;
 }
 
 /* Route ids arrive from two endpoints — /routes and /departures — and the
@@ -97,7 +103,7 @@ function fitOptions() {
 
 const toLngLatBounds = (b: Bbox): LngLatBoundsLike => [[b[0], b[1]], [b[2], b[3]]];
 
-export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonce = 0, focusRun = null }: MapShellProps) => {
+export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonce = 0, focusRun = null, isolateRoute = false, focusPoint = null }: MapShellProps) => {
     const mapRef = useRef<MapRef>(null);
     const [mapReady, setMapReady] = useState(false);
 
@@ -339,6 +345,15 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
         markOnUser(true);
     };
 
+    // A stop tapped in the Routes tab.
+    useEffect(() => {
+        const map = mapRef.current;
+        if (!map || !mapReady || !focusPoint) return;
+        markOnUser(false);
+        map.flyTo({ center: [focusPoint.lng, focusPoint.lat], zoom: Math.max(map.getZoom(), 16), padding: fitOptions().padding, duration: 650 });
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the nonce: a re-tap flies again
+    }, [focusPoint?.nonce, mapReady]);
+
     // While the map is sitting on the rider, keep it there as they walk.
     useEffect(() => {
         const map = mapRef.current;
@@ -386,6 +401,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
             .filter((r) => {
                 if (!r.path?.length) return false;
                 const isFocus = focusRoute != null && sameRoute(r.route_id, focusRoute.route_id);
+                if (isolateRoute && focusRoute) return isFocus;
                 return isFocus || (showRoutes && routeVisibility[r.route_id] !== false);
             })
             .sort((a, b) => {
@@ -409,7 +425,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
                 };
             });
         return { type: 'FeatureCollection' as const, features };
-    }, [routes, focusRoute, showRoutes, routeVisibility, trip, focusRun]);
+    }, [routes, focusRoute, showRoutes, routeVisibility, trip, focusRun, isolateRoute]);
 
     const tripGeoJson = useMemo(() => {
         // No trip yet but a departure expanded: its run takes the trip layer,
@@ -569,6 +585,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
 
                     {vehicles
                         .filter((v): v is Vehicle & { lat: number; lng: number } => typeof v.lat === 'number' && typeof v.lng === 'number')
+                        .filter((v) => !(isolateRoute && focusRouteId) || sameRoute(v.route_id, focusRouteId))
                         .map((v) => (
                             <ShuttleMarker
                                 key={v.id}

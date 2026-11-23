@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useCallback, useState, useEffect, useMemo, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { createPortal } from "react-dom";
 import { MapPin, Navigation as NavigationIcon, ArrowUpDown, Clock, Info, ChevronDown, ChevronLeft, X, Share2, Check, TriangleAlert } from "lucide-react";
@@ -22,6 +22,7 @@ import { Button } from "./ui/Button";
 import { Alert, AlertActions, AlertContent, AlertDescription, AlertIcon, AlertTitle } from "./ui/Alert";
 import { cn } from "./ui/styles";
 import { SegmentedControl } from "./ui/SegmentedControl";
+import { RoutesPanel } from "./RoutesPanel";
 import { PanelSheet } from "./ui/PanelSheet";
 import { SNAP_DEFAULT, SNAP_HALF, SNAP_MINIMISED } from "./ui/sheetSnaps";
 import {
@@ -50,6 +51,11 @@ interface TripPlannerPanelProps {
      * the mode. MapShell draws and frames it through the same path a trip
      * takes, so there is one focus mechanism, not two. */
     onFocusRouteChange?: (routeId: string | null, run?: DepartureRun | null) => void;
+    /** The Routes tab's chosen route, which the map shows on its own; null
+     * puts the full map back. */
+    onRouteViewChange?: (routeId: string | null) => void;
+    /** Fly the map to a point (a stop tapped in the Routes tab). */
+    onShowPoint?: (point: { lat: number; lng: number }) => void;
 }
 
 interface StopOption {
@@ -177,6 +183,8 @@ export const TripPlannerPanel = ({
     onTripChange,
     onUserLocationChange,
     onFocusRouteChange,
+    onRouteViewChange,
+    onShowPoint,
 }: TripPlannerPanelProps) => {
     const [stops, setStops] = useState<StopOption[]>([]);
     const [loadingStops, setLoadingStops] = useState(false);
@@ -228,7 +236,7 @@ export const TripPlannerPanel = ({
     // wanting to know what is leaving — and it needs no input at all, so it
     // does not belong behind the from/to form. "Classes" reads the rider's
     // calendar and works backwards from each class to a stop and a time.
-    type PanelMode = 'next' | 'plan' | 'classes';
+    type PanelMode = 'next' | 'plan' | 'routes' | 'classes';
     // A shared link is a request for a specific trip, so it opens the planner.
     const [mode, setMode] = useState<PanelMode>(
         hasTripLink(window.location.search) ? 'plan' : 'next',
@@ -661,6 +669,17 @@ export const TripPlannerPanel = ({
         revealFor(next);
     };
 
+    // Choosing a route lowers the sheet to its resting height on a phone, so
+    // the route the map has just framed is not hidden behind the stop list.
+    // The list is a drag away.
+    const selectRouteView = useCallback(
+        (routeId: string | null) => {
+            if (routeId && isMobile) setSnap(SNAP_DEFAULT);
+            onRouteViewChange?.(routeId);
+        },
+        [isMobile, onRouteViewChange],
+    );
+
     const confirmModeSwitch = () => {
         if (!pendingMode) return;
         onTripChange(null);
@@ -679,7 +698,7 @@ export const TripPlannerPanel = ({
      * appeared to do nothing at all. Only ever raises. */
     const revealFor = (next: PanelMode) => {
         if (!isMobile) return;
-        const wanted = next === 'classes' ? SNAP_HALF : SNAP_DEFAULT;
+        const wanted = next === 'classes' || next === 'routes' ? SNAP_HALF : SNAP_DEFAULT;
         setSnap((cur) => Math.min(cur, wanted));
     };
 
@@ -815,8 +834,9 @@ export const TripPlannerPanel = ({
                         value={mode}
                         onChange={requestMode}
                         segments={[
-                            { id: 'next' as PanelMode, label: 'Next Bus Out' },
+                            { id: 'next' as PanelMode, label: 'Next Bus' },
                             { id: 'plan' as PanelMode, label: 'Plan Trip' },
+                            { id: 'routes' as PanelMode, label: 'Routes' },
                             { id: 'classes' as PanelMode, label: 'Classes' },
                         ]}
                     />
@@ -855,7 +875,7 @@ export const TripPlannerPanel = ({
                                     <AlertContent>
                                         <AlertTitle>Clear your planned trip?</AlertTitle>
                                         <AlertDescription>
-                                            {pendingMode === 'classes' ? 'Classes' : 'Next Bus Out'} shows
+                                            {pendingMode === 'classes' ? 'Classes' : pendingMode === 'routes' ? 'Routes' : 'Next Bus'} shows
                                             its own list, so the route you planned will come off the map.
                                         </AlertDescription>
                                         <AlertActions>
@@ -879,6 +899,14 @@ export const TripPlannerPanel = ({
                     <NextBusPanel
                         systemId={system?.id}
                         onShowOnMap={showDepartureOnMap}
+                    />
+                )}
+
+                {mode === 'routes' && (
+                    <RoutesPanel
+                        systemId={system?.id}
+                        onSelectRoute={selectRouteView}
+                        onShowStop={onShowPoint}
                     />
                 )}
 
