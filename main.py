@@ -936,6 +936,58 @@ def route_paths_for_system(system_id: int = DEFAULT_SYSTEM_ID) -> list[dict[str,
     return result
 
 
+ROUTE_STOP_ETA_COUNT = 2  # next and following, per stop
+
+
+@app.get("/route_stops", dependencies=[Depends(OptionalRateLimiter(times=30, seconds=60))])
+def api_route_stops(route_id: str = Query(..., min_length=1, max_length=32), system_id: int = DEFAULT_SYSTEM_ID):
+    """One route's stops in the order a bus reaches them, with the next arrivals at each.
+
+    For the Routes tab: pick a route, see where it goes and when its buses get
+    to each stop. Arrival times are the operator's predictions for that route
+    at that stop (the same source Next Bus Out prefers), with the run label so
+    a stop can say where the next bus is heading. Fetched in parallel; each is
+    cached for PLATFORM_ET_TTL_S, so a panel refreshing every 20 s costs at
+    most one operator request per stop.
+    """
+    stops_by_id = {str(s.id): s for s in get_stops(system_id)}
+    route = next((r for r in get_routes(system_id) if norm_id(getattr(r, "myid", None) or r.id) == norm_id(route_id)), None)
+    if route is None:
+        raise HTTPException(status_code=404, detail="Unknown route")
+    rid = str(getattr(route, "myid", None) or route.id)
+
+    stop_ids = [sid for sid in get_route_stop_ids(rid) if sid in stops_by_id]
+
+    def arrivals_at(sid: str) -> list[dict]:
+        try:
+            etas = [e for e in get_platform_etas(sid) if norm_id(e.route_id) == norm_id(rid)]
+        except Exception:
+            return []
+        etas.sort(key=lambda e: e.eta_minutes)
+        return [
+            {"minutes": e.eta_minutes, "headsign": e.destination or None, "scheduled": bool(e.scheduled)}
+            for e in etas[:ROUTE_STOP_ETA_COUNT]
+        ]
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        arrivals = list(pool.map(arrivals_at, stop_ids))
+
+    try:
+        buses = sum(1 for v in get_vehicles(system_id) if norm_id(getattr(v, "routeId", None)) == norm_id(rid))
+    except HTTPException:
+        buses = None
+
+    return {
+        "route_id": rid,
+        "route_name": route.name,
+        "short_name": getattr(route, "shortName", None),
+        "color": getattr(route, "groupColor", None) or getattr(route, "color", None),
+        "buses": buses,
+        "stops": [{**stopdict(stops_by_id[sid]), "arrivals": arr} for sid, arr in zip(stop_ids, arrivals)],
+        "generated_at": campus_now_aware().isoformat(timespec="seconds"),
+    }
+
+
 @app.get("/route_paths")
 def list_route_paths(system_id: int = DEFAULT_SYSTEM_ID):
     """
