@@ -69,12 +69,33 @@ jobs:
         env:
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
 
+      # A key pasted into the secrets page often loses its line breaks, gains
+      # CRLFs or stray spaces, or arrives with literal "\n" sequences, and
+      # xcodebuild rejects anything that is not a well-formed PEM document
+      # (CryptoKitASN1Error.invalidPEMDocument). So rebuild the PEM from the
+      # base64 body alone, whatever shape it arrived in, and check it parses
+      # before handing it to Xcode. Nothing here prints the key.
       - name: Write the App Store Connect key
         env:
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
         run: |
           umask 077
-          printf '%s\n' "$ASC_PRIVATE_KEY" > "$RUNNER_TEMP/AuthKey_${ASC_KEY_ID}.p8"
+          KEY_FILE="$RUNNER_TEMP/AuthKey_${ASC_KEY_ID}.p8"
+          python3 - "$KEY_FILE" <<'PY'
+          import os, re, sys, textwrap
+          raw = os.environ["ASC_PRIVATE_KEY"].replace("\\n", "\n").replace("\\r", "")
+          body = re.sub(r"-----(BEGIN|END)[A-Z ]*-----", "", raw)
+          body = re.sub(r"[^A-Za-z0-9+/=]", "", body)
+          if len(body) < 100:
+              sys.exit("ASC_PRIVATE_KEY does not look like a .p8 key: too short after cleaning")
+          pem = "-----BEGIN PRIVATE KEY-----\n" + "\n".join(textwrap.wrap(body, 64)) + "\n-----END PRIVATE KEY-----\n"
+          open(sys.argv[1], "w").write(pem)
+          PY
+          if ! openssl pkey -in "$KEY_FILE" -noout 2>/dev/null; then
+            echo "::error::ASC_PRIVATE_KEY is not a valid private key, even after reformatting. Paste the whole AuthKey_${ASC_KEY_ID}.p8 file into the secret again."
+            exit 1
+          fi
+          echo "App Store Connect key is well-formed."
 
       - name: Archive
         run: |
