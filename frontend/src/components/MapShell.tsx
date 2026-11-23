@@ -13,6 +13,7 @@ import type { Stop, Vehicle, RoutePath, TripResponse, TripSegment } from './type
 import { API_BASE_URL, MAP_MAX_ZOOM, MAP_MIN_ZOOM, MAP_STYLE_DARK, MAP_STYLE_LIGHT } from '@/config';
 import { nativeSafeArea, setStatusBarGround } from '@/lib/nativeShell';
 import { getLocation } from '@/lib/geolocation';
+import { NoticesPill } from './NoticesPill';
 
 /** The read-only status pill, shared by the mobile top bar and the desktop
  * bottom bar. They had drifted to different grounds, paddings and text sizes
@@ -344,6 +345,7 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
     // one tap further away rather than gone. Any drag or zoom by hand clears
     // that, and the next tap goes back to the rider.
     const centeredOnUser = useRef(false);
+    const [noticeCount, setNoticeCount] = useState(0);
     const [locating, setLocating] = useState(false);
     const [onUser, setOnUser] = useState(false);
     const markOnUser = (v: boolean) => { centeredOnUser.current = v; setOnUser(v); };
@@ -676,8 +678,22 @@ export const MapShell = ({ systemId, trip, userLocation, focusRouteId, focusNonc
                         : <span className="whitespace-nowrap"><span className="hidden md:inline">{stops.length} stops • </span>{busCount(vehicles.length)}</span>
                     : <span className="whitespace-nowrap"><span className="md:hidden">Select system</span><span className="hidden md:inline">Select a system to begin</span></span>}
             </div>
+            {/* Service notices sit under the status pill; the data warning
+                below makes room for them when both are showing. */}
+            {systemId && (
+                <div className="pointer-events-none fixed left-4 top-[calc(var(--safe-top)+60px)] z-[1000] md:absolute md:left-auto md:right-6 md:top-[calc(var(--safe-top)+68px)]">
+                    <NoticesPill systemId={systemId} onCountChange={setNoticeCount} />
+                </div>
+            )}
             {(vehiclesError || routesError) && (
-                <p className="animate-pulse-subtle pointer-events-none fixed left-4 top-[calc(var(--safe-top)+60px)] z-[1000] rounded-full border border-crimson-mid/40 bg-crimson-deep/30 px-3 py-1 text-[10px] font-medium text-crimson-light backdrop-blur-sm md:absolute md:left-auto md:right-6 md:top-[calc(var(--safe-top)+68px)]">
+                <p
+                    className={cn(
+                        'animate-pulse-subtle pointer-events-none fixed left-4 z-[1000] rounded-full border border-crimson-mid/40 bg-crimson-deep/30 px-3 py-1 text-[10px] font-medium text-crimson-light backdrop-blur-sm md:absolute md:left-auto md:right-6',
+                        noticeCount > 0
+                            ? 'top-[calc(var(--safe-top)+100px)] md:top-[calc(var(--safe-top)+108px)]'
+                            : 'top-[calc(var(--safe-top)+60px)] md:top-[calc(var(--safe-top)+68px)]',
+                    )}
+                >
                     {vehiclesError && routesError ? 'Real-time data unavailable' : vehiclesError ? 'Vehicle tracking unavailable' : 'Route information unavailable'}
                 </p>
             )}

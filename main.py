@@ -5,12 +5,13 @@ from collections import defaultdict, deque
 import datetime
 from datetime import datetime 
 from datetime import timedelta
-from campus_time import campus_iso, campus_now, campus_now_aware, to_campus_naive
+from campus_time import CAMPUS_TZ, campus_iso, campus_now, campus_now_aware, to_campus_naive
 import math 
 import re
 import os
 import json
 import logging
+import hashlib
 import time
 from typing import Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -26,6 +27,7 @@ from ridesystems_client import (
     DEFAULT_SYSTEM_ID,
     get_all_systems,
     get_platform_etas,
+    get_service_alerts,
     run_serves_stop,
 )
 
@@ -944,6 +946,58 @@ def route_paths_for_system(system_id: int = DEFAULT_SYSTEM_ID) -> list[dict[str,
             ]
 
     return result
+
+
+_notices_cache: tuple[list[dict], float] = ([], 0.0)
+NOTICES_TTL_S = 120
+
+
+def _harvard_notices() -> list[dict]:
+    out = []
+    for project in get_service_alerts() or []:
+        for a in project.get("Alerts") or []:
+            title = " ".join(str(a.get("Title") or "").split())
+            body = " ".join(str(a.get("Detail") or "").split())
+            if not (title or body):
+                continue
+            routes = [str(i.get("No")) for i in ((a.get("Routes") or {}).get("Items") or []) if i.get("No")]
+            out.append({
+                "id": "hu-" + hashlib.sha1(f"{title}|{body}".encode()).hexdigest()[:12],
+                "title": title or "Service notice",
+                "body": body,
+                # The operator states the window in words ("until 11/26/2026").
+                "when": (str(a.get("Duration")).strip() or None) if a.get("Duration") else None,
+                "routes": routes,
+                "source": "Harvard Transportation",
+            })
+    return out
+
+
+@app.get("/notices", dependencies=[Depends(OptionalRateLimiter(times=30, seconds=60))])
+def api_notices():
+    """Active service notices: Harvard's, and the Longwood Collective's that
+    concern the M2. Either source failing leaves the other's notices."""
+    global _notices_cache
+    cached, at = _notices_cache
+    if time.time() - at < NOTICES_TTL_S:
+        return {"notices": cached}
+    notices: list[dict] = []
+    try:
+        notices.extend(_harvard_notices())
+    except Exception as e:
+        logger.warning("Harvard service alerts unavailable", exc_info=e)
+    try:
+        for n in m2_client.get_alerts():
+            if n.get("until"):
+                n["when"] = "until " + datetime.fromtimestamp(n.pop("until"), CAMPUS_TZ).strftime("%-m/%-d/%Y")
+            else:
+                n.pop("until", None)
+                n["when"] = None
+            notices.append(n)
+    except Exception as e:
+        logger.warning("M2 alerts unavailable", exc_info=e)
+    _notices_cache = (notices, time.time())
+    return {"notices": notices}
 
 
 ROUTE_STOP_ETA_COUNT = 2  # next and following, per stop

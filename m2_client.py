@@ -31,6 +31,7 @@ and the Harvard routes are untouched.
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import logging
 import math
@@ -321,3 +322,52 @@ def arrivals_at(stop_id: str, now: Optional[float] = None) -> list[int]:
                 minutes.append(max(0, round(dt / 60.0)))
                 break  # one arrival per bus: its next pass of this stop
     return sorted(minutes)
+
+
+# ---------------------------------------------------------------------------
+# Service alerts
+# ---------------------------------------------------------------------------
+
+ALERTS_URL = f"{_BASE}/realtime/serviceAlerts.json"
+ALERTS_TTL_S = float(os.getenv("M2_ALERTS_TTL_S", "300"))
+
+
+def _text(block: Any) -> str:
+    for t in ((block or {}).get("translation") or []):
+        if t.get("text"):
+            return " ".join(str(t["text"]).split())
+    return ""
+
+
+def get_alerts(now: Optional[float] = None) -> list[dict]:
+    """Active Longwood Collective alerts that concern the M2.
+
+    The feed covers every LMA shuttle (garage stops moving, bus wraps), so only
+    alerts that name the M2, or are tied to its route, are kept.
+    """
+    if not ENABLED:
+        return []
+    now = now or time.time()
+    out = []
+    for ent in _realtime(ALERTS_URL, ALERTS_TTL_S).get("entity") or []:
+        a = ent.get("alert") or {}
+        title, body = _text(a.get("header_text")), _text(a.get("description_text"))
+        on_route = any(str(e.get("route_id")) == GTFS_ROUTE_ID for e in a.get("informed_entity") or [])
+        if not (on_route or "M2" in f"{title} {body}".upper().replace("-", "")):
+            continue
+        periods = a.get("active_period") or []
+        if periods and not any(
+            float(p.get("start") or 0) <= now <= float(p.get("end") or float("inf")) for p in periods
+        ):
+            continue
+        end = max((float(p["end"]) for p in periods if p.get("end")), default=None)
+        out.append({
+            # Stable across restarts, so the app can remember what was read.
+            "id": "m2-" + hashlib.sha1(f"{title}|{body}".encode()).hexdigest()[:12],
+            "title": title or "M2 notice",
+            "body": body,
+            "until": end,
+            "routes": [ROUTE_ID],
+            "source": "Longwood Collective",
+        })
+    return out
